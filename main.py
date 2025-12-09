@@ -1,19 +1,23 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
-import datetime
-
-# ========================================
-# DATABASE SESSION
-# ========================================
-from database import SessionLocal
-
-# ========================================
-# 🚀 ENABLE CORS FOR REACT FRONTEND
-# ========================================
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
+# ========================================
+# 🗄 DATABASE SETUP (REQUIRED FOR POSTGRES)
+# ========================================
+from database import Base, engine   # <-- NEW (important)
+
+# Create all tables in PostgreSQL automatically
+Base.metadata.create_all(bind=engine)   # <-- NEW (critical fix)
+
+# ========================================
+# 🚀 FASTAPI APP
+# ========================================
 app = FastAPI()
 
+# ========================================
+# 🌍 CORS (Allow frontend URLs)
+# ========================================
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -30,10 +34,11 @@ app.add_middleware(
 )
 
 # ========================================
-# 🔐 IMPORT AUTH ROUTER (Register + Login)
+# 🔐 AUTH ROUTES (Register + Login)
 # ========================================
 from auth_routes import router as auth_router
-app.include_router(auth_router)
+app.include_router(auth_router, prefix="")      # Exposes /login and /register
+
 
 # ========================================
 # ❤️ HEALTH CHECK
@@ -42,9 +47,9 @@ app.include_router(auth_router)
 def health():
     return {"ok": True, "status": "API running"}
 
+
 # ========================================
-# TEMP SENSOR ENDPOINT PLACEHOLDER
-# (until real device backend is restored)
+# 📡 TEMP SENSOR ENDPOINT PLACEHOLDER
 # ========================================
 class SensorUpdate(BaseModel):
     imei: str
@@ -52,10 +57,12 @@ class SensorUpdate(BaseModel):
     temperature: float
     battery: float
 
+
 @app.post("/api/update")
 def update_sensor(data: SensorUpdate):
     print("Sensor received:", data)
     return {"status": "received", "imei": data.imei}
+
 
 @app.get("/devices")
 def list_devices():
