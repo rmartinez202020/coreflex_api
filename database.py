@@ -1,21 +1,21 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from models import Base
+from sqlalchemy.orm import sessionmaker, declarative_base
+import os
 
-# SQLite database file
-SQLALCHEMY_DATABASE_URL = "sqlite:///./coreflex.db"
+# Load the DATABASE_URL from Render environment variables
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Create the engine
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}
-)
+if not DATABASE_URL:
+    raise Exception("DATABASE_URL is not set!")
 
-# Create session factory
+# Required for PostgreSQL: Render uses async SSL but SQLAlchemy handles it
+engine = create_engine(DATABASE_URL)
+
+# Create a session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Create database tables if needed
-Base.metadata.create_all(bind=engine)
+# Base class for models
+Base = declarative_base()
 
 # Dependency for FastAPI routes
 def get_db():
