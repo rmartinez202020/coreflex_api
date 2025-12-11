@@ -3,31 +3,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ========================================
-# 🗄 DATABASE SETUP (REQUIRED FOR POSTGRES)
+# 🗄 DATABASE SETUP
 # ========================================
-# IMPORTANT: import models FIRST so SQLAlchemy registers tables
-from models import User          # <-- CRITICAL LINE
 from database import Base, engine
+
+# *** THIS IS CRITICAL ***
+# Import models so SQLAlchemy knows about them
+import models   # <-- REQUIRED
+
 
 # ========================================
 # 🚀 FASTAPI APP
 # ========================================
 app = FastAPI()
 
+
 # ========================================
-# 🗄 CREATE TABLES ON STARTUP  (CRITICAL FIX)
+# 🗄 CREATE TABLES ON STARTUP
 # ========================================
 @app.on_event("startup")
 def create_tables():
     print(">>> Creating database tables...")
-    try:
-        Base.metadata.create_all(bind=engine)
-        print(">>> Tables created successfully.")
-    except Exception as e:
-        print("❌ TABLE CREATION FAILED:", e)
+    Base.metadata.create_all(bind=engine)
+    print(">>> Tables created successfully.")
+
 
 # ========================================
-# 🌍 CORS (Allow frontend URLs)
+# 🌍 CORS
 # ========================================
 origins = [
     "http://localhost:5173",
@@ -44,11 +46,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ========================================
-# 🔐 AUTH ROUTES (Register + Login)
+# 🔐 AUTH ROUTES
 # ========================================
 from auth_routes import router as auth_router
-app.include_router(auth_router)       # exposes /login and /register
+app.include_router(auth_router)
+
 
 # ========================================
 # ❤️ HEALTH CHECK
@@ -57,8 +61,9 @@ app.include_router(auth_router)       # exposes /login and /register
 def health():
     return {"ok": True, "status": "API running"}
 
+
 # ========================================
-# 📡 TEMP SENSOR ENDPOINT PLACEHOLDER
+# 📡 TEMP SENSOR ENDPOINT
 # ========================================
 class SensorUpdate(BaseModel):
     imei: str
@@ -66,10 +71,12 @@ class SensorUpdate(BaseModel):
     temperature: float
     battery: float
 
+
 @app.post("/api/update")
 def update_sensor(data: SensorUpdate):
     print("Sensor received:", data)
     return {"status": "received", "imei": data.imei}
+
 
 @app.get("/devices")
 def list_devices():
