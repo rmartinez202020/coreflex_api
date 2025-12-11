@@ -3,12 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ========================================
-# 🗄 DATABASE SETUP
+# 🗄 IMPORT MODELS FIRST (CRITICAL)
 # ========================================
+import models                     # <-- MUST be imported before Base.metadata
 from database import Base, engine
-
-# *** CRITICAL ***
-import models  # <-- MUST LOAD MODELS BEFORE create_all()
 
 
 # ========================================
@@ -21,16 +19,14 @@ app = FastAPI()
 # 🗄 CREATE TABLES ON STARTUP
 # ========================================
 @app.on_event("startup")
-def create_tables():
-    print(">>> Importing models...")
-    import models  # <-- ensures models always load
-    print(">>> Creating database tables...")
+def startup_event():
+    print(">>> Loading models and creating tables...")
     Base.metadata.create_all(bind=engine)
-    print(">>> Tables created successfully.")
+    print(">>> Tables created successfully!")
 
 
 # ========================================
-# 🌍 CORS
+# 🌍 CORS SETTINGS
 # ========================================
 origins = [
     "http://localhost:5173",
@@ -49,7 +45,7 @@ app.add_middleware(
 
 
 # ========================================
-# 🔐 AUTH ROUTES  (MOVED BELOW STARTUP)
+# 🔐 AUTH ROUTES  (LOAD AFTER STARTUP DECLARATION)
 # ========================================
 from auth_routes import router as auth_router
 app.include_router(auth_router)
