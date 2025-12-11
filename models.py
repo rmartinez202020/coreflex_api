@@ -1,9 +1,9 @@
 # models.py
 from sqlalchemy import Column, Integer, String, Float, DateTime
-from sqlalchemy.orm import declarative_base
 import datetime
 
-Base = declarative_base()
+# ✅ Import the SAME Base used by database.py
+from database import Base
 
 # ===============================
 # 👤 USER MODEL (Authentication)
@@ -12,8 +12,8 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)             # Full name
-    company = Column(String, nullable=True)           # Optional company
+    name = Column(String, nullable=False)
+    company = Column(String, nullable=True)
     email = Column(String, nullable=False, unique=True, index=True)
     hashed_password = Column(String, nullable=False)
 
