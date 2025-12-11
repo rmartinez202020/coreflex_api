@@ -18,34 +18,45 @@ class RegisterRequest(BaseModel):
     password: str
     company: str | None = None
 
+
 class LoginRequest(BaseModel):
     email: str
     password: str
 
 
 # -------------------------------
-# REGISTER USER
+# REGISTER USER (with full debugging)
 # -------------------------------
 @router.post("/register")
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
-    # Check if email exists
-    user_exists = db.query(User).filter(User.email == request.email).first()
-    if user_exists:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    try:
+        print(">>> Register request received:", request)
 
-    # Create new user
-    new_user = User(
-        name=request.name,
-        company=request.company,
-        email=request.email,
-        hashed_password=hash_password(request.password),
-    )
+        # Check if email exists
+        user_exists = db.query(User).filter(User.email == request.email).first()
+        if user_exists:
+            raise HTTPException(status_code=400, detail="Email already registered")
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+        # Create new user
+        new_user = User(
+            name=request.name,
+            company=request.company,
+            email=request.email,
+            hashed_password=hash_password(request.password),
+        )
 
-    return {"message": "User created successfully"}
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+
+        print(">>> User created successfully:", new_user.id)
+
+        return {"message": "User created successfully"}
+
+    except Exception as e:
+        print("🔥🔥 REGISTER ERROR:", e)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
 
 
 # -------------------------------
@@ -53,14 +64,23 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
 # -------------------------------
 @router.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
-    # Find user
-    user = db.query(User).filter(User.email == request.email).first()
+    try:
+        print(">>> Login attempt for:", request.email)
 
-    # Validate credentials
-    if not user or not verify_password(request.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        # Find user
+        user = db.query(User).filter(User.email == request.email).first()
 
-    # Generate JWT token
-    token = create_access_token({"sub": user.email})
+        # Validate credentials
+        if not user or not verify_password(request.password, user.hashed_password):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    return {"access_token": token, "token_type": "bearer"}
+        # Generate JWT token
+        token = create_access_token({"sub": user.email})
+
+        print(">>> Login successful for:", request.email)
+
+        return {"access_token": token, "token_type": "bearer"}
+
+    except Exception as e:
+        print("🔥🔥 LOGIN ERROR:", e)
+        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
