@@ -5,7 +5,7 @@ from pydantic import BaseModel
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
 # ========================================
-import models                     # <-- MUST be imported before Base.metadata
+import models                     # Load models before Base metadata
 from database import Base, engine
 
 
@@ -16,13 +16,18 @@ app = FastAPI()
 
 
 # ========================================
-# 🗄 CREATE TABLES ON STARTUP
+# 🗄 FORCE TABLE CREATION BEFORE EVERY REQUEST
+#   (Fix for Render Free tier shutdown)
 # ========================================
-@app.on_event("startup")
-def startup_event():
-    print(">>> Loading models and creating tables...")
-    Base.metadata.create_all(bind=engine)
-    print(">>> Tables created successfully!")
+@app.middleware("http")
+async def ensure_tables_exist(request, call_next):
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        print("❌ Error creating tables:", e)
+
+    response = await call_next(request)
+    return response
 
 
 # ========================================
@@ -45,7 +50,7 @@ app.add_middleware(
 
 
 # ========================================
-# 🔐 AUTH ROUTES  (LOAD AFTER STARTUP DECLARATION)
+# 🔐 AUTH ROUTES
 # ========================================
 from auth_routes import router as auth_router
 app.include_router(auth_router)

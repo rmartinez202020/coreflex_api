@@ -2,7 +2,7 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime
 import datetime
 
-# ✅ Import the SAME Base used by database.py
+# ✅ Import the SAME Base object from database.py
 from database import Base
 
 # ===============================
@@ -12,10 +12,13 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    company = Column(String, nullable=True)
-    email = Column(String, nullable=False, unique=True, index=True)
-    hashed_password = Column(String, nullable=False)
+    name = Column(String(120), nullable=False)
+    company = Column(String(120), nullable=True)
+    email = Column(String(120), nullable=False, unique=True, index=True)
+
+    # ✅ MUST LIMIT LENGTH — bcrypt hashes are 60 bytes
+    #    Give extra room, but enforce safe max
+    hashed_password = Column(String(128), nullable=False)
 
 
 # ===============================
@@ -24,7 +27,7 @@ class User(Base):
 class Device(Base):
     __tablename__ = "devices"
 
-    imei = Column(String, primary_key=True)
+    imei = Column(String(50), primary_key=True)
     level = Column(Float)
     temperature = Column(Float)
     battery = Column(Float)
