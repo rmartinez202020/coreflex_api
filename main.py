@@ -7,9 +7,8 @@ from pydantic import BaseModel
 # ========================================
 from database import Base, engine
 
-# *** THIS IS CRITICAL ***
-# Import models so SQLAlchemy knows about them
-import models   # <-- REQUIRED
+# *** CRITICAL ***
+import models  # <-- MUST LOAD MODELS BEFORE create_all()
 
 
 # ========================================
@@ -23,6 +22,8 @@ app = FastAPI()
 # ========================================
 @app.on_event("startup")
 def create_tables():
+    print(">>> Importing models...")
+    import models  # <-- ensures models always load
     print(">>> Creating database tables...")
     Base.metadata.create_all(bind=engine)
     print(">>> Tables created successfully.")
@@ -48,7 +49,7 @@ app.add_middleware(
 
 
 # ========================================
-# 🔐 AUTH ROUTES
+# 🔐 AUTH ROUTES  (MOVED BELOW STARTUP)
 # ========================================
 from auth_routes import router as auth_router
 app.include_router(auth_router)
