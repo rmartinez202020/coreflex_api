@@ -7,7 +7,11 @@ from models import User
 from auth_utils import hash_password, verify_password
 from jwt_handler import create_access_token
 
-router = APIRouter()
+# ✅ ADD PREFIX HERE
+router = APIRouter(
+    prefix="/auth",
+    tags=["auth"]
+)
 
 # -------------------------------
 # REQUEST MODELS
@@ -25,7 +29,7 @@ class LoginRequest(BaseModel):
 
 
 # -------------------------------
-# REGISTER USER (with full debugging)
+# REGISTER USER
 # -------------------------------
 @router.post("/register")
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
@@ -67,19 +71,19 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     try:
         print(">>> Login attempt for:", request.email)
 
-        # Find user
         user = db.query(User).filter(User.email == request.email).first()
 
-        # Validate credentials
         if not user or not verify_password(request.password, user.hashed_password):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        # Generate JWT token
         token = create_access_token({"sub": user.email})
 
         print(">>> Login successful for:", request.email)
 
-        return {"access_token": token, "token_type": "bearer"}
+        return {
+            "access_token": token,
+            "token_type": "bearer"
+        }
 
     except Exception as e:
         print("🔥🔥 LOGIN ERROR:", e)
