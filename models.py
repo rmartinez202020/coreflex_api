@@ -1,5 +1,7 @@
 # models.py
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.sql import func
 import datetime
 
 # ✅ Import the SAME Base object from database.py
@@ -16,8 +18,7 @@ class User(Base):
     company = Column(String(120), nullable=True)
     email = Column(String(120), nullable=False, unique=True, index=True)
 
-    # ✅ MUST LIMIT LENGTH — bcrypt hashes are 60 bytes
-    #    Give extra room, but enforce safe max
+    # ✅ bcrypt hashes are ~60 chars, give safe room
     hashed_password = Column(String(128), nullable=False)
 
 
@@ -32,3 +33,28 @@ class Device(Base):
     temperature = Column(Float)
     battery = Column(Float)
     last_update = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+# ===============================
+# 📊 MAIN DASHBOARD MODEL (NEW)
+# ===============================
+class MainDashboard(Base):
+    __tablename__ = "main_dashboard"
+
+    # 🔑 One dashboard per user (for now)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True
+    )
+
+    # 🧱 Full dashboard layout (React canvas state)
+    layout = Column(JSONB, nullable=False)
+
+    # 🕒 Auto-updated timestamp
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now()
+    )
