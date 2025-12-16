@@ -12,7 +12,10 @@ from database import Base, engine
 # ========================================
 # 🚀 FASTAPI APP
 # ========================================
-app = FastAPI()
+app = FastAPI(
+    title="CoreFlex API",
+    version="1.0.0"
+)
 
 
 # ========================================
@@ -57,7 +60,7 @@ app.include_router(auth_router)
 
 
 # ========================================
-# 📊 MAIN DASHBOARD ROUTES  ✅ NEW
+# 📊 MAIN DASHBOARD ROUTES
 # ========================================
 from routers.main_dashboard import router as main_dashboard_router
 app.include_router(main_dashboard_router)
@@ -68,7 +71,10 @@ app.include_router(main_dashboard_router)
 # ========================================
 @app.get("/health")
 def health():
-    return {"ok": True, "status": "API running"}
+    return {
+        "ok": True,
+        "status": "API running"
+    }
 
 
 # ========================================
@@ -84,9 +90,14 @@ class SensorUpdate(BaseModel):
 @app.post("/api/update")
 def update_sensor(data: SensorUpdate):
     print("Sensor received:", data)
-    return {"status": "received", "imei": data.imei}
+    return {
+        "status": "received",
+        "imei": data.imei
+    }
 
 
 @app.get("/devices")
 def list_devices():
-    return {"message": "Device database not enabled"}
+    return {
+        "message": "Device database not enabled"
+    }
