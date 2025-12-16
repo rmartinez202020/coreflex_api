@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Any, Dict
+from datetime import datetime
 
 from database import get_db
 from models import User, MainDashboard
@@ -15,8 +16,12 @@ router = APIRouter(
 # =========================
 # 📦 Request Schema
 # =========================
+# Accept FULL dashboard object (not just layout)
 class MainDashboardSaveRequest(BaseModel):
-    layout: Dict[str, Any]
+    version: str
+    type: str
+    canvas: Dict[str, Any]
+    meta: Dict[str, Any]
 
 
 # =========================
@@ -35,18 +40,21 @@ def save_main_dashboard(
             .first()
         )
 
+        dashboard_data = payload.model_dump()
+
         if record:
-            record.layout = payload.layout
+            record.layout = dashboard_data
+            record.updated_at = datetime.utcnow()
         else:
             record = MainDashboard(
                 user_id=current_user.id,
-                layout=payload.layout,
+                layout=dashboard_data,
             )
             db.add(record)
 
         db.commit()
 
-        return {"status": "saved"}
+        return {"success": True}
 
     except Exception as e:
         print("❌ SAVE MAIN DASHBOARD ERROR:", e)
@@ -70,5 +78,4 @@ def load_main_dashboard(
     if not record:
         return {"layout": None}
 
-    return {"layout": record.layout}
-
+    return record.layout
