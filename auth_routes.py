@@ -7,11 +7,7 @@ from models import User
 from auth_utils import hash_password, verify_password
 from jwt_handler import create_access_token
 
-# ✅ ADD PREFIX HERE
-router = APIRouter(
-    prefix="/auth",
-    tags=["auth"]
-)
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 # -------------------------------
 # REQUEST MODELS
@@ -34,14 +30,10 @@ class LoginRequest(BaseModel):
 @router.post("/register")
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
     try:
-        print(">>> Register request received:", request)
-
-        # Check if email exists
         user_exists = db.query(User).filter(User.email == request.email).first()
         if user_exists:
             raise HTTPException(status_code=400, detail="Email already registered")
 
-        # Create new user
         new_user = User(
             name=request.name,
             company=request.company,
@@ -53,23 +45,23 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(new_user)
 
-        print(">>> User created successfully:", new_user.id)
-
         return {"message": "User created successfully"}
 
+    except HTTPException:
+        raise  # ✅ let FastAPI handle it
+
     except Exception as e:
-        print("🔥🔥 REGISTER ERROR:", e)
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+        print("🔥 REGISTER ERROR:", e)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------
-# LOGIN USER
+# LOGIN USER (FIXED)
 # -------------------------------
 @router.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
     try:
-        print(">>> Login attempt for:", request.email)
+        print(">>> Login attempt:", request.email)
 
         user = db.query(User).filter(User.email == request.email).first()
 
@@ -78,13 +70,14 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
 
         token = create_access_token({"sub": user.email})
 
-        print(">>> Login successful for:", request.email)
-
         return {
             "access_token": token,
-            "token_type": "bearer"
+            "token_type": "bearer",
         }
 
+    except HTTPException:
+        raise  # ✅ THIS IS THE FIX
+
     except Exception as e:
-        print("🔥🔥 LOGIN ERROR:", e)
-        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+        print("🔥 LOGIN ERROR:", e)
+        raise HTTPException(status_code=500, detail="Internal server error")

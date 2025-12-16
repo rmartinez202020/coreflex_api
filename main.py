@@ -57,6 +57,13 @@ app.include_router(auth_router)
 
 
 # ========================================
+# 📊 MAIN DASHBOARD ROUTES  ✅ NEW
+# ========================================
+from routers.main_dashboard import router as main_dashboard_router
+app.include_router(main_dashboard_router)
+
+
+# ========================================
 # ❤️ HEALTH CHECK
 # ========================================
 @app.get("/health")
