@@ -44,11 +44,13 @@ def save_main_dashboard(
 
         if record:
             record.layout = dashboard_data
+            # 🔥 Always store UTC
             record.updated_at = datetime.utcnow()
         else:
             record = MainDashboard(
                 user_id=current_user.id,
                 layout=dashboard_data,
+                updated_at=datetime.utcnow(),
             )
             db.add(record)
 
@@ -76,6 +78,13 @@ def load_main_dashboard(
     )
 
     if not record:
-        return {"layout": None}
+        return {
+            "layout": None,
+            "updated_at": None,
+        }
 
-    return record.layout
+    return {
+        "layout": record.layout,
+        # 🔥 Send ISO string → frontend converts to user's local time
+        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+    }
