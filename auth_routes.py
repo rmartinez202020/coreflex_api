@@ -1,3 +1,5 @@
+# auth_routes.py
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -8,6 +10,7 @@ from auth_utils import hash_password, verify_password
 from jwt_handler import create_access_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
 
 # -------------------------------
 # REQUEST MODELS
@@ -56,7 +59,7 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
 
 
 # -------------------------------
-# LOGIN USER (FIXED)
+# LOGIN USER (UPDATED)
 # -------------------------------
 @router.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
@@ -68,7 +71,14 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         if not user or not verify_password(request.password, user.hashed_password):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        token = create_access_token({"sub": user.email})
+        # ✅ IMPORTANT: include BOTH email and user_id in token
+        # This lets the frontend safely detect user changes and reset state.
+        token = create_access_token(
+            {
+                "sub": user.email,
+                "user_id": user.id,
+            }
+        )
 
         return {
             "access_token": token,
@@ -76,7 +86,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         }
 
     except HTTPException:
-        raise  # ✅ THIS IS THE FIX
+        raise  # ✅ let FastAPI handle it
 
     except Exception as e:
         print("🔥 LOGIN ERROR:", e)
