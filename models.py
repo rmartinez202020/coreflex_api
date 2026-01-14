@@ -8,6 +8,7 @@ import datetime
 # ✅ Import the SAME Base object from database.py
 from database import Base
 
+
 # ===============================
 # 👤 USER MODEL (Authentication)
 # ===============================
@@ -27,6 +28,14 @@ class User(Base):
         "UserProfile",
         back_populates="user",
         uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    # ✅ one user -> many customer locations
+    customer_locations = relationship(
+        "CustomerLocation",
+        back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
@@ -52,7 +61,10 @@ class UserProfile(Base):
 
     full_name = Column(String(120), nullable=True)
     role_position = Column(String(120), nullable=True)
+
+    # NOTE: This is profile email (can differ from login email if you want)
     email = Column(String(200), nullable=True)
+
     company = Column(String(160), nullable=True)
     company_address = Column(String(240), nullable=True)
 
@@ -72,6 +84,55 @@ class UserProfile(Base):
 
 
 # ===============================
+# 🏢 CUSTOMER / LOCATION MODEL (NEW)
+# Each user can save many customer sites.
+# Future: can be linked to dashboards + map pins.
+# ===============================
+class CustomerLocation(Base):
+    __tablename__ = "customer_locations"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # 🔑 owner user (who created this location)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Basic customer/site info
+    customer_name = Column(String(160), nullable=False)
+    site_name = Column(String(160), nullable=False)
+
+    # Address fields
+    street = Column(String(200), nullable=False)
+    city = Column(String(120), nullable=False)
+    state = Column(String(120), nullable=False)
+    zip = Column(String(30), nullable=False)
+    country = Column(String(120), nullable=False, server_default="United States")
+
+    # Optional notes + future map support
+    notes = Column(String(500), nullable=True)
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User", back_populates="customer_locations")
+
+
+# ===============================
 # 📡 DEVICE MODEL (Telemetry)
 # ===============================
 class Device(Base):
@@ -85,7 +146,7 @@ class Device(Base):
 
 
 # ===============================
-# 📊 MAIN DASHBOARD MODEL (NEW)
+# 📊 MAIN DASHBOARD MODEL
 # ===============================
 class MainDashboard(Base):
     __tablename__ = "main_dashboard"
@@ -95,7 +156,7 @@ class MainDashboard(Base):
         Integer,
         ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True,
-        index=True
+        index=True,
     )
 
     # 🧱 Full dashboard layout (React canvas state)
@@ -105,5 +166,5 @@ class MainDashboard(Base):
     updated_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
-        onupdate=func.now()
+        onupdate=func.now(),
     )

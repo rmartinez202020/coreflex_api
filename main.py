@@ -1,3 +1,4 @@
+# main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -67,10 +68,17 @@ app.include_router(main_dashboard_router)
 
 
 # ========================================
-# 👤 USER PROFILE ROUTES (NEW)
+# 👤 USER PROFILE ROUTES
 # ========================================
 from routers.user_profile import router as user_profile_router
 app.include_router(user_profile_router)
+
+
+# ========================================
+# 📍 CUSTOMER LOCATIONS ROUTES (NEW)
+# ========================================
+from routers.customer_locations import router as customer_locations_router
+app.include_router(customer_locations_router)
 
 
 # ========================================
