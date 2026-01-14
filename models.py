@@ -2,6 +2,7 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 import datetime
 
 # ✅ Import the SAME Base object from database.py
@@ -20,6 +21,54 @@ class User(Base):
 
     # ✅ bcrypt hashes are ~60 chars, give safe room
     hashed_password = Column(String(128), nullable=False)
+
+    # ✅ optional: convenient 1-to-1 relationship to profile
+    profile = relationship(
+        "UserProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+# ===============================
+# 🧾 USER PROFILE (Optional info)
+# Saved ONLY when user clicks Save Changes
+# ===============================
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # ✅ One profile per user
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    full_name = Column(String(120), nullable=True)
+    role_position = Column(String(120), nullable=True)
+    email = Column(String(200), nullable=True)
+    company = Column(String(160), nullable=True)
+    company_address = Column(String(240), nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User", back_populates="profile")
 
 
 # ===============================

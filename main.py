@@ -5,7 +5,7 @@ from pydantic import BaseModel
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
 # ========================================
-import models                     # Load models before Base metadata
+import models  # Load models before Base metadata (registers tables)
 from database import Base, engine
 
 
@@ -64,6 +64,13 @@ app.include_router(auth_router)
 # ========================================
 from routers.main_dashboard import router as main_dashboard_router
 app.include_router(main_dashboard_router)
+
+
+# ========================================
+# 👤 USER PROFILE ROUTES (NEW)
+# ========================================
+from routers.user_profile import router as user_profile_router
+app.include_router(user_profile_router)
 
 
 # ========================================
