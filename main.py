@@ -42,15 +42,25 @@ origins = [
     "http://127.0.0.1:5173",
     "https://coreflexiiotsplatform.com",
     "https://www.coreflexiiotsplatform.com",
+
+    # ✅ Add your Render service domain too (safe + helps some deployments)
+    "https://coreflex-api.onrender.com",
+    "https://coreflex-api-*.onrender.com",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],   # ✅ allows PUT/DELETE
     allow_headers=["*"],
 )
+
+
+# ✅ (Optional but helpful) explicit preflight response
+@app.options("/{full_path:path}")
+def preflight(full_path: str):
+    return {"ok": True}
 
 
 # ========================================
