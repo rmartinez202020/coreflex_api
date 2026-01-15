@@ -8,7 +8,7 @@ from database import get_db
 from models import CustomerLocation, User
 from auth_utils import get_current_user
 
-# ✅ our backend geocoder helpers
+# ✅ backend geocoder helpers
 from utils import geocode_address, build_address_string
 
 router = APIRouter(prefix="/customer-locations", tags=["Customer Locations"])
@@ -48,7 +48,7 @@ class CustomerLocationOut(BaseModel):
     lat: Optional[float] = None
     lng: Optional[float] = None
 
-    # New fields (you added columns in Postgres)
+    # Columns in Postgres
     geocode_status: Optional[str] = None
     geocoded_at: Optional[datetime] = None
 
@@ -64,9 +64,6 @@ def _norm(s: Optional[str]) -> str:
 
 
 def _address_changed(row: CustomerLocation, body: CustomerLocationCreate) -> bool:
-    """
-    Decide if we should re-geocode because address fields changed.
-    """
     return any(
         [
             _norm(row.street) != _norm(body.street),
@@ -92,8 +89,10 @@ def _apply_body(row: CustomerLocation, body: CustomerLocationCreate) -> None:
 def _maybe_geocode(row: CustomerLocation, force: bool = False) -> None:
     """
     Geocode using backend service and store results.
-    - Only overwrite lat/lng if geocode succeeds.
-    - Always update geocode_status + geocoded_at.
+
+    IMPORTANT:
+    - Geocoding must NEVER crash create/update.
+    - If geocode fails, we keep lat/lng as-is and mark status="error".
     """
     addr = build_address_string(
         {
@@ -115,21 +114,29 @@ def _maybe_geocode(row: CustomerLocation, force: bool = False) -> None:
     if not force and row.lat is not None and row.lng is not None:
         return
 
-    lat, lng, status, display_name = geocode_address(addr)
+    try:
+        lat, lng, status, display_name = geocode_address(addr)
+        row.geocode_status = status
+        row.geocoded_at = datetime.utcnow()
 
-    row.geocode_status = status
-    row.geocoded_at = datetime.utcnow()
-
-    if status == "ok" and lat is not None and lng is not None:
-        row.lat = lat
-        row.lng = lng
-    # else: keep existing lat/lng if geocode fails
+        if status == "ok" and lat is not None and lng is not None:
+            row.lat = lat
+            row.lng = lng
+        # else: keep existing lat/lng if geocode fails
+    except Exception as e:
+        # ✅ Never crash the request because geocoding failed
+        print("❌ Geocode failed:", repr(e))
+        row.geocode_status = "error"
+        row.geocoded_at = datetime.utcnow()
+        # keep any existing lat/lng
 
 
 # =========================
 # ✅ LIST (current user only)
+# Support both /customer-locations and /customer-locations/
 # =========================
 @router.get("", response_model=List[CustomerLocationOut])
+@router.get("/", response_model=List[CustomerLocationOut], include_in_schema=False)
 def list_customer_locations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -144,8 +151,10 @@ def list_customer_locations(
 
 # =========================
 # ✅ CREATE (current user)
+# Support both /customer-locations and /customer-locations/
 # =========================
 @router.post("", response_model=CustomerLocationOut)
+@router.post("/", response_model=CustomerLocationOut, include_in_schema=False)
 def create_customer_location(
     body: CustomerLocationCreate,
     db: Session = Depends(get_db),
@@ -154,7 +163,8 @@ def create_customer_location(
     row = CustomerLocation(user_id=current_user.id)
     _apply_body(row, body)
 
-    # ✅ backend geocode on create
+    # ✅ Try geocode, but NEVER block saving if it fails
+    # Force on create because you want coords ASAP.
     _maybe_geocode(row, force=True)
 
     db.add(row)
@@ -182,7 +192,6 @@ def update_customer_location(
     if not row:
         raise HTTPException(status_code=404, detail="Customer location not found")
 
-    # detect if address changed BEFORE applying
     addr_changed = _address_changed(row, body)
 
     _apply_body(row, body)
