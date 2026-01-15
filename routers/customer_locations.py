@@ -28,7 +28,6 @@ class CustomerLocationCreate(BaseModel):
     notes: Optional[str] = None
 
     # Optional control:
-    # If True, forces geocoding even if we already have lat/lng
     force_geocode: Optional[bool] = False
 
 
@@ -44,11 +43,9 @@ class CustomerLocationOut(BaseModel):
     country: str
     notes: Optional[str] = None
 
-    # Saved in DB by backend geocoding
     lat: Optional[float] = None
     lng: Optional[float] = None
 
-    # Columns in Postgres
     geocode_status: Optional[str] = None
     geocoded_at: Optional[datetime] = None
 
@@ -89,29 +86,33 @@ def _apply_body(row: CustomerLocation, body: CustomerLocationCreate) -> None:
 def _maybe_geocode(row: CustomerLocation, force: bool = False) -> None:
     """
     Geocode using backend service and store results.
-
-    IMPORTANT:
-    - Geocoding must NEVER crash create/update.
-    - If geocode fails, we keep lat/lng as-is and mark status="error".
+    - Never crash create/update if geocode fails
+    - Only overwrite lat/lng if geocode succeeds
+    - Always update geocode_status + geocoded_at
     """
-    addr = build_address_string(
-        {
-            "street": row.street,
-            "city": row.city,
-            "state": row.state,
-            "zip": row.zip,
-            "country": row.country,
-        }
-    )
 
-    # If no address (shouldn't happen because fields are required)
-    if not addr.strip():
+    # If we already have coords and not forcing, skip
+    if not force and row.lat is not None and row.lng is not None:
+        return
+
+    try:
+        # ✅ build_address_string expects positional args (per your logs)
+        addr = build_address_string(
+            _norm(row.street),
+            _norm(row.city),
+            _norm(row.state),
+            _norm(row.zip),          # zip_code
+            _norm(row.country) or "United States",
+        )
+    except Exception as e:
+        print("❌ build_address_string failed:", repr(e))
         row.geocode_status = "error"
         row.geocoded_at = datetime.utcnow()
         return
 
-    # If we already have coords and not forcing, skip
-    if not force and row.lat is not None and row.lng is not None:
+    if not addr or not str(addr).strip():
+        row.geocode_status = "error"
+        row.geocoded_at = datetime.utcnow()
         return
 
     try:
@@ -123,9 +124,9 @@ def _maybe_geocode(row: CustomerLocation, force: bool = False) -> None:
             row.lat = lat
             row.lng = lng
         # else: keep existing lat/lng if geocode fails
+
     except Exception as e:
-        # ✅ Never crash the request because geocoding failed
-        print("❌ Geocode failed:", repr(e))
+        print("❌ geocode_address failed:", repr(e))
         row.geocode_status = "error"
         row.geocoded_at = datetime.utcnow()
         # keep any existing lat/lng
@@ -163,8 +164,7 @@ def create_customer_location(
     row = CustomerLocation(user_id=current_user.id)
     _apply_body(row, body)
 
-    # ✅ Try geocode, but NEVER block saving if it fails
-    # Force on create because you want coords ASAP.
+    # ✅ Geocode on create (but non-blocking)
     _maybe_geocode(row, force=True)
 
     db.add(row)
@@ -193,10 +193,8 @@ def update_customer_location(
         raise HTTPException(status_code=404, detail="Customer location not found")
 
     addr_changed = _address_changed(row, body)
-
     _apply_body(row, body)
 
-    # ✅ re-geocode only if address changed OR forced OR missing coords
     if body.force_geocode or addr_changed or row.lat is None or row.lng is None:
         _maybe_geocode(row, force=True)
 
