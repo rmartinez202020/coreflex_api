@@ -7,18 +7,13 @@ from pydantic import BaseModel
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
 # ========================================
-import models  # noqa: F401  (registers tables)
+import models  # noqa: F401
 from database import Base, engine
-
 
 # ========================================
 # 🚀 FASTAPI APP
 # ========================================
-app = FastAPI(
-    title="CoreFlex API",
-    version="1.0.0"
-)
-
+app = FastAPI(title="CoreFlex API", version="1.0.0")
 
 # ========================================
 # ✅ CREATE TABLES ON STARTUP (NOT PER REQUEST)
@@ -29,42 +24,30 @@ def on_startup():
         Base.metadata.create_all(bind=engine)
         print("✅ DB tables ensured on startup")
     except Exception as e:
-        print("❌ Startup DB create_all failed:", repr(e))
-
+        print("❌ Startup create_all failed:", repr(e))
 
 # ========================================
-# 🌍 CORS SETTINGS (ROBUST)
+# 🌍 CORS (TEMP: OPEN FOR DEBUGGING)
+# IMPORTANT: allow_credentials MUST be False with "*"
 # ========================================
-# Keep localhost explicit for dev
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
-
-# Use regex for production domains (handles www + no-www cleanly)
-# IMPORTANT: CORSMiddleware supports allow_origin_regex
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_origin_regex=r"^https://(www\.)?coreflexiiotsplatform\.com$",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 # ========================================
-# ✅ GLOBAL ERROR HANDLER (keeps responses clean)
+# ✅ GLOBAL ERROR HANDLER (so you SEE real errors)
 # ========================================
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    # This helps you see real backend errors in Render logs
     print("❌ Unhandled error:", repr(exc))
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal Server Error"},
+        content={"detail": "Internal Server Error", "error": repr(exc)},
     )
-
 
 # ========================================
 # 🔐 AUTH ROUTES
@@ -72,13 +55,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 from auth_routes import router as auth_router
 app.include_router(auth_router)
 
-
 # ========================================
 # 📊 MAIN DASHBOARD ROUTES
 # ========================================
 from routers.main_dashboard import router as main_dashboard_router
 app.include_router(main_dashboard_router)
-
 
 # ========================================
 # 👤 USER PROFILE ROUTES
@@ -86,13 +67,11 @@ app.include_router(main_dashboard_router)
 from routers.user_profile import router as user_profile_router
 app.include_router(user_profile_router)
 
-
 # ========================================
 # 📍 CUSTOMER LOCATIONS ROUTES
 # ========================================
 from routers.customer_locations import router as customer_locations_router
 app.include_router(customer_locations_router)
-
 
 # ========================================
 # ❤️ HEALTH CHECK
@@ -100,7 +79,6 @@ app.include_router(customer_locations_router)
 @app.get("/health")
 def health():
     return {"ok": True, "status": "API running"}
-
 
 # ========================================
 # 📡 TEMP SENSOR ENDPOINT
@@ -111,12 +89,10 @@ class SensorUpdate(BaseModel):
     temperature: float
     battery: float
 
-
 @app.post("/api/update")
 def update_sensor(data: SensorUpdate):
     print("Sensor received:", data)
     return {"status": "received", "imei": data.imei}
-
 
 @app.get("/devices")
 def list_devices():
