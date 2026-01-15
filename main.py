@@ -3,6 +3,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
@@ -27,13 +28,21 @@ def on_startup():
         print("❌ Startup create_all failed:", repr(e))
 
 # ========================================
-# 🌍 CORS (TEMP: OPEN FOR DEBUGGING)
-# IMPORTANT: allow_credentials MUST be False with "*"
+# 🌍 CORS (PRODUCTION SAFE)
+# - Explicit origins so browser ALWAYS receives CORS headers
+# - allow_credentials=True enables Authorization/Cookies if you use them
 # ========================================
+ALLOWED_ORIGINS = [
+    "https://coreflexiiotsplatform.com",
+    "https://www.coreflexiiotsplatform.com",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -43,34 +52,39 @@ app.add_middleware(
 # ========================================
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    # Logs in Render will show this
     print("❌ Unhandled error:", repr(exc))
     return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal Server Error", "error": repr(exc)},
+        status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "detail": "Internal Server Error",
+            "error": repr(exc),
+            "path": str(request.url.path),
+        },
     )
 
 # ========================================
 # 🔐 AUTH ROUTES
 # ========================================
-from auth_routes import router as auth_router
+from auth_routes import router as auth_router  # noqa: E402
 app.include_router(auth_router)
 
 # ========================================
 # 📊 MAIN DASHBOARD ROUTES
 # ========================================
-from routers.main_dashboard import router as main_dashboard_router
+from routers.main_dashboard import router as main_dashboard_router  # noqa: E402
 app.include_router(main_dashboard_router)
 
 # ========================================
 # 👤 USER PROFILE ROUTES
 # ========================================
-from routers.user_profile import router as user_profile_router
+from routers.user_profile import router as user_profile_router  # noqa: E402
 app.include_router(user_profile_router)
 
 # ========================================
 # 📍 CUSTOMER LOCATIONS ROUTES
 # ========================================
-from routers.customer_locations import router as customer_locations_router
+from routers.customer_locations import router as customer_locations_router  # noqa: E402
 app.include_router(customer_locations_router)
 
 # ========================================
@@ -79,6 +93,14 @@ app.include_router(customer_locations_router)
 @app.get("/health")
 def health():
     return {"ok": True, "status": "API running"}
+
+# ========================================
+# 🧪 CORS TEST ENDPOINT
+# Use this to confirm your deployed API is returning CORS headers
+# ========================================
+@app.get("/cors-test")
+def cors_test():
+    return {"ok": True, "message": "CORS working"}
 
 # ========================================
 # 📡 TEMP SENSOR ENDPOINT
