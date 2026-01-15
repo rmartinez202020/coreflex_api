@@ -27,6 +27,10 @@ class CustomerLocationCreate(BaseModel):
     country: Optional[str] = "United States"
     notes: Optional[str] = None
 
+    # ✅ NEW: Optional manual pin (free / reliable)
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
     # Optional control:
     force_geocode: Optional[bool] = False
 
@@ -82,6 +86,13 @@ def _apply_body(row: CustomerLocation, body: CustomerLocationCreate) -> None:
     row.country = _norm(body.country or "United States")
     row.notes = _norm(body.notes) if body.notes is not None else None
 
+    # ✅ If user pinned manually, persist coords and mark as manual
+    if body.lat is not None and body.lng is not None:
+        row.lat = float(body.lat)
+        row.lng = float(body.lng)
+        row.geocode_status = "manual"
+        row.geocoded_at = datetime.utcnow()
+
 
 def _maybe_geocode(row: CustomerLocation, force: bool = False) -> None:
     """
@@ -91,17 +102,21 @@ def _maybe_geocode(row: CustomerLocation, force: bool = False) -> None:
     - Always update geocode_status + geocoded_at
     """
 
+    # ✅ If user already pinned manually, never geocode over it
+    if row.geocode_status == "manual" and row.lat is not None and row.lng is not None:
+        return
+
     # If we already have coords and not forcing, skip
     if not force and row.lat is not None and row.lng is not None:
         return
 
     try:
-        # ✅ build_address_string expects positional args (per your logs)
+        # ✅ build_address_string expects positional args
         addr = build_address_string(
             _norm(row.street),
             _norm(row.city),
             _norm(row.state),
-            _norm(row.zip),          # zip_code
+            _norm(row.zip),  # zip_code
             _norm(row.country) or "United States",
         )
     except Exception as e:
@@ -164,8 +179,9 @@ def create_customer_location(
     row = CustomerLocation(user_id=current_user.id)
     _apply_body(row, body)
 
-    # ✅ Geocode on create (but non-blocking)
-    _maybe_geocode(row, force=True)
+    # ✅ If user didn't pin manually, try geocoding (non-blocking)
+    if row.lat is None or row.lng is None:
+        _maybe_geocode(row, force=True)
 
     db.add(row)
     db.commit()
@@ -195,8 +211,11 @@ def update_customer_location(
     addr_changed = _address_changed(row, body)
     _apply_body(row, body)
 
-    if body.force_geocode or addr_changed or row.lat is None or row.lng is None:
-        _maybe_geocode(row, force=True)
+    # ✅ If user pinned manually (lat/lng provided), DO NOT geocode
+    # Otherwise geocode when requested/changed/missing coords
+    if row.lat is None or row.lng is None:
+        if body.force_geocode or addr_changed:
+            _maybe_geocode(row, force=True)
 
     db.commit()
     db.refresh(row)
