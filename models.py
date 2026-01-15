@@ -84,7 +84,7 @@ class UserProfile(Base):
 
 
 # ===============================
-# 🏢 CUSTOMER / LOCATION MODEL (NEW)
+# 🏢 CUSTOMER / LOCATION MODEL
 # Each user can save many customer sites.
 # Future: can be linked to dashboards + map pins.
 # ===============================
@@ -112,10 +112,17 @@ class CustomerLocation(Base):
     zip = Column(String(30), nullable=False)
     country = Column(String(120), nullable=False, server_default="United States")
 
-    # Optional notes + future map support
+    # Optional notes
     notes = Column(String(500), nullable=True)
+
+    # ✅ Backend-geocoded coordinates (stored in DB)
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
+
+    # ✅ Geocode tracking (helps debug + avoids confusion)
+    # Examples: "ok", "no_results", "error"
+    geocode_status = Column(String(60), nullable=True)
+    geocoded_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(
         DateTime(timezone=True),
