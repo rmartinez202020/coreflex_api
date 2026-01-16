@@ -12,20 +12,35 @@ import models  # noqa: F401
 from database import Base, engine
 
 # ========================================
+# ☁️ CLOUDINARY INIT
+# ========================================
+from cloudinary_config import init_cloudinary  # noqa: E402
+
+# ========================================
 # 🚀 FASTAPI APP
 # ========================================
 app = FastAPI(title="CoreFlex API", version="1.0.0")
 
 # ========================================
-# ✅ CREATE TABLES ON STARTUP (NOT PER REQUEST)
+# ✅ CREATE TABLES + INIT CLOUDINARY ON STARTUP
 # ========================================
 @app.on_event("startup")
 def on_startup():
+    # 1) Ensure DB tables
     try:
         Base.metadata.create_all(bind=engine)
         print("✅ DB tables ensured on startup")
     except Exception as e:
         print("❌ Startup create_all failed:", repr(e))
+
+    # 2) Init Cloudinary (reads Render env vars)
+    try:
+        init_cloudinary()
+        print("✅ Cloudinary initialized on startup")
+    except Exception as e:
+        # Don't crash the whole app if Cloudinary is misconfigured;
+        # you will still see the error in Render logs.
+        print("❌ Cloudinary init failed:", repr(e))
 
 # ========================================
 # 🌍 CORS (PRODUCTION SAFE)

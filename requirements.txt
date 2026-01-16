@@ -8,3 +8,5 @@ psycopg2-binary
 bcrypt==4.1.2
 email-validator
 httpx
+cloudinary
+python-multipart
