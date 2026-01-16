@@ -88,3 +88,34 @@ def list_images(
         }
         for r in rows
     ]
+
+from cloudinary.uploader import destroy as cld_destroy
+
+@router.delete("/{image_id}")
+def delete_image(
+    image_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    # ✅ Find image row AND enforce per-user access
+    row = (
+        db.query(ImageAsset)
+        .filter(ImageAsset.id == image_id, ImageAsset.user_id == current_user.id)
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # ✅ Delete from Cloudinary first (best effort)
+    try:
+        cld_destroy(row.public_id, resource_type="image")
+    except Exception as e:
+        # If you prefer: still delete from DB even if Cloudinary fails
+        raise HTTPException(status_code=500, detail=f"Cloudinary delete failed: {repr(e)}")
+
+    # ✅ Delete from DB
+    db.delete(row)
+    db.commit()
+
+    return {"ok": True, "deleted_id": image_id}
