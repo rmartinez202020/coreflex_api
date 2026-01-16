@@ -40,6 +40,14 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ one user -> many image assets (Cloudinary library)
+    images = relationship(
+        "ImageAsset",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
 
 # ===============================
 # 🧾 USER PROFILE (Optional info)
@@ -137,6 +145,40 @@ class CustomerLocation(Base):
     )
 
     user = relationship("User", back_populates="customer_locations")
+
+
+# ===============================
+# 🖼 IMAGE ASSETS (Cloudinary)
+# Each user can store many images in their library.
+# Only URLs/public_ids are stored here (images live in Cloudinary).
+# ===============================
+class ImageAsset(Base):
+    __tablename__ = "image_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # 🔑 owner user (who uploaded it)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # ✅ Cloudinary info
+    url = Column(String(700), nullable=False)
+    public_id = Column(String(400), nullable=False, index=True)
+
+    # optional grouping/folder label
+    folder = Column(String(250), nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User", back_populates="images")
 
 
 # ===============================

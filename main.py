@@ -103,6 +103,12 @@ from routers.customer_locations import router as customer_locations_router  # no
 app.include_router(customer_locations_router)
 
 # ========================================
+# 🖼 IMAGES ROUTES (Cloudinary Image Library)
+# ========================================
+from routers.images import router as images_router  # noqa: E402
+app.include_router(images_router)
+
+# ========================================
 # ❤️ HEALTH CHECK
 # ========================================
 @app.get("/health")
