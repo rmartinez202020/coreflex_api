@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -22,6 +22,15 @@ class User(Base):
 
     # ✅ bcrypt hashes are ~60 chars, give safe room
     hashed_password = Column(String(128), nullable=False)
+
+    # 🔐 Control & Automation Terms Acceptance (REGISTER PAGE)
+    # NOTE: Use func.false() for a clean Postgres boolean default
+    accepted_control_terms = Column(Boolean, nullable=False, server_default=func.false())
+    control_terms_version = Column(String(20), nullable=True)
+    control_terms_accepted_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     # ✅ optional: convenient 1-to-1 relationship to profile
     profile = relationship(

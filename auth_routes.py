@@ -21,6 +21,10 @@ class RegisterRequest(BaseModel):
     password: str
     company: str | None = None
 
+    # ✅ NEW: control terms acceptance (must be true)
+    accepted_control_terms: bool
+    control_terms_version: str
+
 
 class LoginRequest(BaseModel):
     email: str
@@ -33,6 +37,13 @@ class LoginRequest(BaseModel):
 @router.post("/register")
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
     try:
+        # ✅ Enforce acceptance (protects you legally + technically)
+        if request.accepted_control_terms is not True:
+            raise HTTPException(
+                status_code=400,
+                detail="You must accept the Control & Automation Acknowledgment to create an account.",
+            )
+
         user_exists = db.query(User).filter(User.email == request.email).first()
         if user_exists:
             raise HTTPException(status_code=400, detail="Email already registered")
@@ -42,7 +53,17 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
             company=request.company,
             email=request.email,
             hashed_password=hash_password(request.password),
+
+            # 🔐 Store acceptance fields
+            accepted_control_terms=True,
+            control_terms_version=request.control_terms_version,
+            control_terms_accepted_at=None,  # will set below using DB time
         )
+
+        # ✅ Use DB timestamp (safer than app server time)
+        # Set on the instance before commit so it persists.
+        from sqlalchemy.sql import func
+        new_user.control_terms_accepted_at = func.now()
 
         db.add(new_user)
         db.commit()
