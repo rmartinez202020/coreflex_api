@@ -42,6 +42,7 @@ def on_startup():
         # you will still see the error in Render logs.
         print("❌ Cloudinary init failed:", repr(e))
 
+
 # ========================================
 # 🌍 CORS (PRODUCTION SAFE)
 # - Explicit origins so browser ALWAYS receives CORS headers
@@ -67,7 +68,6 @@ app.add_middleware(
 # ========================================
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    # Logs in Render will show this
     print("❌ Unhandled error:", repr(exc))
     return JSONResponse(
         status_code=HTTP_500_INTERNAL_SERVER_ERROR,
@@ -89,6 +89,14 @@ app.include_router(auth_router)
 # ========================================
 from routers.main_dashboard import router as main_dashboard_router  # noqa: E402
 app.include_router(main_dashboard_router)
+
+# ========================================
+# 🧩 CUSTOMER DASHBOARDS ROUTES
+# (table: customers_dashboards)
+# endpoints: /customers-dashboards/...
+# ========================================
+from routers.customers_dashboards import router as customers_dashboards_router  # noqa: E402
+app.include_router(customers_dashboards_router)
 
 # ========================================
 # 👤 USER PROFILE ROUTES

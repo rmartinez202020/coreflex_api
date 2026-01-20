@@ -57,6 +57,14 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ one user -> many customer dashboards
+    customer_dashboards = relationship(
+        "CustomerDashboard",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
 
 # ===============================
 # 🧾 USER PROFILE (Optional info)
@@ -226,3 +234,45 @@ class MainDashboard(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+# ===============================
+# 🧩 CUSTOMER DASHBOARDS
+# One user -> many customer dashboards (tenant isolated)
+# Table name = customers_dashboards
+# ===============================
+class CustomerDashboard(Base):
+    __tablename__ = "customers_dashboards"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # 🔑 owner user
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # customer label (for now store name; later migrate to customer_id)
+    customer_name = Column(String(160), nullable=False, index=True)
+
+    # dashboard display name
+    dashboard_name = Column(String(160), nullable=False)
+
+    # 🧱 saved layout (same style as main dashboard)
+    layout = Column(JSONB, nullable=False, default=dict)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User", back_populates="customer_dashboards")
