@@ -135,7 +135,9 @@ def list_customer_dashboards(
     )
 
     if customer_name:
-        q = q.filter(sa_func.lower(CustomerDashboard.customer_name) == customer_name.lower())
+        q = q.filter(
+            sa_func.lower(CustomerDashboard.customer_name) == customer_name.lower()
+        )
 
     return q.all()
 
@@ -187,3 +189,36 @@ def save_customer_dashboard(
     db.commit()
     db.refresh(row)
     return row
+
+
+# =========================
+# 🗑 DELETE DASHBOARD
+# =========================
+@router.delete("/{dashboard_id}")
+def delete_customer_dashboard(
+    dashboard_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    row = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.id == dashboard_id)
+        .filter(CustomerDashboard.user_id == current_user.id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Dashboard not found or not owned by user",
+        )
+
+    deleted_name = row.dashboard_name
+
+    db.delete(row)
+    db.commit()
+
+    return {
+        "ok": True,
+        "deleted_id": dashboard_id,
+        "dashboard_name": deleted_name,
+    }
