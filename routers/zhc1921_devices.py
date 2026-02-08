@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 
 from database import get_db
 from models import ZHC1921Device, User
@@ -17,7 +18,7 @@ class AddDeviceBody(BaseModel):
 
 
 def is_owner(user: User) -> bool:
-    return (user.email or "").lower() in {
+    return (user.email or "").lower().strip() in {
         "roquemartinez_8@hotmail.com",
     }
 
@@ -31,8 +32,7 @@ def to_row_for_table(r: ZHC1921Device):
     return {
         "deviceId": r.device_id,
 
-        # ✅ THIS IS THE KEY CHANGE:
-        # show date user claimed it (what you want)
+        # ✅ show date user claimed it (what you want)
         "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
 
         "ownedBy": r.claimed_by_email or "—",
@@ -128,25 +128,33 @@ def claim_zhc1921_device(
         raise HTTPException(status_code=404, detail="device_id not found (not authorized yet)")
 
     # already claimed by someone else
-    if row.claimed_by_user_id and row.claimed_by_user_id != current_user.id:
+    if row.claimed_by_user_id is not None and row.claimed_by_user_id != current_user.id:
         raise HTTPException(status_code=409, detail="device already claimed by another user")
 
-    # idempotent: if same user claims again, just return OK
+    # idempotent: if same user claims again, return OK
     if row.claimed_by_user_id == current_user.id:
-        return {"ok": True, "device_id": row.device_id, "claimed": True}
+        return {
+            "ok": True,
+            "device_id": row.device_id,
+            "claimed": True,
+            "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+        }
 
     # claim now
     row.claimed_by_user_id = current_user.id
-    row.claimed_by_email = (current_user.email or "").lower()
-    # claimed_at is a DateTime column; set to current server time
-    from sqlalchemy.sql import func
+    row.claimed_by_email = (current_user.email or "").lower().strip()
     row.claimed_at = func.now()
 
     db.add(row)
     db.commit()
     db.refresh(row)
 
-    return {"ok": True, "device_id": row.device_id, "claimed": True}
+    return {
+        "ok": True,
+        "device_id": row.device_id,
+        "claimed": True,
+        "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+    }
 
 
 # =========================================================

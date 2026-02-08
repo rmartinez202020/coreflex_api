@@ -1,15 +1,16 @@
 # main.py
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
+from sqlalchemy.orm import Session
 
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
 # ========================================
 import models  # noqa: F401
-from database import Base, engine
+from database import Base, engine, get_db
 
 # ========================================
 # ☁️ CLOUDINARY INIT
@@ -119,6 +120,8 @@ app.include_router(images_router)
 # endpoints:
 #   GET  /zhc1921/devices
 #   POST /zhc1921/devices
+#   POST /zhc1921/claim
+#   GET  /zhc1921/my-devices
 # ========================================
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
 app.include_router(zhc1921_router)
@@ -146,11 +149,54 @@ class SensorUpdate(BaseModel):
     temperature: float
     battery: float
 
+
 @app.post("/api/update")
 def update_sensor(data: SensorUpdate):
     print("Sensor received:", data)
     return {"status": "received", "imei": data.imei}
 
+
+# ========================================
+# ✅ /devices (FRONTEND COMPAT)
+# Your frontend already calls GET /devices.
+# We return the current user's CLAIMED devices (ZHC1921 for now).
+# ========================================
+from auth_utils import get_current_user  # noqa: E402
+from models import ZHC1921Device, User  # noqa: E402
+
+
 @app.get("/devices")
-def list_devices():
-    return {"message": "Device database not enabled"}
+def list_devices(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rows = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.claimed_by_user_id == current_user.id)
+        .order_by(ZHC1921Device.id.asc())
+        .all()
+    )
+
+    return [
+        {
+            "deviceId": r.device_id,
+            # ✅ date user added/claimed it (NOT the owner authorized date)
+            "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+            "ownedBy": r.claimed_by_email or "—",
+            "status": r.status or "offline",
+            "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
+            "in1": int(r.di1 or 0),
+            "in2": int(r.di2 or 0),
+            "in3": int(r.di3 or 0),
+            "in4": int(r.di4 or 0),
+            "do1": int(r.do1 or 0),
+            "do2": int(r.do2 or 0),
+            "do3": int(r.do3 or 0),
+            "do4": int(r.do4 or 0),
+            "ai1": r.ai1 if r.ai1 is not None else "",
+            "ai2": r.ai2 if r.ai2 is not None else "",
+            "ai3": r.ai3 if r.ai3 is not None else "",
+            "ai4": r.ai4 if r.ai4 is not None else "",
+        }
+        for r in rows
+    ]
