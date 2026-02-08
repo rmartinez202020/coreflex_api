@@ -23,6 +23,15 @@ def is_owner(user: User) -> bool:
     }
 
 
+def _normalize_device_id(device_id: str) -> str:
+    device_id = (device_id or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    if not device_id.isdigit():
+        raise HTTPException(status_code=400, detail="device_id must be numeric")
+    return device_id
+
+
 def to_row_for_table(r: ZHC1921Device):
     """
     ✅ Shape matches your frontend table columns.
@@ -84,14 +93,13 @@ def authorize_zhc1921_device(
     if not is_owner(current_user):
         raise HTTPException(status_code=403, detail="Owner only")
 
-    device_id = (body.device_id or "").strip()
-    if not device_id:
-        raise HTTPException(status_code=400, detail="device_id is required")
+    device_id = _normalize_device_id(body.device_id)
 
-    if not device_id.isdigit():
-        raise HTTPException(status_code=400, detail="device_id must be numeric")
-
-    exists = db.query(ZHC1921Device).filter(ZHC1921Device.device_id == device_id).first()
+    exists = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.device_id == device_id)
+        .first()
+    )
     if exists:
         raise HTTPException(status_code=409, detail="device already exists")
 
@@ -116,16 +124,18 @@ def claim_zhc1921_device(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    device_id = (body.device_id or "").strip()
-    if not device_id:
-        raise HTTPException(status_code=400, detail="device_id is required")
+    device_id = _normalize_device_id(body.device_id)
 
-    if not device_id.isdigit():
-        raise HTTPException(status_code=400, detail="device_id must be numeric")
-
-    row = db.query(ZHC1921Device).filter(ZHC1921Device.device_id == device_id).first()
+    row = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.device_id == device_id)
+        .first()
+    )
     if not row:
-        raise HTTPException(status_code=404, detail="device_id not found (not authorized yet)")
+        raise HTTPException(
+            status_code=404,
+            detail="device_id not found (not authorized yet)",
+        )
 
     # already claimed by someone else
     if row.claimed_by_user_id is not None and row.claimed_by_user_id != current_user.id:
@@ -155,6 +165,44 @@ def claim_zhc1921_device(
         "claimed": True,
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
     }
+
+
+# =========================================================
+# USER: unclaim (release) a device from MY account
+# - verifies device exists
+# - verifies it is claimed by THIS user
+# - clears claimed_by_user_id + claimed_by_email + claimed_at
+# =========================================================
+@router.delete("/unclaim/{device_id}")
+def unclaim_zhc1921_device(
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    device_id = _normalize_device_id(device_id)
+
+    row = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.device_id == device_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="device_id not found")
+
+    # must be claimed by THIS user
+    if row.claimed_by_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not own this device")
+
+    # unclaim
+    row.claimed_by_user_id = None
+    row.claimed_by_email = None
+    row.claimed_at = None
+
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    return {"ok": True, "device_id": device_id, "claimed": False}
 
 
 # =========================================================
