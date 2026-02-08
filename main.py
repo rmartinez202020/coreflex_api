@@ -92,8 +92,6 @@ app.include_router(main_dashboard_router)
 
 # ========================================
 # 🧩 CUSTOMER DASHBOARDS ROUTES
-# (table: customers_dashboards)
-# endpoints: /customers-dashboards/...
 # ========================================
 from routers.customers_dashboards import router as customers_dashboards_router  # noqa: E402
 app.include_router(customers_dashboards_router)
@@ -117,6 +115,15 @@ from routers.images import router as images_router  # noqa: E402
 app.include_router(images_router)
 
 # ========================================
+# ✅ ZHC1921 DEVICES ROUTES (Device Manager backend)
+# endpoints:
+#   GET  /zhc1921/devices
+#   POST /zhc1921/devices
+# ========================================
+from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
+app.include_router(zhc1921_router)
+
+# ========================================
 # ❤️ HEALTH CHECK
 # ========================================
 @app.get("/health")
@@ -125,7 +132,6 @@ def health():
 
 # ========================================
 # 🧪 CORS TEST ENDPOINT
-# Use this to confirm your deployed API is returning CORS headers
 # ========================================
 @app.get("/cors-test")
 def cors_test():

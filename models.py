@@ -65,6 +65,13 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ one user -> many claimed ZHC1921 devices
+    zhc1921_devices = relationship(
+        "ZHC1921Device",
+        back_populates="claimed_by_user",
+        passive_deletes=True,
+    )
+
 
 # ===============================
 # 🧾 USER PROFILE (Optional info)
@@ -209,6 +216,69 @@ class Device(Base):
     temperature = Column(Float)
     battery = Column(Float)
     last_update = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+# ===============================
+# 🧾 ZHC1921 DEVICES TABLE (CF-2000)
+# Authorized by OWNER, then claimed by a USER
+# Live DI/DO/AI/status updated by Node-RED later
+# ===============================
+class ZHC1921Device(Base):
+    __tablename__ = "zhc1921_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # ✅ owner adds this (unique)
+    device_id = Column(String(64), unique=True, nullable=False, index=True)
+
+    # ✅ when owner authorized/added
+    authorized_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # ✅ when any user claims/uses it
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+
+    claimed_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    claimed_by_email = Column(String(120), nullable=True, index=True)
+
+    # ✅ polled from Node-RED
+    status = Column(String(32), nullable=False, server_default="offline")
+    last_seen = Column(DateTime(timezone=True), nullable=True)
+
+    # Digital Inputs (DI)
+    di1 = Column(Integer, nullable=False, server_default="0")
+    di2 = Column(Integer, nullable=False, server_default="0")
+    di3 = Column(Integer, nullable=False, server_default="0")
+    di4 = Column(Integer, nullable=False, server_default="0")
+
+    # Digital Outputs (DO)
+    do1 = Column(Integer, nullable=False, server_default="0")
+    do2 = Column(Integer, nullable=False, server_default="0")
+    do3 = Column(Integer, nullable=False, server_default="0")
+    do4 = Column(Integer, nullable=False, server_default="0")
+
+    # Analog Inputs (AI)
+    ai1 = Column(Float, nullable=True)
+    ai2 = Column(Float, nullable=True)
+    ai3 = Column(Float, nullable=True)
+    ai4 = Column(Float, nullable=True)
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    claimed_by_user = relationship("User", back_populates="zhc1921_devices")
 
 
 # ===============================
