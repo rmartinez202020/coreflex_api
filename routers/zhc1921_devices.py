@@ -2,14 +2,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
 
 from database import get_db
 from models import ZHC1921Device, User
 
-# ✅ IMPORTANT FIX: get_current_user is NOT in auth_routes.py
-from jwt_handler import get_current_user
-
+# ✅ FIX: get_current_user lives in auth_utils.py in your project
+from auth_utils import get_current_user
 
 router = APIRouter(prefix="/zhc1921", tags=["ZHC1921 Devices"])
 
@@ -49,17 +47,14 @@ def list_zhc1921_devices(
             "ownedBy": r.claimed_by_email or "—",
             "status": r.status or "offline",
             "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
-
             "in1": int(r.di1 or 0),
             "in2": int(r.di2 or 0),
             "in3": int(r.di3 or 0),
             "in4": int(r.di4 or 0),
-
             "do1": int(r.do1 or 0),
             "do2": int(r.do2 or 0),
             "do3": int(r.do3 or 0),
             "do4": int(r.do4 or 0),
-
             "ai1": r.ai1 if r.ai1 is not None else "",
             "ai2": r.ai2 if r.ai2 is not None else "",
             "ai3": r.ai3 if r.ai3 is not None else "",
@@ -91,7 +86,11 @@ def add_zhc1921_device(
         raise HTTPException(status_code=400, detail="device_id must be numeric")
 
     # prevent duplicates
-    exists = db.query(ZHC1921Device).filter(ZHC1921Device.device_id == device_id).first()
+    exists = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.device_id == device_id)
+        .first()
+    )
     if exists:
         raise HTTPException(status_code=409, detail="device already exists")
 
