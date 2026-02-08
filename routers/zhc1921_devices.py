@@ -1,142 +1,103 @@
 # routers/zhc1921_devices.py
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
 from pydantic import BaseModel
-from typing import Optional, List
-import os
+from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from database import get_db
 from models import ZHC1921Device, User
-from auth_routes import get_current_user
+
+# ✅ IMPORTANT FIX: get_current_user is NOT in auth_routes.py
+from jwt_handler import get_current_user
+
 
 router = APIRouter(prefix="/zhc1921", tags=["ZHC1921 Devices"])
 
-# ✅ Owner email (same idea as frontend)
-PLATFORM_OWNER_EMAIL = os.getenv("PLATFORM_OWNER_EMAIL", "roquemartinez_8@hotmail.com").strip().lower()
 
-
-# -------------------
-# Schemas
-# -------------------
-class AddDeviceReq(BaseModel):
+class AddDeviceBody(BaseModel):
     device_id: str
 
 
-class Zhc1921RowOut(BaseModel):
-    deviceId: str
-    addedAt: Optional[str] = None
-    ownedBy: Optional[str] = None
-    status: str
-    lastSeen: Optional[str] = None
-
-    in1: int
-    in2: int
-    in3: int
-    in4: int
-
-    do1: int
-    do2: int
-    do3: int
-    do4: int
-
-    ai1: Optional[float] = None
-    ai2: Optional[float] = None
-    ai3: Optional[float] = None
-    ai4: Optional[float] = None
+def is_owner(user: User) -> bool:
+    # ✅ owner check: simplest rule for now (you can change later)
+    # Put YOUR OWNER email here:
+    return (user.email or "").lower() in {
+        "roquemartinez_8@hotmail.com",
+        # add more owner emails if needed
+    }
 
 
-# -------------------
-# Helpers
-# -------------------
-def require_owner(current_user: User):
-    email = (current_user.email or "").strip().lower()
-    if email != PLATFORM_OWNER_EMAIL:
+@router.get("/devices")
+def list_zhc1921_devices(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Owner sees the full ZHC1921 device table.
+    Non-owner can be restricted later (for now, owner-only).
+    """
+    if not is_owner(current_user):
         raise HTTPException(status_code=403, detail="Owner only")
 
+    rows = db.query(ZHC1921Device).order_by(ZHC1921Device.id.asc()).all()
 
-def dt_to_str(dt):
-    if not dt:
-        return None
-    # ISO is best for frontend
-    try:
-        return dt.isoformat()
-    except Exception:
-        return str(dt)
+    # return in the exact shape the frontend table expects
+    return [
+        {
+            "deviceId": r.device_id,
+            "addedAt": r.authorized_at.isoformat() if r.authorized_at else None,
+            "ownedBy": r.claimed_by_email or "—",
+            "status": r.status or "offline",
+            "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
 
+            "in1": int(r.di1 or 0),
+            "in2": int(r.di2 or 0),
+            "in3": int(r.di3 or 0),
+            "in4": int(r.di4 or 0),
 
-def row_to_out(r: ZHC1921Device) -> Zhc1921RowOut:
-    return Zhc1921RowOut(
-        deviceId=r.device_id,
-        addedAt=dt_to_str(r.authorized_at),
-        ownedBy=r.claimed_by_email or "—",
-        status=r.status or "offline",
-        lastSeen=dt_to_str(r.last_seen),
+            "do1": int(r.do1 or 0),
+            "do2": int(r.do2 or 0),
+            "do3": int(r.do3 or 0),
+            "do4": int(r.do4 or 0),
 
-        in1=int(r.di1 or 0),
-        in2=int(r.di2 or 0),
-        in3=int(r.di3 or 0),
-        in4=int(r.di4 or 0),
-
-        do1=int(r.do1 or 0),
-        do2=int(r.do2 or 0),
-        do3=int(r.do3 or 0),
-        do4=int(r.do4 or 0),
-
-        ai1=r.ai1,
-        ai2=r.ai2,
-        ai3=r.ai3,
-        ai4=r.ai4,
-    )
+            "ai1": r.ai1 if r.ai1 is not None else "",
+            "ai2": r.ai2 if r.ai2 is not None else "",
+            "ai3": r.ai3 if r.ai3 is not None else "",
+            "ai4": r.ai4 if r.ai4 is not None else "",
+        }
+        for r in rows
+    ]
 
 
-# -------------------
-# Routes
-# -------------------
-
-@router.get("/devices", response_model=List[Zhc1921RowOut])
-def list_devices(
+@router.post("/devices")
+def add_zhc1921_device(
+    body: AddDeviceBody,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # ✅ Owner-only (Device Manager)
-    require_owner(current_user)
+    """
+    Owner-only: authorize a ZHC1921 device_id into the DB table.
+    This is what your frontend "+ Add Device" should call.
+    """
+    if not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="Owner only")
 
-    rows = (
-        db.query(ZHC1921Device)
-        .order_by(desc(ZHC1921Device.authorized_at))
-        .all()
-    )
-    return [row_to_out(r) for r in rows]
-
-
-@router.post("/devices", response_model=Zhc1921RowOut)
-def add_device(
-    payload: AddDeviceReq,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # ✅ Owner-only
-    require_owner(current_user)
-
-    device_id = (payload.device_id or "").strip()
+    device_id = (body.device_id or "").strip()
     if not device_id:
         raise HTTPException(status_code=400, detail="device_id is required")
 
+    # numeric-only (matches your frontend validation)
     if not device_id.isdigit():
-        raise HTTPException(status_code=400, detail="device_id must be numeric (digits only)")
+        raise HTTPException(status_code=400, detail="device_id must be numeric")
 
-    exists = (
-        db.query(ZHC1921Device)
-        .filter(ZHC1921Device.device_id == device_id)
-        .first()
-    )
+    # prevent duplicates
+    exists = db.query(ZHC1921Device).filter(ZHC1921Device.device_id == device_id).first()
     if exists:
-        raise HTTPException(status_code=409, detail="That DEVICE ID already exists")
+        raise HTTPException(status_code=409, detail="device already exists")
 
     row = ZHC1921Device(device_id=device_id)
     db.add(row)
     db.commit()
     db.refresh(row)
 
-    return row_to_out(row)
+    return {"ok": True, "device_id": row.device_id}
