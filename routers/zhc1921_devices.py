@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 
 from database import get_db
@@ -13,6 +13,10 @@ from models import ZHC1921Device, User
 from auth_utils import get_current_user
 
 router = APIRouter(prefix="/zhc1921", tags=["ZHC1921 Devices"])
+
+# ✅ Offline timeout window (seconds)
+# If the backend hasn't received telemetry within this window, UI will show offline.
+OFFLINE_AFTER_SECONDS = int(os.getenv("COREFLEX_OFFLINE_AFTER_SECONDS") or "10")
 
 
 class AddDeviceBody(BaseModel):
@@ -69,9 +73,36 @@ def _parse_iso_dt(s: str | None):
         return None
     try:
         # Handles "2026-02-09T21:58:18.062Z" (Node-RED)
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        # Ensure timezone-aware
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _compute_online_status(last_seen: datetime | None) -> str:
+    """
+    ✅ Single source of truth:
+    - Online if last_seen is within OFFLINE_AFTER_SECONDS
+    - Offline otherwise
+    """
+    ls = _as_utc(last_seen)
+    if not ls:
+        return "offline"
+
+    now = datetime.now(timezone.utc)
+    age = (now - ls).total_seconds()
+    return "online" if age <= OFFLINE_AFTER_SECONDS else "offline"
 
 
 def to_row_for_table(r: ZHC1921Device):
@@ -79,7 +110,11 @@ def to_row_for_table(r: ZHC1921Device):
     ✅ Shape matches your frontend table columns.
     ✅ Date column MUST be "claimed_at" (when a user added/claimed the device),
        NOT "authorized_at" (when owner created it).
+
+    ✅ Status is derived from last_seen (truth), not from the stored r.status field.
     """
+    status = _compute_online_status(r.last_seen)
+
     return {
         "deviceId": r.device_id,
 
@@ -87,7 +122,7 @@ def to_row_for_table(r: ZHC1921Device):
         "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
 
         "ownedBy": r.claimed_by_email or "—",
-        "status": r.status or "offline",
+        "status": status,
         "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
 
         "in1": int(r.di1 or 0),
@@ -135,16 +170,21 @@ def ingest_zhc1921_telemetry(
         .first()
     )
     if not row:
-        raise HTTPException(status_code=404, detail="device_id not found (not authorized yet)")
+        raise HTTPException(
+            status_code=404,
+            detail="device_id not found (not authorized yet)",
+        )
 
-    # ✅ status + last_seen
-    row.status = (body.status or "online").strip().lower()
-
+    # ✅ last_seen (authoritative signal)
     parsed = _parse_iso_dt(body.last_seen)
     if parsed is not None:
         row.last_seen = parsed
     else:
+        # DB-time; still fine because status is derived from last_seen age later
         row.last_seen = func.now()
+
+    # ✅ Store status too (optional). UI will still derive status from last_seen age.
+    row.status = (body.status or "online").strip().lower()
 
     # ✅ DI / DO bits
     row.di1 = _coerce_bit(body.di1)
