@@ -30,6 +30,7 @@ def _normalize_device_id(device_id: str) -> str:
     return device_id
 
 
+# ✅ FIXED: safe + explicit (matches ZHC1921 behavior)
 def to_row_for_table(r: ZHC1661Device):
     """
     Shape matches your frontend table columns (ZHC1661):
@@ -38,12 +39,19 @@ def to_row_for_table(r: ZHC1661Device):
     return {
         "deviceId": r.device_id,
 
-        # ✅ Match ZHC1921 behavior: show date USER claimed it (not owner authorized date)
-        "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+        "addedAt": (
+            r.claimed_at.isoformat()
+            if r.claimed_at is not None
+            else "—"
+        ),
 
-        "ownedBy": r.claimed_by_email or "—",
-        "status": r.status or "offline",
-        "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
+        "ownedBy": r.claimed_by_email if r.claimed_by_email else "—",
+        "status": r.status if r.status else "offline",
+        "lastSeen": (
+            r.last_seen.isoformat()
+            if r.last_seen is not None
+            else "—"
+        ),
 
         "ai1": r.ai1 if r.ai1 is not None else "",
         "ai2": r.ai2 if r.ai2 is not None else "",
@@ -129,7 +137,7 @@ def delete_zhc1661_device(
 
 
 # =========================================================
-# USER: claim (optional)
+# USER: claim
 # =========================================================
 @router.post("/claim")
 def claim_zhc1661_device(
