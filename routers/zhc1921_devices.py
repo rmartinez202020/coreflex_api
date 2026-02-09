@@ -1,8 +1,10 @@
 # routers/zhc1921_devices.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
+from datetime import datetime
+import os
 
 from database import get_db
 from models import ZHC1921Device, User
@@ -15,6 +17,29 @@ router = APIRouter(prefix="/zhc1921", tags=["ZHC1921 Devices"])
 
 class AddDeviceBody(BaseModel):
     device_id: str
+
+
+# ✅ PC-66: Telemetry ingest body (Node-RED -> Backend)
+class TelemetryBody(BaseModel):
+    device_id: str
+
+    status: str | None = "online"
+    last_seen: str | None = None  # ISO string from Node-RED (optional)
+
+    di1: int | None = 0
+    di2: int | None = 0
+    di3: int | None = 0
+    di4: int | None = 0
+
+    do1: int | None = 0
+    do2: int | None = 0
+    do3: int | None = 0
+    do4: int | None = 0
+
+    ai1: float | None = None
+    ai2: float | None = None
+    ai3: float | None = None
+    ai4: float | None = None
 
 
 def is_owner(user: User) -> bool:
@@ -30,6 +55,23 @@ def _normalize_device_id(device_id: str) -> str:
     if not device_id.isdigit():
         raise HTTPException(status_code=400, detail="device_id must be numeric")
     return device_id
+
+
+def _coerce_bit(v) -> int:
+    # Accept 0/1, True/False, "0"/"1"
+    if v is True or v == 1 or v == "1":
+        return 1
+    return 0
+
+
+def _parse_iso_dt(s: str | None):
+    if not s:
+        return None
+    try:
+        # Handles "2026-02-09T21:58:18.062Z" (Node-RED)
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def to_row_for_table(r: ZHC1921Device):
@@ -63,6 +105,68 @@ def to_row_for_table(r: ZHC1921Device):
         "ai3": r.ai3 if r.ai3 is not None else "",
         "ai4": r.ai4 if r.ai4 is not None else "",
     }
+
+
+# =========================================================
+# ✅ PC-66: NODE-RED -> BACKEND TELEMETRY INGEST
+# POST /zhc1921/telemetry
+#
+# Optional security:
+#   Set env var COREFLEX_TELEMETRY_KEY to a shared secret.
+#   Node-RED must send header: X-TELEMETRY-KEY: <secret>
+# =========================================================
+@router.post("/telemetry")
+def ingest_zhc1921_telemetry(
+    body: TelemetryBody,
+    db: Session = Depends(get_db),
+    x_telemetry_key: str | None = Header(default=None, alias="X-TELEMETRY-KEY"),
+):
+    # ✅ Optional shared-key protection
+    required_key = (os.getenv("COREFLEX_TELEMETRY_KEY") or "").strip()
+    if required_key:
+        if (x_telemetry_key or "").strip() != required_key:
+            raise HTTPException(status_code=401, detail="Invalid telemetry key")
+
+    device_id = _normalize_device_id(body.device_id)
+
+    row = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.device_id == device_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="device_id not found (not authorized yet)")
+
+    # ✅ status + last_seen
+    row.status = (body.status or "online").strip().lower()
+
+    parsed = _parse_iso_dt(body.last_seen)
+    if parsed is not None:
+        row.last_seen = parsed
+    else:
+        row.last_seen = func.now()
+
+    # ✅ DI / DO bits
+    row.di1 = _coerce_bit(body.di1)
+    row.di2 = _coerce_bit(body.di2)
+    row.di3 = _coerce_bit(body.di3)
+    row.di4 = _coerce_bit(body.di4)
+
+    row.do1 = _coerce_bit(body.do1)
+    row.do2 = _coerce_bit(body.do2)
+    row.do3 = _coerce_bit(body.do3)
+    row.do4 = _coerce_bit(body.do4)
+
+    # ✅ AI values
+    row.ai1 = body.ai1
+    row.ai2 = body.ai2
+    row.ai3 = body.ai3
+    row.ai4 = body.ai4
+
+    db.add(row)
+    db.commit()
+
+    return {"ok": True, "device_id": device_id, "updated": True}
 
 
 # =========================================================
