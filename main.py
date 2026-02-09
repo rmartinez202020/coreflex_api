@@ -46,10 +46,21 @@ def on_startup():
 
 # ========================================
 # 🌍 CORS (PRODUCTION SAFE)
+# ✅ FIX: Your frontend is https://coreflexiotsplatform.com (ONE "i" after flex)
+# so we must allow BOTH:
+#   coreflexiotsplatform.com  and  coreflexiiotsplatform.com
+# plus www variants, plus localhost
 # ========================================
 ALLOWED_ORIGINS = [
+    # ✅ CURRENT FRONTEND DOMAIN (from your src/config/api.js)
+    "https://coreflexiotsplatform.com",
+    "https://www.coreflexiotsplatform.com",
+
+    # ✅ KEEP THESE (older/alternate domain spelling)
     "https://coreflexiiotsplatform.com",
     "https://www.coreflexiiotsplatform.com",
+
+    # ✅ Local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
