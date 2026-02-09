@@ -79,6 +79,13 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ one user -> many claimed TP4000 devices
+    tp4000_devices = relationship(
+        "TP4000Device",
+        back_populates="claimed_by_user",
+        passive_deletes=True,
+    )
+
 
 # ===============================
 # 🧾 USER PROFILE (Optional info)
@@ -341,6 +348,61 @@ class ZHC1661Device(Base):
     )
 
     claimed_by_user = relationship("User", back_populates="zhc1661_devices")
+
+
+# ===============================
+# 🧾 TP-4000 DEVICES TABLE
+# Authorized by OWNER, then claimed by a USER
+# Live TE-101..TE-108/status updated by Node-RED later
+# ===============================
+class TP4000Device(Base):
+    __tablename__ = "tp4000_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # ✅ owner adds this (unique)
+    device_id = Column(String(64), unique=True, nullable=False, index=True)
+
+    # ✅ when owner authorized/added
+    authorized_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # ✅ when any user claims/uses it
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+
+    claimed_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    claimed_by_email = Column(String(120), nullable=True, index=True)
+
+    # ✅ polled from Node-RED
+    status = Column(String(32), nullable=False, server_default="offline")
+    last_seen = Column(DateTime(timezone=True), nullable=True)
+
+    # Temperature Elements (TE) - 8 channels
+    te101 = Column(Float, nullable=True)
+    te102 = Column(Float, nullable=True)
+    te103 = Column(Float, nullable=True)
+    te104 = Column(Float, nullable=True)
+    te105 = Column(Float, nullable=True)
+    te106 = Column(Float, nullable=True)
+    te107 = Column(Float, nullable=True)
+    te108 = Column(Float, nullable=True)
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    claimed_by_user = relationship("User", back_populates="tp4000_devices")
 
 
 # ===============================

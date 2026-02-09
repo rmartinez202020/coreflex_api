@@ -149,6 +149,18 @@ from routers.zhc1661_devices import router as zhc1661_router  # noqa: E402
 app.include_router(zhc1661_router)
 
 # ========================================
+# ✅ TP-4000 DEVICES ROUTES
+# endpoints (pattern identical to zhc1661):
+#   GET    /tp4000/devices           (OWNER)
+#   POST   /tp4000/devices           (OWNER)
+#   POST   /tp4000/claim             (USER)
+#   DELETE /tp4000/unclaim/{id}      (USER)
+#   GET    /tp4000/my-devices        (USER)
+# ========================================
+from routers.tp4000_devices import router as tp4000_router  # noqa: E402
+app.include_router(tp4000_router)
+
+# ========================================
 # ❤️ HEALTH CHECK
 # ========================================
 @app.get("/health")
@@ -180,10 +192,10 @@ def update_sensor(data: SensorUpdate):
 
 # ========================================
 # ✅ /devices (FRONTEND COMPAT)
-# Return the current user's CLAIMED devices (ZHC1921 + ZHC1661)
+# Return the current user's CLAIMED devices (ZHC1921 + ZHC1661 + TP4000)
 # ========================================
 from auth_utils import get_current_user  # noqa: E402
-from models import ZHC1921Device, ZHC1661Device, User  # noqa: E402
+from models import ZHC1921Device, ZHC1661Device, TP4000Device, User  # noqa: E402
 
 
 @app.get("/devices")
@@ -246,6 +258,33 @@ def list_devices(
                 "ai4": r.ai4 if r.ai4 is not None else "",
                 "ao1": r.ao1 if r.ao1 is not None else "",
                 "ao2": r.ao2 if r.ao2 is not None else "",
+            }
+        )
+
+    # ---- TP-4000 ----
+    rows_tp4000 = (
+        db.query(TP4000Device)
+        .filter(TP4000Device.claimed_by_user_id == current_user.id)
+        .order_by(TP4000Device.id.asc())
+        .all()
+    )
+    for r in rows_tp4000:
+        out.append(
+            {
+                "model": "TP4000",
+                "deviceId": r.device_id,
+                "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+                "ownedBy": r.claimed_by_email or "—",
+                "status": r.status or "offline",
+                "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
+                "te101": r.te101 if r.te101 is not None else "",
+                "te102": r.te102 if r.te102 is not None else "",
+                "te103": r.te103 if r.te103 is not None else "",
+                "te104": r.te104 if r.te104 is not None else "",
+                "te105": r.te105 if r.te105 is not None else "",
+                "te106": r.te106 if r.te106 is not None else "",
+                "te107": r.te107 if r.te107 is not None else "",
+                "te108": r.te108 if r.te108 is not None else "",
             }
         )
 
