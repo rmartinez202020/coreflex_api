@@ -112,6 +112,45 @@ def authorize_zhc1921_device(
 
 
 # =========================================================
+# OWNER: delete an authorized device row (Device Manager button)
+# - removes the row from backend table
+# - safety: only owner can do it
+# - safety: you can choose whether to block deletes if claimed
+# =========================================================
+@router.delete("/devices/{device_id}")
+def delete_zhc1921_device(
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="Owner only")
+
+    device_id = _normalize_device_id(device_id)
+
+    row = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.device_id == device_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="device_id not found")
+
+    # ✅ SAFETY RULE:
+    # If you want to allow deleting even when claimed, comment this block.
+    if row.claimed_by_user_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="device is claimed by a user; unclaim first before deleting",
+        )
+
+    db.delete(row)
+    db.commit()
+
+    return {"ok": True, "device_id": device_id, "deleted": True}
+
+
+# =========================================================
 # USER: claim a device (the user "adds" it)
 # - verifies device exists
 # - verifies not already claimed by another user
@@ -139,7 +178,10 @@ def claim_zhc1921_device(
 
     # already claimed by someone else
     if row.claimed_by_user_id is not None and row.claimed_by_user_id != current_user.id:
-        raise HTTPException(status_code=409, detail="device already claimed by another user")
+        raise HTTPException(
+            status_code=409,
+            detail="device already claimed by another user",
+        )
 
     # idempotent: if same user claims again, return OK
     if row.claimed_by_user_id == current_user.id:
