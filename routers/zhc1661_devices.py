@@ -38,10 +38,8 @@ def to_row_for_table(r: ZHC1661Device):
     return {
         "deviceId": r.device_id,
 
-        # For Device Manager (owner list) you can show authorized_at OR claimed_at.
-        # If you want the SAME behavior as your ZHC1921 device manager table, keep claimed_at.
-        # If you want "date added by owner", use authorized_at instead.
-        "addedAt": r.claimed_at.isoformat() if r.claimed_at else (r.authorized_at.isoformat() if r.authorized_at else "—"),
+        # ✅ Match ZHC1921 behavior: show date USER claimed it (not owner authorized date)
+        "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
 
         "ownedBy": r.claimed_by_email or "—",
         "status": r.status or "offline",
@@ -86,7 +84,11 @@ def authorize_zhc1661_device(
 
     device_id = _normalize_device_id(body.device_id)
 
-    exists = db.query(ZHC1661Device).filter(ZHC1661Device.device_id == device_id).first()
+    exists = (
+        db.query(ZHC1661Device)
+        .filter(ZHC1661Device.device_id == device_id)
+        .first()
+    )
     if exists:
         raise HTTPException(status_code=409, detail="device already exists")
 
@@ -112,7 +114,11 @@ def delete_zhc1661_device(
 
     device_id = _normalize_device_id(device_id)
 
-    row = db.query(ZHC1661Device).filter(ZHC1661Device.device_id == device_id).first()
+    row = (
+        db.query(ZHC1661Device)
+        .filter(ZHC1661Device.device_id == device_id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="device_id not found")
 
@@ -123,8 +129,7 @@ def delete_zhc1661_device(
 
 
 # =========================================================
-# OPTIONAL (recommended): USER claim/unclaim/my-devices
-# (so your Register Devices — CF-1600 page can work later)
+# USER: claim (optional)
 # =========================================================
 @router.post("/claim")
 def claim_zhc1661_device(
@@ -134,7 +139,11 @@ def claim_zhc1661_device(
 ):
     device_id = _normalize_device_id(body.device_id)
 
-    row = db.query(ZHC1661Device).filter(ZHC1661Device.device_id == device_id).first()
+    row = (
+        db.query(ZHC1661Device)
+        .filter(ZHC1661Device.device_id == device_id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="device_id not found (not authorized yet)")
 
@@ -155,6 +164,9 @@ def claim_zhc1661_device(
     return {"ok": True, "device_id": row.device_id, "claimed": True}
 
 
+# =========================================================
+# USER: unclaim
+# =========================================================
 @router.delete("/unclaim/{device_id}")
 def unclaim_zhc1661_device(
     device_id: str,
@@ -163,7 +175,11 @@ def unclaim_zhc1661_device(
 ):
     device_id = _normalize_device_id(device_id)
 
-    row = db.query(ZHC1661Device).filter(ZHC1661Device.device_id == device_id).first()
+    row = (
+        db.query(ZHC1661Device)
+        .filter(ZHC1661Device.device_id == device_id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="device_id not found")
 
@@ -181,6 +197,9 @@ def unclaim_zhc1661_device(
     return {"ok": True, "device_id": device_id, "claimed": False}
 
 
+# =========================================================
+# USER: list MY devices
+# =========================================================
 @router.get("/my-devices")
 def list_my_zhc1661_devices(
     db: Session = Depends(get_db),

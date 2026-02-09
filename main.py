@@ -46,8 +46,6 @@ def on_startup():
 
 # ========================================
 # 🌍 CORS (PRODUCTION SAFE)
-# - Explicit origins so browser ALWAYS receives CORS headers
-# - allow_credentials=True enables Authorization/Cookies if you use them
 # ========================================
 ALLOWED_ORIGINS = [
     "https://coreflexiiotsplatform.com",
@@ -136,7 +134,6 @@ app.include_router(zhc1921_router)
 #   DELETE /zhc1661/unclaim/{id}     (USER)
 #   GET    /zhc1661/my-devices       (USER)
 # ========================================
-# NOTE: Create routers/zhc1661_devices.py to match this.
 from routers.zhc1661_devices import router as zhc1661_router  # noqa: E402
 app.include_router(zhc1661_router)
 
@@ -172,11 +169,10 @@ def update_sensor(data: SensorUpdate):
 
 # ========================================
 # ✅ /devices (FRONTEND COMPAT)
-# Your frontend already calls GET /devices.
-# We return the current user's CLAIMED devices (ZHC1921 for now).
+# Return the current user's CLAIMED devices (ZHC1921 + ZHC1661)
 # ========================================
 from auth_utils import get_current_user  # noqa: E402
-from models import ZHC1921Device, User  # noqa: E402
+from models import ZHC1921Device, ZHC1661Device, User  # noqa: E402
 
 
 @app.get("/devices")
@@ -184,33 +180,62 @@ def list_devices(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    rows = (
+    out = []
+
+    # ---- ZHC1921 (CF-2000) ----
+    rows_1921 = (
         db.query(ZHC1921Device)
         .filter(ZHC1921Device.claimed_by_user_id == current_user.id)
         .order_by(ZHC1921Device.id.asc())
         .all()
     )
+    for r in rows_1921:
+        out.append(
+            {
+                "model": "ZHC1921",
+                "deviceId": r.device_id,
+                "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+                "ownedBy": r.claimed_by_email or "—",
+                "status": r.status or "offline",
+                "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
+                "in1": int(r.di1 or 0),
+                "in2": int(r.di2 or 0),
+                "in3": int(r.di3 or 0),
+                "in4": int(r.di4 or 0),
+                "do1": int(r.do1 or 0),
+                "do2": int(r.do2 or 0),
+                "do3": int(r.do3 or 0),
+                "do4": int(r.do4 or 0),
+                "ai1": r.ai1 if r.ai1 is not None else "",
+                "ai2": r.ai2 if r.ai2 is not None else "",
+                "ai3": r.ai3 if r.ai3 is not None else "",
+                "ai4": r.ai4 if r.ai4 is not None else "",
+            }
+        )
 
-    return [
-        {
-            "deviceId": r.device_id,
-            # ✅ date user added/claimed it (NOT the owner authorized date)
-            "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
-            "ownedBy": r.claimed_by_email or "—",
-            "status": r.status or "offline",
-            "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
-            "in1": int(r.di1 or 0),
-            "in2": int(r.di2 or 0),
-            "in3": int(r.di3 or 0),
-            "in4": int(r.di4 or 0),
-            "do1": int(r.do1 or 0),
-            "do2": int(r.do2 or 0),
-            "do3": int(r.do3 or 0),
-            "do4": int(r.do4 or 0),
-            "ai1": r.ai1 if r.ai1 is not None else "",
-            "ai2": r.ai2 if r.ai2 is not None else "",
-            "ai3": r.ai3 if r.ai3 is not None else "",
-            "ai4": r.ai4 if r.ai4 is not None else "",
-        }
-        for r in rows
-    ]
+    # ---- ZHC1661 (CF-1600) ----
+    rows_1661 = (
+        db.query(ZHC1661Device)
+        .filter(ZHC1661Device.claimed_by_user_id == current_user.id)
+        .order_by(ZHC1661Device.id.asc())
+        .all()
+    )
+    for r in rows_1661:
+        out.append(
+            {
+                "model": "ZHC1661",
+                "deviceId": r.device_id,
+                "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+                "ownedBy": r.claimed_by_email or "—",
+                "status": r.status or "offline",
+                "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
+                "ai1": r.ai1 if r.ai1 is not None else "",
+                "ai2": r.ai2 if r.ai2 is not None else "",
+                "ai3": r.ai3 if r.ai3 is not None else "",
+                "ai4": r.ai4 if r.ai4 is not None else "",
+                "ao1": r.ao1 if r.ao1 is not None else "",
+                "ao2": r.ao2 if r.ao2 is not None else "",
+            }
+        )
+
+    return out
