@@ -1,8 +1,7 @@
 # auth_utils.py
 
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
 
@@ -33,24 +32,35 @@ def verify_password(plain_password: str, hashed_password: str):
 # 👤 CURRENT USER DEPENDENCY (JWT)
 # ========================================
 
-# ✅ MUST MATCH /auth/login
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
-
 def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    request: Request,
     db: Session = Depends(get_db),
 ):
+    # ✅ Always handle missing/invalid headers safely (never crash -> no 500)
+    auth = request.headers.get("Authorization") or ""
+    auth = auth.strip()
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+    if not auth:
+        raise credentials_exception
+
+    parts = auth.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise credentials_exception
+
+    token = parts[1].strip()
+    if not token or token.lower() in {"null", "undefined"}:
+        raise credentials_exception
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
+        email: str = (payload.get("sub") or "").strip().lower()
+        if not email:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
