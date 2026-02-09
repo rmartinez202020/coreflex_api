@@ -116,15 +116,29 @@ from routers.images import router as images_router  # noqa: E402
 app.include_router(images_router)
 
 # ========================================
-# ✅ ZHC1921 DEVICES ROUTES (Device Manager backend)
+# ✅ ZHC1921 DEVICES ROUTES (CF-2000)
 # endpoints:
-#   GET  /zhc1921/devices
-#   POST /zhc1921/devices
-#   POST /zhc1921/claim
-#   GET  /zhc1921/my-devices
+#   GET    /zhc1921/devices          (OWNER)
+#   POST   /zhc1921/devices          (OWNER)
+#   POST   /zhc1921/claim            (USER)
+#   DELETE /zhc1921/unclaim/{id}     (USER)
+#   GET    /zhc1921/my-devices       (USER)
 # ========================================
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
 app.include_router(zhc1921_router)
+
+# ========================================
+# ✅ ZHC1661 DEVICES ROUTES (CF-1600)
+# endpoints:
+#   GET    /zhc1661/devices          (OWNER)
+#   POST   /zhc1661/devices          (OWNER)
+#   POST   /zhc1661/claim            (USER)
+#   DELETE /zhc1661/unclaim/{id}     (USER)
+#   GET    /zhc1661/my-devices       (USER)
+# ========================================
+# NOTE: Create routers/zhc1661_devices.py to match this.
+from routers.zhc1661_devices import router as zhc1661_router  # noqa: E402
+app.include_router(zhc1661_router)
 
 # ========================================
 # ❤️ HEALTH CHECK

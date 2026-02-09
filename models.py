@@ -72,6 +72,13 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ one user -> many claimed ZHC1661 devices
+    zhc1661_devices = relationship(
+        "ZHC1661Device",
+        back_populates="claimed_by_user",
+        passive_deletes=True,
+    )
+
 
 # ===============================
 # 🧾 USER PROFILE (Optional info)
@@ -279,6 +286,61 @@ class ZHC1921Device(Base):
     )
 
     claimed_by_user = relationship("User", back_populates="zhc1921_devices")
+
+
+# ===============================
+# 🧾 ZHC1661 DEVICES TABLE (CF-1600)
+# Authorized by OWNER, then claimed by a USER
+# Live AI/AO/status updated by Node-RED later
+# ===============================
+class ZHC1661Device(Base):
+    __tablename__ = "zhc1661_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # ✅ owner adds this (unique)
+    device_id = Column(String(64), unique=True, nullable=False, index=True)
+
+    # ✅ when owner authorized/added
+    authorized_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # ✅ when any user claims/uses it
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+
+    claimed_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    claimed_by_email = Column(String(120), nullable=True, index=True)
+
+    # ✅ polled from Node-RED
+    status = Column(String(32), nullable=False, server_default="offline")
+    last_seen = Column(DateTime(timezone=True), nullable=True)
+
+    # Analog Inputs (AI) - 4 channels
+    ai1 = Column(Float, nullable=True)
+    ai2 = Column(Float, nullable=True)
+    ai3 = Column(Float, nullable=True)
+    ai4 = Column(Float, nullable=True)
+
+    # Analog Outputs (AO) - 2 channels
+    ao1 = Column(Float, nullable=True)
+    ao2 = Column(Float, nullable=True)
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    claimed_by_user = relationship("User", back_populates="zhc1661_devices")
 
 
 # ===============================
