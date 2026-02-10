@@ -267,11 +267,13 @@ class ZHC1921Device(Base):
     status = Column(String(32), nullable=False, server_default="offline")
     last_seen = Column(DateTime(timezone=True), nullable=True)
 
-    # Digital Inputs (DI)
+    # Digital Inputs (DI) ✅ ZHC1921 has 6 DI
     di1 = Column(Integer, nullable=False, server_default="0")
     di2 = Column(Integer, nullable=False, server_default="0")
     di3 = Column(Integer, nullable=False, server_default="0")
     di4 = Column(Integer, nullable=False, server_default="0")
+    di5 = Column(Integer, nullable=False, server_default="0")
+    di6 = Column(Integer, nullable=False, server_default="0")
 
     # Digital Outputs (DO)
     do1 = Column(Integer, nullable=False, server_default="0")

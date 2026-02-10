@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import os
 
 from database import get_db
@@ -23,17 +23,20 @@ class AddDeviceBody(BaseModel):
     device_id: str
 
 
-# ✅ PC-66: Telemetry ingest body (Node-RED -> Backend)
+# ✅ PC-66/67: Telemetry ingest body (Node-RED -> Backend)
 class TelemetryBody(BaseModel):
     device_id: str
 
     status: str | None = "online"
     last_seen: str | None = None  # ISO string from Node-RED (optional)
 
+    # ✅ ZHC1921 has 6 digital inputs
     di1: int | None = 0
     di2: int | None = 0
     di3: int | None = 0
     di4: int | None = 0
+    di5: int | None = 0
+    di6: int | None = 0
 
     do1: int | None = 0
     do2: int | None = 0
@@ -125,10 +128,13 @@ def to_row_for_table(r: ZHC1921Device):
         "status": status,
         "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
 
+        # ✅ 6 DIs
         "in1": int(r.di1 or 0),
         "in2": int(r.di2 or 0),
         "in3": int(r.di3 or 0),
         "in4": int(r.di4 or 0),
+        "in5": int(getattr(r, "di5", 0) or 0),
+        "in6": int(getattr(r, "di6", 0) or 0),
 
         "do1": int(r.do1 or 0),
         "do2": int(r.do2 or 0),
@@ -143,7 +149,7 @@ def to_row_for_table(r: ZHC1921Device):
 
 
 # =========================================================
-# ✅ PC-66: NODE-RED -> BACKEND TELEMETRY INGEST
+# ✅ PC-66/67: NODE-RED -> BACKEND TELEMETRY INGEST
 # POST /zhc1921/telemetry
 #
 # Optional security:
@@ -186,11 +192,16 @@ def ingest_zhc1921_telemetry(
     # ✅ Store status too (optional). UI will still derive status from last_seen age.
     row.status = (body.status or "online").strip().lower()
 
-    # ✅ DI / DO bits
+    # ✅ DI / DO bits (ZHC1921 DI=6)
     row.di1 = _coerce_bit(body.di1)
     row.di2 = _coerce_bit(body.di2)
     row.di3 = _coerce_bit(body.di3)
     row.di4 = _coerce_bit(body.di4)
+
+    # These columns exist after your ALTER TABLE (di5/di6)
+    # If you deploy backend before migration, this could error; so ensure DB is migrated first.
+    row.di5 = _coerce_bit(body.di5)
+    row.di6 = _coerce_bit(body.di6)
 
     row.do1 = _coerce_bit(body.do1)
     row.do2 = _coerce_bit(body.do2)
