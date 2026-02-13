@@ -87,11 +87,12 @@ def _normalize_field(field: str) -> str:
     return ""
 
 
-def _normalize_dashboard_id(dashboard_id: Optional[str]) -> Optional[uuid.UUID]:
+def _normalize_dashboard_id(dashboard_id: Optional[str]) -> Optional[str]:
     """
-    ✅ Device counters table likely uses UUID dashboard_id.
-    - Treat "main" (and blanks) as NULL (main dashboard)
-    - Otherwise require valid UUID
+    ✅ Normalize dashboard id for DB queries:
+    - Treat blank / None / "main" as NULL (main dashboard)
+    - Otherwise require UUID string and return canonical string
+    NOTE: return type is str (uuid string) or None so SQL params work cleanly.
     """
     s = (dashboard_id or "").strip()
     if not s:
@@ -100,12 +101,9 @@ def _normalize_dashboard_id(dashboard_id: Optional[str]) -> Optional[uuid.UUID]:
         return None
 
     try:
-        return uuid.UUID(s)
+        return str(uuid.UUID(s))
     except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="dashboard_id must be a UUID (or 'main')",
-        )
+        raise HTTPException(status_code=400, detail="dashboard_id must be a UUID (or 'main')")
 
 
 def _get_current_field_value(db: Session, user: User, device_id: str, field: str) -> Optional[int]:
@@ -165,9 +163,10 @@ def list_counters(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    dash = _normalize_dashboard_id(dashboard_id)
+    # If param is provided (even "main"), filter; else list all
+    if dashboard_id is not None:
+        dash = _normalize_dashboard_id(dashboard_id)
 
-    if dashboard_id is not None:  # if param provided (even "main"), filter
         if dash is None:
             q = """
             SELECT *
@@ -183,7 +182,7 @@ def list_counters(
             WHERE user_id = :user_id AND dashboard_id = :dashboard_id
             ORDER BY created_at ASC
             """
-            rows = db.execute(q, {"user_id": user.id, "dashboard_id": str(dash)}).mappings().all()
+            rows = db.execute(q, {"user_id": user.id, "dashboard_id": dash}).mappings().all()
     else:
         q = """
         SELECT *
@@ -223,7 +222,7 @@ def list_counters_by_dashboard(
         WHERE user_id = :user_id AND dashboard_id = :dashboard_id
         ORDER BY created_at ASC
         """
-        rows = db.execute(q, {"user_id": user.id, "dashboard_id": str(dash)}).mappings().all()
+        rows = db.execute(q, {"user_id": user.id, "dashboard_id": dash}).mappings().all()
 
     return [_row_to_dict(r) for r in rows]
 
@@ -239,9 +238,9 @@ def get_counter_by_widget(
     if not widget_id:
         raise HTTPException(status_code=400, detail="widget_id is required")
 
-    dash = _normalize_dashboard_id(dashboard_id) if dashboard_id is not None else None
-
     if dashboard_id is not None:
+        dash = _normalize_dashboard_id(dashboard_id)
+
         if dash is None:
             q = """
             SELECT *
@@ -259,7 +258,7 @@ def get_counter_by_widget(
             """
             row = db.execute(
                 q,
-                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": str(dash)},
+                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
         q = """
@@ -293,6 +292,7 @@ def upsert_counter(
     if not field_norm:
         raise HTTPException(status_code=400, detail="field must be di1..di6 (or legacy in1..in6)")
 
+    # IMPORTANT: "main" => NULL dashboard
     dash = _normalize_dashboard_id(body.dashboard_id) if body.dashboard_id is not None else None
 
     # check if exists
@@ -314,7 +314,7 @@ def upsert_counter(
             """
             found = db.execute(
                 find_q,
-                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": str(dash)},
+                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
         find_q = """
@@ -368,7 +368,7 @@ def upsert_counter(
         {
             "id": new_id,
             "user_id": user.id,
-            "dashboard_id": str(dash) if dash is not None else None,
+            "dashboard_id": dash,  # NULL for main, uuid string for others
             "widget_id": widget_id,
             "device_id": device_id,
             "field": field_norm,
@@ -411,7 +411,7 @@ def reset_counter(
             """
             row = db.execute(
                 get_q,
-                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": str(dash)},
+                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
         get_q = """
@@ -461,7 +461,7 @@ def reset_counter(
                 {
                     "user_id": user.id,
                     "widget_id": widget_id,
-                    "dashboard_id": str(dash),
+                    "dashboard_id": dash,
                     "prev01": int(cur01),
                 },
             ).mappings().first()
@@ -512,7 +512,7 @@ def delete_counter(
             """
             row = db.execute(
                 q,
-                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": str(dash)},
+                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
         q = """
