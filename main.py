@@ -17,16 +17,22 @@ from database import Base, engine, get_db
 # ========================================
 from cloudinary_config import init_cloudinary  # noqa: E402
 
+# ✅ NEW: background counter tick (persistent counters)
+from routers.device_counters_tick import (  # noqa: E402
+    start_device_counters_tick,
+    stop_device_counters_tick,
+)
+
 # ========================================
 # 🚀 FASTAPI APP
 # ========================================
 app = FastAPI(title="CoreFlex API", version="1.0.0")
 
 # ========================================
-# ✅ CREATE TABLES + INIT CLOUDINARY ON STARTUP
+# ✅ CREATE TABLES + INIT CLOUDINARY + START COUNTER TICK
 # ========================================
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     # 1) Ensure DB tables
     try:
         Base.metadata.create_all(bind=engine)
@@ -43,6 +49,23 @@ def on_startup():
         # you will still see the error in Render logs.
         print("❌ Cloudinary init failed:", repr(e))
 
+    # 3) ✅ Start persistent counter engine (keeps counting even if UI is closed)
+    try:
+        start_device_counters_tick()
+    except Exception as e:
+        print("❌ start_device_counters_tick failed:", repr(e))
+
+
+# ========================================
+# ✅ STOP BACKGROUND TASKS ON SHUTDOWN
+# ========================================
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        await stop_device_counters_tick()
+    except Exception as e:
+        print("❌ stop_device_counters_tick failed:", repr(e))
+
 
 # ========================================
 # 🌍 CORS (PRODUCTION SAFE)
@@ -55,11 +78,9 @@ ALLOWED_ORIGINS = [
     # ✅ CURRENT FRONTEND DOMAIN (from your src/config/api.js)
     "https://coreflexiotsplatform.com",
     "https://www.coreflexiotsplatform.com",
-
     # ✅ KEEP THESE (older/alternate domain spelling)
     "https://coreflexiiotsplatform.com",
     "https://www.coreflexiiotsplatform.com",
-
     # ✅ Local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -92,36 +113,42 @@ async def global_exception_handler(request: Request, exc: Exception):
 # 🔐 AUTH ROUTES
 # ========================================
 from auth_routes import router as auth_router  # noqa: E402
+
 app.include_router(auth_router)
 
 # ========================================
 # 📊 MAIN DASHBOARD ROUTES
 # ========================================
 from routers.main_dashboard import router as main_dashboard_router  # noqa: E402
+
 app.include_router(main_dashboard_router)
 
 # ========================================
 # 🧩 CUSTOMER DASHBOARDS ROUTES
 # ========================================
 from routers.customers_dashboards import router as customers_dashboards_router  # noqa: E402
+
 app.include_router(customers_dashboards_router)
 
 # ========================================
 # 👤 USER PROFILE ROUTES
 # ========================================
 from routers.user_profile import router as user_profile_router  # noqa: E402
+
 app.include_router(user_profile_router)
 
 # ========================================
 # 📍 CUSTOMER LOCATIONS ROUTES
 # ========================================
 from routers.customer_locations import router as customer_locations_router  # noqa: E402
+
 app.include_router(customer_locations_router)
 
 # ========================================
 # 🖼 IMAGES ROUTES (Cloudinary Image Library)
 # ========================================
 from routers.images import router as images_router  # noqa: E402
+
 app.include_router(images_router)
 
 # ========================================
@@ -134,6 +161,7 @@ app.include_router(images_router)
 #   GET    /zhc1921/my-devices       (USER)
 # ========================================
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
+
 app.include_router(zhc1921_router)
 
 # ========================================
@@ -146,6 +174,7 @@ app.include_router(zhc1921_router)
 #   GET    /zhc1661/my-devices       (USER)
 # ========================================
 from routers.zhc1661_devices import router as zhc1661_router  # noqa: E402
+
 app.include_router(zhc1661_router)
 
 # ========================================
@@ -158,7 +187,21 @@ app.include_router(zhc1661_router)
 #   GET    /tp4000/my-devices        (USER)
 # ========================================
 from routers.tp4000_devices import router as tp4000_router  # noqa: E402
+
 app.include_router(tp4000_router)
+
+# ========================================
+# ✅ DEVICE COUNTERS ROUTES (PERSISTENT COUNTERS)
+# endpoints:
+#   GET    /device-counters
+#   GET    /device-counters/by-widget/{widget_id}
+#   POST   /device-counters/upsert
+#   POST   /device-counters/reset
+#   DELETE /device-counters?widget_id=...&dashboard_id=...
+# ========================================
+from routers.device_counters import router as device_counters_router  # noqa: E402
+
+app.include_router(device_counters_router)
 
 # ========================================
 # ❤️ HEALTH CHECK
@@ -167,12 +210,14 @@ app.include_router(tp4000_router)
 def health():
     return {"ok": True, "status": "API running"}
 
+
 # ========================================
 # 🧪 CORS TEST ENDPOINT
 # ========================================
 @app.get("/cors-test")
 def cors_test():
     return {"ok": True, "message": "CORS working"}
+
 
 # ========================================
 # 📡 TEMP SENSOR ENDPOINT
