@@ -36,7 +36,7 @@ def _row_to_dict(r):
     return {
         "id": str(r["id"]),
         "user_id": r["user_id"],
-        "dashboard_id": r["dashboard_id"],
+        "dashboard_id": r["dashboard_id"],  # UUID or None is OK for FastAPI
         "widget_id": r["widget_id"],
         "device_id": r["device_id"],
         "field": r["field"],
@@ -87,12 +87,11 @@ def _normalize_field(field: str) -> str:
     return ""
 
 
-def _normalize_dashboard_id(dashboard_id: Optional[str]) -> Optional[str]:
+def _normalize_dashboard_id(dashboard_id: Optional[str]) -> Optional[uuid.UUID]:
     """
-    ✅ Normalize dashboard id for DB queries:
-    - Treat blank / None / "main" as NULL (main dashboard)
-    - Otherwise require UUID string and return canonical string
-    NOTE: return type is str (uuid string) or None so SQL params work cleanly.
+    ✅ Device counters table uses UUID dashboard_id.
+    - Treat "main" (and blanks) as NULL (main dashboard)
+    - Otherwise return uuid.UUID (NOT string) so postgres param is typed uuid
     """
     s = (dashboard_id or "").strip()
     if not s:
@@ -101,7 +100,7 @@ def _normalize_dashboard_id(dashboard_id: Optional[str]) -> Optional[str]:
         return None
 
     try:
-        return str(uuid.UUID(s))
+        return uuid.UUID(s)
     except Exception:
         raise HTTPException(status_code=400, detail="dashboard_id must be a UUID (or 'main')")
 
@@ -163,7 +162,7 @@ def list_counters(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # If param is provided (even "main"), filter; else list all
+    # If param provided (even "main"), filter. Else list all user counters.
     if dashboard_id is not None:
         dash = _normalize_dashboard_id(dashboard_id)
 
@@ -292,7 +291,6 @@ def upsert_counter(
     if not field_norm:
         raise HTTPException(status_code=400, detail="field must be di1..di6 (or legacy in1..in6)")
 
-    # IMPORTANT: "main" => NULL dashboard
     dash = _normalize_dashboard_id(body.dashboard_id) if body.dashboard_id is not None else None
 
     # check if exists
@@ -368,7 +366,7 @@ def upsert_counter(
         {
             "id": new_id,
             "user_id": user.id,
-            "dashboard_id": dash,  # NULL for main, uuid string for others
+            "dashboard_id": dash,  # ✅ UUID object or None
             "widget_id": widget_id,
             "device_id": device_id,
             "field": field_norm,
