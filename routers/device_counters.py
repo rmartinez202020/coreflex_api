@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import text as sa_text
+from sqlalchemy import text
 from typing import Optional
 import uuid
 
@@ -16,21 +16,20 @@ router = APIRouter(prefix="/device-counters", tags=["Device Counters"])
 # ----------------------------
 # ✅ Pydantic Schemas
 # ----------------------------
-class CreatePlaceholderBody(BaseModel):
-    widget_id: str = Field(..., min_length=1)
-    dashboard_id: Optional[str] = None
-
-
 class UpsertCounterBody(BaseModel):
     widget_id: str = Field(..., min_length=1)
     device_id: str = Field(..., min_length=1)
     field: str = Field(..., min_length=1)  # di1..di6 OR in1..in6 (legacy)
-
     dashboard_id: Optional[str] = None
     enabled: bool = True
 
 
 class ResetCounterBody(BaseModel):
+    widget_id: str = Field(..., min_length=1)
+    dashboard_id: Optional[str] = None
+
+
+class CreatePlaceholderBody(BaseModel):
     widget_id: str = Field(..., min_length=1)
     dashboard_id: Optional[str] = None
 
@@ -93,11 +92,11 @@ def _normalize_field(field: str) -> str:
     return ""
 
 
-def _normalize_dashboard_id(dashboard_id: Optional[str]) -> Optional[str]:
+def _normalize_dashboard_id_text(dashboard_id: Optional[str]) -> Optional[str]:
     """
-    ✅ device_counters.dashboard_id is TEXT (per your pgAdmin screenshot)
-    - Treat "main" (and blanks) as NULL (main dashboard)
-    - Otherwise store as trimmed string
+    ✅ device_counters.dashboard_id is TEXT (per pgAdmin screenshot)
+    - Treat "main" and blank as NULL (main dashboard)
+    - Otherwise store the trimmed text value (uuid string or any string you use)
     """
     s = (dashboard_id or "").strip()
     if not s:
@@ -114,7 +113,6 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
     """
     device_id = (device_id or "").strip()
     field = _normalize_field(field)
-
     if not device_id or not field:
         return None
 
@@ -126,10 +124,9 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
         .first()
     )
     if r1921:
-        val = getattr(r1921, field, None)  # di1..di6
-        return _to01(val)
+        return _to01(getattr(r1921, field, None))
 
-    # ZHC1661 (CF-1600) - safe
+    # ZHC1661 (CF-1600)
     r1661 = (
         db.query(ZHC1661Device)
         .filter(ZHC1661Device.device_id == device_id)
@@ -137,10 +134,9 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
         .first()
     )
     if r1661:
-        val = getattr(r1661, field, None)
-        return _to01(val)
+        return _to01(getattr(r1661, field, None))
 
-    # TP4000 - safe
+    # TP4000
     rtp = (
         db.query(TP4000Device)
         .filter(TP4000Device.device_id == device_id)
@@ -148,8 +144,7 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
         .first()
     )
     if rtp:
-        val = getattr(rtp, field, None)
-        return _to01(val)
+        return _to01(getattr(rtp, field, None))
 
     return None
 
@@ -165,55 +160,48 @@ def create_placeholder_counter(
     user: User = Depends(get_current_user),
 ):
     """
-    ✅ Called immediately on widget drop.
-    Creates a row in device_counters even before device/tag config.
-    Safe defaults:
-      - enabled = false
-      - device_id = ""
-      - field = "di1"
+    ✅ Called when user DROPS the counter widget on canvas.
+    Creates a row even before device/tag is configured.
+    Later, /upsert will update device_id + field, and tick will start counting.
     """
     widget_id = (body.widget_id or "").strip()
     if not widget_id:
         raise HTTPException(status_code=400, detail="widget_id is required")
 
-    dash = _normalize_dashboard_id(body.dashboard_id)
+    dash = _normalize_dashboard_id_text(body.dashboard_id)
 
-    # if already exists, return it (idempotent)
-    if body.dashboard_id is not None:
-        if dash is None:
-            find_q = sa_text("""
-                SELECT *
-                FROM public.device_counters
-                WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id IS NULL
-                LIMIT 1
-            """)
-            found = db.execute(find_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
-        else:
-            find_q = sa_text("""
-                SELECT *
-                FROM public.device_counters
-                WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id = :dashboard_id
-                LIMIT 1
-            """)
-            found = db.execute(
-                find_q,
-                {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
-            ).mappings().first()
-    else:
-        find_q = sa_text("""
+    # exists?
+    if dash is None:
+        find_q = text("""
             SELECT *
             FROM public.device_counters
-            WHERE user_id = :user_id AND widget_id = :widget_id
+            WHERE user_id = :user_id
+              AND widget_id = :widget_id
+              AND dashboard_id IS NULL
             LIMIT 1
         """)
-        found = db.execute(find_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
+        existing = db.execute(find_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
+    else:
+        find_q = text("""
+            SELECT *
+            FROM public.device_counters
+            WHERE user_id = :user_id
+              AND widget_id = :widget_id
+              AND dashboard_id = :dashboard_id
+            LIMIT 1
+        """)
+        existing = db.execute(
+            find_q,
+            {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
+        ).mappings().first()
 
-    if found:
-        return _row_to_dict(found)
+    if existing:
+        return _row_to_dict(existing)
 
+    # ✅ create placeholder with safe defaults
     new_id = str(uuid.uuid4())
 
-    ins_q = sa_text("""
+    ins_q = text("""
         INSERT INTO public.device_counters
           (id, user_id, dashboard_id, widget_id, device_id, field, count, prev01, enabled, created_at, updated_at)
         VALUES
@@ -226,11 +214,11 @@ def create_placeholder_counter(
         {
             "id": new_id,
             "user_id": user.id,
-            "dashboard_id": dash,      # TEXT or None
+            "dashboard_id": dash,          # TEXT or NULL
             "widget_id": widget_id,
-            "device_id": "",           # placeholder
-            "field": "di1",            # placeholder
-            "enabled": False,          # placeholder disabled
+            "device_id": "",               # placeholder
+            "field": "di1",                # placeholder
+            "enabled": False,              # disabled until configured
         },
     ).mappings().first()
     db.commit()
@@ -243,12 +231,10 @@ def list_counters(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # If param provided (even "main"), filter. Else list all user counters.
     if dashboard_id is not None:
-        dash = _normalize_dashboard_id(dashboard_id)
-
+        dash = _normalize_dashboard_id_text(dashboard_id)
         if dash is None:
-            q = sa_text("""
+            q = text("""
                 SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND dashboard_id IS NULL
@@ -256,7 +242,7 @@ def list_counters(
             """)
             rows = db.execute(q, {"user_id": user.id}).mappings().all()
         else:
-            q = sa_text("""
+            q = text("""
                 SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND dashboard_id = :dashboard_id
@@ -264,7 +250,7 @@ def list_counters(
             """)
             rows = db.execute(q, {"user_id": user.id, "dashboard_id": dash}).mappings().all()
     else:
-        q = sa_text("""
+        q = text("""
             SELECT *
             FROM public.device_counters
             WHERE user_id = :user_id
@@ -285,10 +271,10 @@ def list_counters_by_dashboard(
     if not s:
         raise HTTPException(status_code=400, detail="dashboard_id is required")
 
-    dash = _normalize_dashboard_id(s)
+    dash = _normalize_dashboard_id_text(s)
 
     if dash is None:
-        q = sa_text("""
+        q = text("""
             SELECT *
             FROM public.device_counters
             WHERE user_id = :user_id AND dashboard_id IS NULL
@@ -296,7 +282,7 @@ def list_counters_by_dashboard(
         """)
         rows = db.execute(q, {"user_id": user.id}).mappings().all()
     else:
-        q = sa_text("""
+        q = text("""
             SELECT *
             FROM public.device_counters
             WHERE user_id = :user_id AND dashboard_id = :dashboard_id
@@ -319,10 +305,9 @@ def get_counter_by_widget(
         raise HTTPException(status_code=400, detail="widget_id is required")
 
     if dashboard_id is not None:
-        dash = _normalize_dashboard_id(dashboard_id)
-
+        dash = _normalize_dashboard_id_text(dashboard_id)
         if dash is None:
-            q = sa_text("""
+            q = text("""
                 SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id IS NULL
@@ -330,7 +315,7 @@ def get_counter_by_widget(
             """)
             row = db.execute(q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
         else:
-            q = sa_text("""
+            q = text("""
                 SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id = :dashboard_id
@@ -341,7 +326,7 @@ def get_counter_by_widget(
                 {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
-        q = sa_text("""
+        q = text("""
             SELECT *
             FROM public.device_counters
             WHERE user_id = :user_id AND widget_id = :widget_id
@@ -372,12 +357,12 @@ def upsert_counter(
     if not field_norm:
         raise HTTPException(status_code=400, detail="field must be di1..di6 (or legacy in1..in6)")
 
-    dash = _normalize_dashboard_id(body.dashboard_id) if body.dashboard_id is not None else None
+    dash = _normalize_dashboard_id_text(body.dashboard_id)
 
     # check if exists
     if body.dashboard_id is not None:
         if dash is None:
-            find_q = sa_text("""
+            find_q = text("""
                 SELECT id
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id IS NULL
@@ -385,7 +370,7 @@ def upsert_counter(
             """)
             found = db.execute(find_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
         else:
-            find_q = sa_text("""
+            find_q = text("""
                 SELECT id
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id = :dashboard_id
@@ -396,7 +381,7 @@ def upsert_counter(
                 {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
-        find_q = sa_text("""
+        find_q = text("""
             SELECT id
             FROM public.device_counters
             WHERE user_id = :user_id AND widget_id = :widget_id
@@ -405,7 +390,7 @@ def upsert_counter(
         found = db.execute(find_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
 
     if found:
-        upd_q = sa_text("""
+        upd_q = text("""
             UPDATE public.device_counters
             SET device_id = :device_id,
                 field = :field,
@@ -430,12 +415,12 @@ def upsert_counter(
     # create new row
     new_id = str(uuid.uuid4())
 
-    # ✅ init prev01 to current state (prevents first-tick phantom edge)
+    # init prev01 to current state (prevents first-tick phantom edge)
     cur01 = _get_current_field_value(db, user, device_id, field_norm)
     if cur01 is None:
         cur01 = 0
 
-    ins_q = sa_text("""
+    ins_q = text("""
         INSERT INTO public.device_counters
           (id, user_id, dashboard_id, widget_id, device_id, field, count, prev01, enabled, created_at, updated_at)
         VALUES
@@ -447,7 +432,7 @@ def upsert_counter(
         {
             "id": new_id,
             "user_id": user.id,
-            "dashboard_id": dash,  # TEXT or None
+            "dashboard_id": dash,
             "widget_id": widget_id,
             "device_id": device_id,
             "field": field_norm,
@@ -469,12 +454,12 @@ def reset_counter(
     if not widget_id:
         raise HTTPException(status_code=400, detail="widget_id is required")
 
-    dash = _normalize_dashboard_id(body.dashboard_id) if body.dashboard_id is not None else None
+    dash = _normalize_dashboard_id_text(body.dashboard_id)
 
     # fetch row first to know device_id + field
     if body.dashboard_id is not None:
         if dash is None:
-            get_q = sa_text("""
+            get_q = text("""
                 SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id IS NULL
@@ -482,7 +467,7 @@ def reset_counter(
             """)
             row = db.execute(get_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
         else:
-            get_q = sa_text("""
+            get_q = text("""
                 SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id = :dashboard_id
@@ -493,7 +478,7 @@ def reset_counter(
                 {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
-        get_q = sa_text("""
+        get_q = text("""
             SELECT *
             FROM public.device_counters
             WHERE user_id = :user_id AND widget_id = :widget_id
@@ -504,8 +489,8 @@ def reset_counter(
     if not row:
         raise HTTPException(status_code=404, detail="Counter not found")
 
-    device_id = row["device_id"]
-    field = row["field"]
+    device_id = row["device_id"] or ""
+    field = row["field"] or "di1"
 
     cur01 = _get_current_field_value(db, user, device_id, field)
     if cur01 is None:
@@ -514,7 +499,7 @@ def reset_counter(
     # update
     if body.dashboard_id is not None:
         if dash is None:
-            q = sa_text("""
+            q = text("""
                 UPDATE public.device_counters
                 SET count = 0,
                     prev01 = :prev01,
@@ -527,7 +512,7 @@ def reset_counter(
                 {"user_id": user.id, "widget_id": widget_id, "prev01": int(cur01)},
             ).mappings().first()
         else:
-            q = sa_text("""
+            q = text("""
                 UPDATE public.device_counters
                 SET count = 0,
                     prev01 = :prev01,
@@ -545,7 +530,7 @@ def reset_counter(
                 },
             ).mappings().first()
     else:
-        q = sa_text("""
+        q = text("""
             UPDATE public.device_counters
             SET count = 0,
                 prev01 = :prev01,
@@ -573,18 +558,18 @@ def delete_counter(
     if not widget_id:
         raise HTTPException(status_code=400, detail="widget_id is required")
 
-    dash = _normalize_dashboard_id(dashboard_id) if dashboard_id is not None else None
+    dash = _normalize_dashboard_id_text(dashboard_id) if dashboard_id is not None else None
 
     if dashboard_id is not None:
         if dash is None:
-            q = sa_text("""
+            q = text("""
                 DELETE FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id IS NULL
                 RETURNING id
             """)
             row = db.execute(q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
         else:
-            q = sa_text("""
+            q = text("""
                 DELETE FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id = :dashboard_id
                 RETURNING id
@@ -594,7 +579,7 @@ def delete_counter(
                 {"user_id": user.id, "widget_id": widget_id, "dashboard_id": dash},
             ).mappings().first()
     else:
-        q = sa_text("""
+        q = text("""
             DELETE FROM public.device_counters
             WHERE user_id = :user_id AND widget_id = :widget_id
             RETURNING id
