@@ -6,6 +6,7 @@ from typing import Optional, Dict, Tuple, List
 
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
+from datetime import datetime, timezone
 
 # Try to reuse your project's engine if available
 try:
@@ -84,8 +85,21 @@ def _to01(v) -> Optional[int]:
         return 1 if v else 0
 
 
+def _clamp_int(v, lo=0, hi=10) -> int:
+    try:
+        n = int(v)
+    except Exception:
+        n = 0
+    if n < lo:
+        return lo
+    if n > hi:
+        return hi
+    return n
+
+
 # ----------------------------
 # ✅ Bulk device read (tenant safe)
+# NOTE: Only ZHC1921 has di1..di6 in your schema.
 # ----------------------------
 def _bulk_read_zhc1921_rows(db, pairs_list: List[Tuple[int, str]]):
     """
@@ -95,7 +109,6 @@ def _bulk_read_zhc1921_rows(db, pairs_list: List[Tuple[int, str]]):
     if not pairs_list:
         return []
 
-    # Build VALUES table safely with bind params
     values_sql_parts = []
     params = {}
     for i, (uid, did) in enumerate(pairs_list):
@@ -117,21 +130,25 @@ def _bulk_read_zhc1921_rows(db, pairs_list: List[Tuple[int, str]]):
       ON w.user_id = z.claimed_by_user_id
      AND w.device_id = z.device_id
     """
-
     return db.execute(text(q), params).mappings().all()
 
 
 # ----------------------------
 # ✅ Tick one pass (fast)
 # ----------------------------
-def _tick_once(db) -> int:
+def _tick_once(db, interval_sec: float) -> int:
     """
     Processes enabled counters.
     Returns number of updated counter rows.
     """
-    # 1) Load enabled counters (only what we need)
+    # Safety clamp:
+    # - if server sleeps, we don't want huge jumps
+    # - allow up to max(5, ~3 ticks worth)
+    max_delta = max(5, int(float(interval_sec) * 3))
+
+    # 1) Load enabled counters (include timer fields)
     q = """
-    SELECT id, user_id, device_id, field, count, prev01
+    SELECT id, user_id, device_id, field, count, prev01, run_seconds, last_tick_at
     FROM public.device_counters
     WHERE enabled = TRUE
     ORDER BY updated_at ASC
@@ -140,7 +157,7 @@ def _tick_once(db) -> int:
     if not counters:
         return 0
 
-    # 2) Build the unique (user_id, device_id) pairs we must read
+    # 2) Build unique (user_id, device_id) pairs + normalized DI field per counter
     pairs: set[Tuple[int, str]] = set()
     norm_field_by_counter: Dict[str, str] = {}
 
@@ -156,17 +173,17 @@ def _tick_once(db) -> int:
     if not pairs:
         return 0
 
-    # 3) Bulk read device rows (tenant safe)
-    pairs_list = list(pairs)
-    rows = _bulk_read_zhc1921_rows(db, pairs_list)
+    # 3) Bulk read device rows (tenant safe) — ZHC1921 only
+    rows = _bulk_read_zhc1921_rows(db, list(pairs))
 
     live: Dict[Tuple[int, str], Dict] = {}
     for r in rows:
         key = (int(r["user_id"]), str(r["device_id"]).strip())
         live[key] = r
 
-    # 4) Apply rising-edge logic
+    # 4) Apply rising-edge logic + running timer accumulation
     updates = 0
+    now = datetime.now(timezone.utc)
 
     for c in counters:
         cid = str(c["id"])
@@ -185,26 +202,72 @@ def _tick_once(db) -> int:
         if cur01 is None:
             continue
 
-        prev01 = int(c["prev01"] or 0)
-        old_count = int(c["count"] or 0)
+        prev01 = int(c.get("prev01") or 0)
+        old_count = int(c.get("count") or 0)
+        run_seconds = int(c.get("run_seconds") or 0)
+        last_tick_at = c.get("last_tick_at")
 
+        # Initialize last_tick_at on first run (no time added)
+        if last_tick_at is None:
+            init_q = """
+            UPDATE public.device_counters
+            SET last_tick_at = NOW(),
+                prev01 = :prev01,
+                updated_at = NOW()
+            WHERE id = :id
+            """
+            db.execute(text(init_q), {"id": c["id"], "prev01": cur01})
+            updates += 1
+            continue
+
+        # Ensure tz-aware for safe subtraction
+        try:
+            if getattr(last_tick_at, "tzinfo", None) is None:
+                last_tick_at = last_tick_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+        # Compute delta seconds since last tick
+        try:
+            delta = int((now - last_tick_at).total_seconds())
+        except Exception:
+            delta = 0
+
+        delta = _clamp_int(delta, 0, max_delta)
+
+        # Rising edge count 0 -> 1
         new_count = old_count
-        # rising edge 0 -> 1
         if prev01 == 0 and cur01 == 1:
             new_count = old_count + 1
 
-        # update if needed
-        if new_count != old_count or prev01 != cur01:
+        # ✅ Timer: accumulate only while input is active
+        if cur01 == 1 and delta > 0:
+            run_seconds += delta
+
+        need_update = (
+            (new_count != old_count)
+            or (prev01 != cur01)
+            or (cur01 == 1 and delta > 0)
+        )
+
+        if need_update:
             upd = """
             UPDATE public.device_counters
             SET count = :count,
                 prev01 = :prev01,
+                run_seconds = :run_seconds,
+                last_tick_at = NOW(),
                 updated_at = NOW()
             WHERE id = :id
             """
             db.execute(
                 text(upd),
-                {"id": c["id"], "count": new_count, "prev01": cur01},
+                {
+                    "id": c["id"],
+                    "count": new_count,
+                    "prev01": cur01,
+                    "run_seconds": run_seconds,
+                },
             )
             updates += 1
 
@@ -225,7 +288,7 @@ async def _runner(interval_sec: float):
         try:
             db = SessionLocal()
             try:
-                _tick_once(db)
+                _tick_once(db, interval_sec)
             finally:
                 db.close()
         except Exception as e:
@@ -247,7 +310,7 @@ def start_device_counters_tick(interval_sec: float = DEFAULT_INTERVAL_SEC):
     except RuntimeError:
         loop = asyncio.get_event_loop()
 
-    _task = loop.create_task(_runner(interval_sec))
+    _task = loop.create_task(_runner(float(interval_sec)))
     print(f"✅ device_counters_tick started (interval={interval_sec}s)")
 
 

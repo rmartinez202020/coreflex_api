@@ -47,6 +47,9 @@ def _row_to_dict(r):
         "field": r["field"],
         "count": r["count"],
         "prev01": r["prev01"],
+        # ✅ NEW: running time fields (seconds)
+        "run_seconds": int(r.get("run_seconds") or 0),
+        "last_tick_at": r["last_tick_at"].isoformat() if r.get("last_tick_at") else None,
         "enabled": r["enabled"],
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
@@ -94,9 +97,9 @@ def _normalize_field(field: str) -> str:
 
 def _normalize_dashboard_id_text(dashboard_id: Optional[str]) -> Optional[str]:
     """
-    ✅ device_counters.dashboard_id is TEXT (per pgAdmin screenshot)
+    ✅ device_counters.dashboard_id is TEXT
     - Treat "main" and blank as NULL (main dashboard)
-    - Otherwise store the trimmed text value (uuid string or any string you use)
+    - Otherwise store the trimmed text value
     """
     s = (dashboard_id or "").strip()
     if not s:
@@ -116,7 +119,6 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
     if not device_id or not field:
         return None
 
-    # ZHC1921 (CF-2000)
     r1921 = (
         db.query(ZHC1921Device)
         .filter(ZHC1921Device.device_id == device_id)
@@ -126,7 +128,6 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
     if r1921:
         return _to01(getattr(r1921, field, None))
 
-    # ZHC1661 (CF-1600)
     r1661 = (
         db.query(ZHC1661Device)
         .filter(ZHC1661Device.device_id == device_id)
@@ -136,7 +137,6 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
     if r1661:
         return _to01(getattr(r1661, field, None))
 
-    # TP4000
     rtp = (
         db.query(TP4000Device)
         .filter(TP4000Device.device_id == device_id)
@@ -152,7 +152,6 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
 # ----------------------------
 # ✅ ROUTES
 # ----------------------------
-
 @router.post("/create-placeholder")
 def create_placeholder_counter(
     body: CreatePlaceholderBody,
@@ -162,7 +161,6 @@ def create_placeholder_counter(
     """
     ✅ Called when user DROPS the counter widget on canvas.
     Creates a row even before device/tag is configured.
-    Later, /upsert will update device_id + field, and tick will start counting.
     """
     widget_id = (body.widget_id or "").strip()
     if not widget_id:
@@ -198,14 +196,18 @@ def create_placeholder_counter(
     if existing:
         return _row_to_dict(existing)
 
-    # ✅ create placeholder with safe defaults
     new_id = str(uuid.uuid4())
 
+    # ✅ Keep last_tick_at NULL here; tick engine will initialize it
     ins_q = text("""
         INSERT INTO public.device_counters
-          (id, user_id, dashboard_id, widget_id, device_id, field, count, prev01, enabled, created_at, updated_at)
+          (id, user_id, dashboard_id, widget_id, device_id, field,
+           count, prev01, run_seconds, last_tick_at,
+           enabled, created_at, updated_at)
         VALUES
-          (:id, :user_id, :dashboard_id, :widget_id, :device_id, :field, 0, 0, :enabled, NOW(), NOW())
+          (:id, :user_id, :dashboard_id, :widget_id, :device_id, :field,
+           0, 0, 0, NULL,
+           :enabled, NOW(), NOW())
         RETURNING *
     """)
 
@@ -214,11 +216,11 @@ def create_placeholder_counter(
         {
             "id": new_id,
             "user_id": user.id,
-            "dashboard_id": dash,          # TEXT or NULL
+            "dashboard_id": dash,
             "widget_id": widget_id,
-            "device_id": "",               # placeholder
-            "field": "di1",                # placeholder
-            "enabled": False,              # disabled until configured
+            "device_id": "",
+            "field": "di1",
+            "enabled": False,
         },
     ).mappings().first()
     db.commit()
@@ -346,8 +348,8 @@ def upsert_counter(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    widget_id = body.widget_id.strip()
-    device_id = body.device_id.strip()
+    widget_id = (body.widget_id or "").strip()
+    device_id = (body.device_id or "").strip()
     field_raw = (body.field or "").strip()
 
     if not widget_id or not device_id or not field_raw:
@@ -359,11 +361,11 @@ def upsert_counter(
 
     dash = _normalize_dashboard_id_text(body.dashboard_id)
 
-    # check if exists
+    # find existing row id (+ current device/field so we can decide timer reset)
     if body.dashboard_id is not None:
         if dash is None:
             find_q = text("""
-                SELECT id
+                SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id IS NULL
                 LIMIT 1
@@ -371,7 +373,7 @@ def upsert_counter(
             found = db.execute(find_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
         else:
             find_q = text("""
-                SELECT id
+                SELECT *
                 FROM public.device_counters
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id = :dashboard_id
                 LIMIT 1
@@ -382,23 +384,52 @@ def upsert_counter(
             ).mappings().first()
     else:
         find_q = text("""
-            SELECT id
+            SELECT *
             FROM public.device_counters
             WHERE user_id = :user_id AND widget_id = :widget_id
             LIMIT 1
         """)
         found = db.execute(find_q, {"user_id": user.id, "widget_id": widget_id}).mappings().first()
 
+    # init prev01 to current state (prevents phantom edge + timer jump after config)
+    cur01 = _get_current_field_value(db, user, device_id, field_norm)
+    if cur01 is None:
+        cur01 = 0
+
     if found:
-        upd_q = text("""
-            UPDATE public.device_counters
-            SET device_id = :device_id,
-                field = :field,
-                enabled = :enabled,
-                updated_at = NOW()
-            WHERE id = :id AND user_id = :user_id
-            RETURNING *
-        """)
+        old_device = (found.get("device_id") or "").strip()
+        old_field = (found.get("field") or "").strip().lower()
+
+        config_changed = (old_device != device_id) or (old_field != field_norm)
+
+        # ✅ Only reset run_seconds if the user truly changed what they're tracking
+        if config_changed:
+            upd_q = text("""
+                UPDATE public.device_counters
+                SET device_id = :device_id,
+                    field = :field,
+                    enabled = :enabled,
+                    count = 0,
+                    prev01 = :prev01,
+                    run_seconds = 0,
+                    last_tick_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :id AND user_id = :user_id
+                RETURNING *
+            """)
+        else:
+            upd_q = text("""
+                UPDATE public.device_counters
+                SET device_id = :device_id,
+                    field = :field,
+                    enabled = :enabled,
+                    prev01 = :prev01,
+                    last_tick_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :id AND user_id = :user_id
+                RETURNING *
+            """)
+
         row = db.execute(
             upd_q,
             {
@@ -407,24 +438,25 @@ def upsert_counter(
                 "device_id": device_id,
                 "field": field_norm,
                 "enabled": body.enabled,
+                "prev01": int(cur01),
             },
         ).mappings().first()
+
         db.commit()
         return _row_to_dict(row)
 
     # create new row
     new_id = str(uuid.uuid4())
 
-    # init prev01 to current state (prevents first-tick phantom edge)
-    cur01 = _get_current_field_value(db, user, device_id, field_norm)
-    if cur01 is None:
-        cur01 = 0
-
     ins_q = text("""
         INSERT INTO public.device_counters
-          (id, user_id, dashboard_id, widget_id, device_id, field, count, prev01, enabled, created_at, updated_at)
+          (id, user_id, dashboard_id, widget_id, device_id, field,
+           count, prev01, run_seconds, last_tick_at,
+           enabled, created_at, updated_at)
         VALUES
-          (:id, :user_id, :dashboard_id, :widget_id, :device_id, :field, 0, :prev01, :enabled, NOW(), NOW())
+          (:id, :user_id, :dashboard_id, :widget_id, :device_id, :field,
+           0, :prev01, 0, NOW(),
+           :enabled, NOW(), NOW())
         RETURNING *
     """)
     row = db.execute(
@@ -450,13 +482,13 @@ def reset_counter(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    widget_id = body.widget_id.strip()
+    widget_id = (body.widget_id or "").strip()
     if not widget_id:
         raise HTTPException(status_code=400, detail="widget_id is required")
 
     dash = _normalize_dashboard_id_text(body.dashboard_id)
 
-    # fetch row first to know device_id + field
+    # fetch row first
     if body.dashboard_id is not None:
         if dash is None:
             get_q = text("""
@@ -489,20 +521,21 @@ def reset_counter(
     if not row:
         raise HTTPException(status_code=404, detail="Counter not found")
 
-    device_id = row["device_id"] or ""
-    field = row["field"] or "di1"
+    device_id = (row.get("device_id") or "").strip()
+    field = (row.get("field") or "di1").strip()
 
     cur01 = _get_current_field_value(db, user, device_id, field)
     if cur01 is None:
         cur01 = 0
 
-    # update
     if body.dashboard_id is not None:
         if dash is None:
             q = text("""
                 UPDATE public.device_counters
                 SET count = 0,
                     prev01 = :prev01,
+                    run_seconds = 0,
+                    last_tick_at = NOW(),
                     updated_at = NOW()
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id IS NULL
                 RETURNING *
@@ -516,6 +549,8 @@ def reset_counter(
                 UPDATE public.device_counters
                 SET count = 0,
                     prev01 = :prev01,
+                    run_seconds = 0,
+                    last_tick_at = NOW(),
                     updated_at = NOW()
                 WHERE user_id = :user_id AND widget_id = :widget_id AND dashboard_id = :dashboard_id
                 RETURNING *
@@ -534,6 +569,8 @@ def reset_counter(
             UPDATE public.device_counters
             SET count = 0,
                 prev01 = :prev01,
+                run_seconds = 0,
+                last_tick_at = NOW(),
                 updated_at = NOW()
             WHERE user_id = :user_id AND widget_id = :widget_id
             RETURNING *
