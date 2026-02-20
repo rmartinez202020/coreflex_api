@@ -12,15 +12,36 @@ from database import get_db
 from auth_utils import get_current_user  # ✅ FIX (was auth_routes)
 from models import ControlBinding, ZHC1921Device
 
-
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
 ALLOWED_FIELDS = {"do1", "do2", "do3", "do4"}
 ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
 
 # ✅ Node-RED endpoint that will perform the actual DO write
-# Example: http://localhost:1880/coreflex/do/write
+# Example: http://98.90.225.131:1880/coreflex/command
 NODE_RED_DO_WRITE_URL = os.getenv("NODE_RED_DO_WRITE_URL", "").strip()
+
+# ✅ Optional shared-key protection for backend -> Node-RED commands
+# Node-RED should validate header: X-COMMAND-KEY
+NODE_RED_COMMAND_KEY = os.getenv("NODE_RED_COMMAND_KEY", "").strip()
+
+
+def _as_str(v) -> str:
+  return (v or "").strip()
+
+
+def _raise_node_red_not_configured():
+  raise HTTPException(
+    status_code=500,
+    detail="NODE_RED_DO_WRITE_URL not configured on server",
+  )
+
+
+def _node_red_headers() -> dict:
+  headers = {"Content-Type": "application/json"}
+  if NODE_RED_COMMAND_KEY:
+    headers["X-COMMAND-KEY"] = NODE_RED_COMMAND_KEY
+  return headers
 
 
 # ===============================
@@ -228,8 +249,8 @@ def write_control_do(
   if not row:
     raise HTTPException(status_code=404, detail="Control binding not found")
 
-  device_id = StringOrEmpty(row.bind_device_id).strip() if False else (row.bind_device_id or "").strip()
-  field = (row.bind_field or "").strip().lower()
+  device_id = _as_str(row.bind_device_id)
+  field = _as_str(row.bind_field).lower()
 
   if not device_id:
     raise HTTPException(status_code=400, detail="Binding missing deviceId")
@@ -262,10 +283,7 @@ def write_control_do(
 
   # 5) forward to node-red
   if not NODE_RED_DO_WRITE_URL:
-    raise HTTPException(
-      status_code=500,
-      detail="NODE_RED_DO_WRITE_URL not configured on server",
-    )
+    _raise_node_red_not_configured()
 
   payload = {
     "device_id": device_id,
@@ -278,7 +296,12 @@ def write_control_do(
   }
 
   try:
-    r = requests.post(NODE_RED_DO_WRITE_URL, json=payload, timeout=4)
+    r = requests.post(
+      NODE_RED_DO_WRITE_URL,
+      json=payload,
+      headers=_node_red_headers(),
+      timeout=4,
+    )
   except Exception as e:
     raise HTTPException(status_code=502, detail=f"Node-RED unreachable: {e}")
 
