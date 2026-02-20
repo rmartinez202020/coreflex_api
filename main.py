@@ -204,14 +204,15 @@ from routers.device_counters import router as device_counters_router  # noqa: E4
 app.include_router(device_counters_router)
 
 # ========================================
-# ✅ TOGGLE WIDGET ROUTES (DO UNIQUE PER DASHBOARD)
+# ✅ CONTROL BINDINGS ROUTES (DO UNIQUE PER DASHBOARD)
 # endpoints:
-#   POST   /toggle-widgets/bind
-#   GET    /toggle-widgets/used?dashboardId=...&deviceId=...
+#   POST   /control-bindings/bind
+#   GET    /control-bindings/used?dashboardId=...&deviceId=...
+#   DELETE /control-bindings?dashboardId=...&widgetId=...
 # ========================================
-from routers.toggle_widget import router as toggle_widget_router  # noqa: E402
+from routers.control_bindings import router as control_bindings_router  # noqa: E402
 
-app.include_router(toggle_widget_router)
+app.include_router(control_bindings_router)
 
 # ========================================
 # ❤️ HEALTH CHECK

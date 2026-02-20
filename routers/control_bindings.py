@@ -1,28 +1,37 @@
-# routers/toggle_widget.py
+# routers/control_bindings.py
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-
-from database import get_db
-from auth_routes import get_current_user  # adjust if needed
-from models.toggle_widget import ToggleWidget
-from models import ZHC1921Device  # adjust import if needed
-
 from pydantic import BaseModel, Field
 
+from database import get_db
+from auth_routes import get_current_user
+from models.control_binding import ControlBinding
+from models import ZHC1921Device  # expand later for other models
 
-router = APIRouter(prefix="/toggle-widgets", tags=["Toggle Widgets"])
+
+router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
 ALLOWED_FIELDS = {"do1", "do2", "do3", "do4"}
+
+# All control widgets allowed to bind DO
+ALLOWED_WIDGET_TYPES = {
+    "toggle",
+    "push_no",
+    "push_nc",
+}
 
 
 # ===============================
 # 📦 Request Schema
 # ===============================
-class ToggleBindRequest(BaseModel):
+class ControlBindRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
     widgetId: str = Field(..., min_length=1)
+
+    widgetType: str = Field(..., min_length=1)
+
     title: str | None = None
 
     deviceId: str = Field(..., min_length=1)
@@ -30,21 +39,28 @@ class ToggleBindRequest(BaseModel):
 
 
 # ===============================
-# 🔒 Bind Toggle to DO
+# 🔒 Bind Control to DO
 # ===============================
 @router.post("/bind")
-def bind_toggle(
-    req: ToggleBindRequest,
+def bind_control(
+    req: ControlBindRequest,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
     dashboard_id = req.dashboardId.strip()
     widget_id = req.widgetId.strip()
+
+    widget_type = req.widgetType.strip().lower()
+    title = (req.title or "").strip() or None
+
     device_id = req.deviceId.strip()
     field = req.field.strip().lower()
 
     if field not in ALLOWED_FIELDS:
         raise HTTPException(status_code=400, detail="Invalid DO field")
+
+    if widget_type not in ALLOWED_WIDGET_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid widgetType")
 
     # ✅ Ensure user owns the device
     device = (
@@ -61,24 +77,26 @@ def bind_toggle(
 
     # ✅ Upsert by (user, dashboard, widget)
     row = (
-        db.query(ToggleWidget)
+        db.query(ControlBinding)
         .filter(
-            ToggleWidget.user_id == user.id,
-            ToggleWidget.dashboard_id == dashboard_id,
-            ToggleWidget.widget_id == widget_id,
+            ControlBinding.user_id == user.id,
+            ControlBinding.dashboard_id == dashboard_id,
+            ControlBinding.widget_id == widget_id,
         )
         .first()
     )
 
     if not row:
-        row = ToggleWidget(
+        row = ControlBinding(
             user_id=user.id,
             dashboard_id=dashboard_id,
             widget_id=widget_id,
+            widget_type=widget_type,
         )
         db.add(row)
 
-    row.title = (req.title or "").strip() or None
+    row.widget_type = widget_type
+    row.title = title
     row.bind_device_id = device_id
     row.bind_field = field
 
@@ -88,13 +106,13 @@ def bind_toggle(
         db.rollback()
 
         used = (
-            db.query(ToggleWidget)
+            db.query(ControlBinding)
             .filter(
-                ToggleWidget.user_id == user.id,
-                ToggleWidget.dashboard_id == dashboard_id,
-                ToggleWidget.bind_device_id == device_id,
-                ToggleWidget.bind_field == field,
-                ToggleWidget.widget_id != widget_id,
+                ControlBinding.user_id == user.id,
+                ControlBinding.dashboard_id == dashboard_id,
+                ControlBinding.bind_device_id == device_id,
+                ControlBinding.bind_field == field,
+                ControlBinding.widget_id != widget_id,
             )
             .first()
         )
@@ -105,6 +123,7 @@ def bind_toggle(
                 "error": f"{field.upper()} already used",
                 "usedByWidgetId": used.widget_id if used else None,
                 "usedByTitle": used.title if used else None,
+                "usedByWidgetType": used.widget_type if used else None,
             },
         )
 
@@ -112,10 +131,10 @@ def bind_toggle(
 
 
 # ===============================
-# 📡 Get Used DOs for Dashboard
+# 📡 Get Used DOs
 # ===============================
 @router.get("/used")
-def get_used_dos(
+def get_used(
     dashboardId: str = Query(...),
     deviceId: str = Query(...),
     db: Session = Depends(get_db),
@@ -125,12 +144,12 @@ def get_used_dos(
     dev_id = deviceId.strip()
 
     rows = (
-        db.query(ToggleWidget)
+        db.query(ControlBinding)
         .filter(
-            ToggleWidget.user_id == user.id,
-            ToggleWidget.dashboard_id == dash_id,
-            ToggleWidget.bind_device_id == dev_id,
-            ToggleWidget.bind_field.isnot(None),
+            ControlBinding.user_id == user.id,
+            ControlBinding.dashboard_id == dash_id,
+            ControlBinding.bind_device_id == dev_id,
+            ControlBinding.bind_field.isnot(None),
         )
         .all()
     )
@@ -140,6 +159,7 @@ def get_used_dos(
             "field": r.bind_field,
             "widgetId": r.widget_id,
             "title": r.title,
+            "widgetType": r.widget_type,
         }
         for r in rows
         if r.bind_field
@@ -147,14 +167,14 @@ def get_used_dos(
 
 
 # ===============================
-# 🗑️ Delete Toggle Widget Row
-# When a toggle is deleted from the dashboard, delete its DB row
-# so its DO can be reused.
+# 🗑️ Delete Binding
+# When widget is deleted from dashboard,
+# free the DO so it can be reused.
 #
-# DELETE /toggle-widgets?dashboardId=...&widgetId=...
+# DELETE /control-bindings?dashboardId=...&widgetId=...
 # ===============================
 @router.delete("")
-def delete_toggle_widget(
+def delete_binding(
     dashboardId: str = Query(...),
     widgetId: str = Query(...),
     db: Session = Depends(get_db),
@@ -164,17 +184,16 @@ def delete_toggle_widget(
     wid = widgetId.strip()
 
     row = (
-        db.query(ToggleWidget)
+        db.query(ControlBinding)
         .filter(
-            ToggleWidget.user_id == user.id,
-            ToggleWidget.dashboard_id == dash_id,
-            ToggleWidget.widget_id == wid,
+            ControlBinding.user_id == user.id,
+            ControlBinding.dashboard_id == dash_id,
+            ControlBinding.widget_id == wid,
         )
         .first()
     )
 
     if not row:
-        # idempotent delete
         return {"ok": True, "deleted": 0}
 
     db.delete(row)

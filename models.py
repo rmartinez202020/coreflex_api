@@ -1,5 +1,14 @@
 # models.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Float,
+    DateTime,
+    ForeignKey,
+    Boolean,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -83,6 +92,14 @@ class User(Base):
     tp4000_devices = relationship(
         "TP4000Device",
         back_populates="claimed_by_user",
+        passive_deletes=True,
+    )
+
+    # ✅ one user -> many control bindings (Toggle / Push NO / Push NC, etc.)
+    control_bindings = relationship(
+        "ControlBinding",
+        back_populates="user",
+        cascade="all, delete-orphan",
         passive_deletes=True,
     )
 
@@ -472,3 +489,53 @@ class CustomerDashboard(Base):
     )
 
     user = relationship("User", back_populates="customer_dashboards")
+
+
+# ===============================
+# 🎛 CONTROL BINDINGS (Toggle / Push NO / Push NC)
+# One row per control widget instance that binds to a DO
+# Enforces: only one widget can use a DO per dashboard (per user)
+# ===============================
+class ControlBinding(Base):
+    __tablename__ = "control_bindings"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    dashboard_id = Column(String, nullable=False, index=True)
+    widget_id = Column(String, nullable=False, index=True)
+
+    # ✅ "toggle" | "push_no" | "push_nc" (future: selector, interlock, etc.)
+    widget_type = Column(String, nullable=False, index=True)
+
+    title = Column(String, nullable=True)
+
+    bind_device_id = Column(String, nullable=True, index=True)
+    bind_field = Column(String, nullable=True, index=True)  # do1..do4
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "dashboard_id",
+            "widget_id",
+            name="uq_control_widget_once",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "dashboard_id",
+            "bind_device_id",
+            "bind_field",
+            name="uq_control_do_once_per_dashboard",
+        ),
+    )
+
+    user = relationship("User", back_populates="control_bindings")
