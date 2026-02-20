@@ -10,3 +10,4 @@ email-validator
 httpx
 cloudinary
 python-multipart
+requests
