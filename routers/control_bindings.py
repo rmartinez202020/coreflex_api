@@ -1,5 +1,7 @@
 # routers/control_bindings.py
 
+import os
+import threading
 import requests
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,11 +20,19 @@ ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
 
 # ✅ Node-RED endpoint that will perform the actual DO write
 # Example: http://98.90.225.131:1880/coreflex/command
-NODE_RED_DO_WRITE_URL = "http://98.90.225.131:1880/coreflex/command"
+# ✅ Use env if present, otherwise fallback to your URL
+NODE_RED_DO_WRITE_URL = os.getenv(
+  "NODE_RED_DO_WRITE_URL",
+  "http://98.90.225.131:1880/coreflex/command",
+).strip()
 
 # ✅ Optional shared-key protection for backend -> Node-RED commands
 # Node-RED should validate header: X-COMMAND-KEY
-NODE_RED_COMMAND_KEY = "CFX_k29sLx92Jd8slQp4NzT7MartinezVx93LwQa2"
+# ✅ Use env if present, otherwise fallback to your key
+NODE_RED_COMMAND_KEY = os.getenv(
+  "NODE_RED_COMMAND_KEY",
+  "CFX_k29sLx92Jd8slQp4NzT7MartinezVx93LwQa2",
+).strip()
 
 
 def _as_str(v) -> str:
@@ -41,6 +51,24 @@ def _node_red_headers() -> dict:
   if NODE_RED_COMMAND_KEY:
     headers["X-COMMAND-KEY"] = NODE_RED_COMMAND_KEY
   return headers
+
+
+def _post_to_node_red_async(url: str, payload: dict, headers: dict):
+  """
+  Fire-and-forget sender.
+  We intentionally do NOT fail the API call if Node-RED doesn't respond.
+  """
+  try:
+    # keep timeout short to avoid stuck threads
+    r = requests.post(url, json=payload, headers=headers, timeout=4)
+    if r.status_code >= 400:
+      try:
+        print("❌ Node-RED write failed:", r.status_code, (r.text or "").strip())
+      except Exception:
+        print("❌ Node-RED write failed:", r.status_code)
+  except Exception as e:
+    # Don't crash API; just log
+    print("❌ Node-RED unreachable:", repr(e))
 
 
 # ===============================
@@ -188,9 +216,6 @@ def get_used_dos(
 
 # ===============================
 # 🗑️ Delete Control Binding Row
-# Release DO so it can be reused.
-#
-# DELETE /control-bindings?dashboardId=...&widgetId=...
 # ===============================
 @router.delete("")
 def delete_control_binding(
@@ -222,9 +247,6 @@ def delete_control_binding(
 
 # ===============================
 # 🕹️ Write DO (PLAY MODE)
-# Frontend sends: dashboardId, widgetId, value01 (0/1)
-# Backend resolves deviceId + do# from ControlBinding
-# Then forwards to Node-RED as: { device_id, do, value }
 # ===============================
 @router.post("/write")
 def write_control_do(
@@ -280,7 +302,7 @@ def write_control_do(
   # 4) value01 -> boolean (matches your Node-RED inject true/false)
   value_bool = True if int(req.value01) == 1 else False
 
-  # 5) forward to node-red
+  # 5) forward to node-red (fire-and-forget)
   if not NODE_RED_DO_WRITE_URL:
     _raise_node_red_not_configured()
 
@@ -288,35 +310,24 @@ def write_control_do(
     "device_id": device_id,
     "do": do_num,
     "value": value_bool,
-    # helpful metadata (optional)
     "dashboard_id": dash_id,
     "widget_id": wid,
     "user_id": user.id,
   }
 
-  try:
-    r = requests.post(
-      NODE_RED_DO_WRITE_URL,
-      json=payload,
-      headers=_node_red_headers(),
-      timeout=4,
-    )
-  except Exception as e:
-    raise HTTPException(status_code=502, detail=f"Node-RED unreachable: {e}")
+  # ✅ Do NOT wait for Node-RED response (prevents 502/timeouts)
+  t = threading.Thread(
+    target=_post_to_node_red_async,
+    args=(NODE_RED_DO_WRITE_URL, payload, _node_red_headers()),
+    daemon=True,
+  )
+  t.start()
 
-  if r.status_code >= 400:
-    txt = ""
-    try:
-      txt = r.text or ""
-    except Exception:
-      txt = ""
-    raise HTTPException(
-      status_code=502,
-      detail=txt.strip() or f"Node-RED write failed ({r.status_code})",
-    )
-
-  # pass-through json if node-red returns it
-  try:
-    return r.json()
-  except Exception:
-    return {"ok": True, "deviceId": device_id, "field": field, "value01": req.value01}
+  # ✅ Always return OK immediately
+  return {
+    "ok": True,
+    "sent": True,
+    "deviceId": device_id,
+    "field": field,
+    "value01": int(req.value01),
+  }
