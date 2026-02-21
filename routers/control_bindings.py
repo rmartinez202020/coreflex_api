@@ -19,11 +19,11 @@ ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
 
 # ✅ Node-RED endpoint that will perform the actual DO write
 # Example: http://98.90.225.131:1880/coreflex/command
-NODE_RED_DO_WRITE_URL = os.getenv("NODE_RED_DO_WRITE_URL", "").strip()
+NODE_RED_DO_WRITE_URL = os.getenv("http://98.90.225.131:1880/coreflex/command", "").strip()
 
 # ✅ Optional shared-key protection for backend -> Node-RED commands
 # Node-RED should validate header: X-COMMAND-KEY
-NODE_RED_COMMAND_KEY = os.getenv("NODE_RED_COMMAND_KEY", "").strip()
+NODE_RED_COMMAND_KEY = os.getenv("CFX_k29sLx92Jd8slQp4NzT7MartinezVx93LwQa2", "").strip()
 
 
 def _as_str(v) -> str:
