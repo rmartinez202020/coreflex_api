@@ -539,3 +539,26 @@ class ControlBinding(Base):
     )
 
     user = relationship("User", back_populates="control_bindings")
+
+
+# ===============================
+# 🔒 CONTROL ACTION LOCKS (prevents concurrent writes without holding DB connections)
+# One row per device+field while an action is in progress
+# Expires automatically via expires_at (TTL)
+# ===============================
+class ControlActionLock(Base):
+    __tablename__ = "control_action_locks"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Unique lock key: "dev:<device_id>:<do1..do4>"
+    lock_key = Column(String(200), nullable=False, unique=True, index=True)
+
+    device_id = Column(String(80), nullable=False, index=True)
+    field = Column(String(10), nullable=False, index=True)  # do1..do4
+
+    # who triggered the lock (optional but useful)
+    user_id = Column(Integer, nullable=True, index=True)
+
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

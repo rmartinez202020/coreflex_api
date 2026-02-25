@@ -3,17 +3,17 @@
 import os
 import uuid
 import requests
-import zlib
+
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import text
 from pydantic import BaseModel, Field
 
-from database import get_db
+from database import get_db, SessionLocal
 from auth_utils import get_current_user  # ✅ FIX (was auth_routes)
-from models import ControlBinding, ZHC1921Device
+from models import ControlBinding, ZHC1921Device, ControlActionLock
 
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
@@ -117,30 +117,25 @@ def _post_to_node_red_wait(
 
 
 # ===============================
-# 🔒 Advisory lock helpers
+# 🔒 Lock-table helpers (NO DB connection held during Node-RED)
 # ===============================
-def _lock_key_per_device(device_id: str) -> int:
-  """
-  Strongest mode: blocks ANY concurrent write to same device (do1..do4).
-  """
-  s = f"dev:{device_id}".encode("utf-8")
-  return zlib.crc32(s)  # 0..2^32-1
+def _utc_now():
+  return datetime.now(timezone.utc)
 
 
-def _lock_key_per_do(device_id: str, field: str) -> int:
-  """
-  Alternative mode: blocks only the same DO (device+do1) concurrently.
-  """
-  s = f"dev:{device_id}:{field}".encode("utf-8")
-  return zlib.crc32(s)
+def _lock_key(device_id: str, field: str) -> str:
+  return f"dev:{device_id}:{field}".strip().lower()
 
 
-def _try_advisory_lock(conn, key: int) -> bool:
-  return bool(conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}).scalar())
-
-
-def _advisory_unlock(conn, key: int) -> None:
-  conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+def _cleanup_expired_locks(db: Session) -> None:
+  # Prevent stale locks if server crashes mid-write
+  try:
+    db.query(ControlActionLock).filter(
+      ControlActionLock.expires_at <= _utc_now()
+    ).delete(synchronize_session=False)
+    db.commit()
+  except Exception:
+    db.rollback()
 
 
 # ===============================
@@ -379,6 +374,40 @@ def write_control_do(
     _raise_node_red_not_configured()
 
   request_id = str(uuid.uuid4())
+  lk = _lock_key(device_id, field)
+  expires_at = _utc_now() + timedelta(milliseconds=int(ACTUATION_HOLD_MS))
+
+  # 1) Acquire lock (DB only for milliseconds)
+  _cleanup_expired_locks(db)
+
+  lock_row = ControlActionLock(
+    lock_key=lk,
+    device_id=device_id,
+    field=field,
+    user_id=user.id,
+    expires_at=expires_at,
+  )
+
+  try:
+    db.add(lock_row)
+    db.commit()
+  except IntegrityError:
+    db.rollback()
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "error": "Control Action in Progress",
+        "deviceId": device_id,
+        "field": field,
+        "actuationHoldMs": ACTUATION_HOLD_MS,
+      },
+    )
+
+  # ✅ IMPORTANT: release DB connection BEFORE calling Node-RED
+  try:
+    db.close()
+  except Exception:
+    pass
 
   payload = {
     "request_id": request_id,
@@ -390,25 +419,8 @@ def write_control_do(
     "user_id": user.id,
   }
 
-  # ===============================
-  # ✅ BACKEND BLOCK: prevent double write (PER OUTPUT)
-  # ✅ IMPORTANT: NO SLEEP here (prevents DB pool exhaustion / login freeze)
-  # ===============================
-  lock_key = _lock_key_per_do(device_id, field)
-  conn = db.connection()
-
-  if not _try_advisory_lock(conn, lock_key):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "error": "Control Action in Progress",
-        "deviceId": device_id,
-        "field": field,
-        "actuationHoldMs": ACTUATION_HOLD_MS,
-      },
-    )
-
   try:
+    # 2) Call Node-RED (NO DB held)
     result = _post_to_node_red_wait(
       NODE_RED_DO_WRITE_URL,
       payload,
@@ -426,7 +438,15 @@ def write_control_do(
     }
 
   finally:
+    # 3) Release lock (new short DB session)
     try:
-      _advisory_unlock(conn, lock_key)
+      db2 = SessionLocal()
+      try:
+        db2.query(ControlActionLock).filter(
+          ControlActionLock.lock_key == lk
+        ).delete(synchronize_session=False)
+        db2.commit()
+      finally:
+        db2.close()
     except Exception:
       pass
