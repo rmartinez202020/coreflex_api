@@ -4,7 +4,6 @@ import os
 import uuid
 import requests
 import zlib
-import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -20,6 +19,9 @@ router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
 ALLOWED_FIELDS = {"do1", "do2", "do3", "do4"}
 ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
+
+# ✅ Frontend uses this to hold "Control Action in Progress" locally
+ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
 
 # ✅ Node-RED endpoint that will perform the actual DO write
 NODE_RED_DO_WRITE_URL = os.getenv(
@@ -389,25 +391,22 @@ def write_control_do(
   }
 
   # ===============================
-  # ✅ BACKEND BLOCK: prevent double write (PER OUTPUT) + hold 10s
+  # ✅ BACKEND BLOCK: prevent double write (PER OUTPUT)
+  # ✅ IMPORTANT: NO SLEEP here (prevents DB pool exhaustion / login freeze)
   # ===============================
-  # Lock scope: per output (device_id + doX)
   lock_key = _lock_key_per_do(device_id, field)
-
-  # IMPORTANT: advisory lock is tied to the DB connection, so use one connection.
   conn = db.connection()
 
   if not _try_advisory_lock(conn, lock_key):
     raise HTTPException(
       status_code=409,
       detail={
-        "error": "Write in progress",
+        "error": "Control Action in Progress",
         "deviceId": device_id,
         "field": field,
+        "actuationHoldMs": ACTUATION_HOLD_MS,
       },
     )
-
-  start_time = time.time()
 
   try:
     result = _post_to_node_red_wait(
@@ -417,22 +416,16 @@ def write_control_do(
       timeout_sec=3.5,
     )
 
-    # 🔒 Hold lock minimum 10 seconds (so all dashboards have time to observe changes)
-    elapsed = time.time() - start_time
-    min_lock_time = 10.0
-    if elapsed < min_lock_time:
-      time.sleep(min_lock_time - elapsed)
-
     return {
       "requestId": request_id,
       "deviceId": device_id,
       "field": field,
       "value01": int(req.value01),
+      "actuationHoldMs": ACTUATION_HOLD_MS,
       **result,
     }
 
   finally:
-    # Always release the lock
     try:
       _advisory_unlock(conn, lock_key)
     except Exception:
