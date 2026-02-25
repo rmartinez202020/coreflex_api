@@ -3,10 +3,12 @@
 import os
 import uuid
 import requests
+import zlib
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
 from pydantic import BaseModel, Field
 
 from database import get_db
@@ -19,16 +21,12 @@ ALLOWED_FIELDS = {"do1", "do2", "do3", "do4"}
 ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
 
 # ✅ Node-RED endpoint that will perform the actual DO write
-# Example: http://98.90.225.131:1880/coreflex/command
-# ✅ Use env if present, otherwise fallback to your URL
 NODE_RED_DO_WRITE_URL = os.getenv(
   "NODE_RED_DO_WRITE_URL",
   "http://98.90.225.131:1880/coreflex/command",
 ).strip()
 
 # ✅ Optional shared-key protection for backend -> Node-RED commands
-# Node-RED should validate header: X-COMMAND-KEY
-# ✅ Use env if present, otherwise fallback to your key
 NODE_RED_COMMAND_KEY = os.getenv(
   "NODE_RED_COMMAND_KEY",
   "CFX_k29sLx92Jd8slQp4NzT7MartinezVx93LwQa2",
@@ -78,7 +76,7 @@ def _post_to_node_red_wait(
     r = requests.post(url, json=payload, headers=headers, timeout=(connect_t, read_t))
 
     data = _safe_json(r)
-    text = (r.text or "").strip()
+    text_body = (r.text or "").strip()
 
     if 200 <= r.status_code < 300:
       return {
@@ -86,7 +84,7 @@ def _post_to_node_red_wait(
         "nodeRedOk": True,
         "pending": False,
         "status": r.status_code,
-        "data": data if data is not None else {"raw": text},
+        "data": data if data is not None else {"raw": text_body},
       }
 
     return {
@@ -94,7 +92,7 @@ def _post_to_node_red_wait(
       "nodeRedOk": False,
       "pending": False,
       "status": r.status_code,
-      "error": data if data is not None else (text or "Node-RED write failed"),
+      "error": data if data is not None else (text_body or "Node-RED write failed"),
     }
 
   except requests.Timeout:
@@ -113,6 +111,33 @@ def _post_to_node_red_wait(
       "status": 502,
       "error": f"Node-RED unreachable: {repr(e)}",
     }
+
+
+# ===============================
+# 🔒 Advisory lock helpers
+# ===============================
+def _lock_key_per_device(device_id: str) -> int:
+  """
+  Strongest mode: blocks ANY concurrent write to same device (do1..do4).
+  """
+  s = f"dev:{device_id}".encode("utf-8")
+  return zlib.crc32(s)  # 0..2^32-1
+
+
+def _lock_key_per_do(device_id: str, field: str) -> int:
+  """
+  Alternative mode: blocks only the same DO (device+do1) concurrently.
+  """
+  s = f"dev:{device_id}:{field}".encode("utf-8")
+  return zlib.crc32(s)
+
+
+def _try_advisory_lock(conn, key: int) -> bool:
+  return bool(conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}).scalar())
+
+
+def _advisory_unlock(conn, key: int) -> None:
+  conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
 
 
 # ===============================
@@ -353,7 +378,7 @@ def write_control_do(
   request_id = str(uuid.uuid4())
 
   payload = {
-    "request_id": request_id,  # ✅ correlate API call ↔ Node-RED response
+    "request_id": request_id,
     "device_id": device_id,
     "do": do_num,
     "value": value_bool,
@@ -362,20 +387,48 @@ def write_control_do(
     "user_id": user.id,
   }
 
-  result = _post_to_node_red_wait(
-    NODE_RED_DO_WRITE_URL,
-    payload,
-    _node_red_headers(),
-    timeout_sec=3.5,
-  )
+  # ===============================
+  # ✅ BACKEND BLOCK: prevent double write
+  # ===============================
+  # Choose lock scope:
+  # - per device (strongest): blocks any do1..do4 concurrent writes
+  lock_key = _lock_key_per_device(device_id)
 
-  # ✅ Always return a structured response to frontend
-  # - ok/nodeRedOk/pending tells UI what happened
-  # - requestId helps you correlate logs across systems
-  return {
-    "requestId": request_id,
-    "deviceId": device_id,
-    "field": field,
-    "value01": int(req.value01),
-    **result,
-  }
+  # If you prefer per-DO only, use this instead:
+  # lock_key = _lock_key_per_do(device_id, field)
+
+  # IMPORTANT: advisory lock is tied to the DB connection, so use one connection.
+  conn = db.connection()
+
+  if not _try_advisory_lock(conn, lock_key):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "error": "Write in progress",
+        "deviceId": device_id,
+        "field": field,
+      },
+    )
+
+  try:
+    result = _post_to_node_red_wait(
+      NODE_RED_DO_WRITE_URL,
+      payload,
+      _node_red_headers(),
+      timeout_sec=3.5,
+    )
+
+    return {
+      "requestId": request_id,
+      "deviceId": device_id,
+      "field": field,
+      "value01": int(req.value01),
+      **result,
+    }
+
+  finally:
+    # Always release the lock
+    try:
+      _advisory_unlock(conn, lock_key)
+    except Exception:
+      pass
