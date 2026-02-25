@@ -4,6 +4,7 @@ import os
 import uuid
 import requests
 import zlib
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -388,14 +389,10 @@ def write_control_do(
   }
 
   # ===============================
-  # ✅ BACKEND BLOCK: prevent double write
+  # ✅ BACKEND BLOCK: prevent double write (PER OUTPUT) + hold 10s
   # ===============================
-  # Choose lock scope:
-  # - per device (strongest): blocks any do1..do4 concurrent writes
-  lock_key = _lock_key_per_device(device_id)
-
-  # If you prefer per-DO only, use this instead:
-  # lock_key = _lock_key_per_do(device_id, field)
+  # Lock scope: per output (device_id + doX)
+  lock_key = _lock_key_per_do(device_id, field)
 
   # IMPORTANT: advisory lock is tied to the DB connection, so use one connection.
   conn = db.connection()
@@ -410,6 +407,8 @@ def write_control_do(
       },
     )
 
+  start_time = time.time()
+
   try:
     result = _post_to_node_red_wait(
       NODE_RED_DO_WRITE_URL,
@@ -417,6 +416,12 @@ def write_control_do(
       _node_red_headers(),
       timeout_sec=3.5,
     )
+
+    # 🔒 Hold lock minimum 10 seconds (so all dashboards have time to observe changes)
+    elapsed = time.time() - start_time
+    min_lock_time = 10.0
+    if elapsed < min_lock_time:
+      time.sleep(min_lock_time - elapsed)
 
     return {
       "requestId": request_id,
