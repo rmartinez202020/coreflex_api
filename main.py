@@ -69,18 +69,22 @@ async def on_shutdown():
 
 # ========================================
 # 🌍 CORS (PRODUCTION SAFE)
-# ✅ FIX: Your frontend is https://coreflexiotsplatform.com (ONE "i" after flex)
-# so we must allow BOTH:
-#   coreflexiotsplatform.com  and  coreflexiiotsplatform.com
-# plus www variants, plus localhost
+# ✅ FIX: Your browser error shows Origin = http://www.coreflexiiotsplatform.com
+# so we must allow http + https for BOTH spellings, plus www variants.
 # ========================================
 ALLOWED_ORIGINS = [
     # ✅ CURRENT FRONTEND DOMAIN (from your src/config/api.js)
     "https://coreflexiotsplatform.com",
     "https://www.coreflexiotsplatform.com",
+    "http://coreflexiotsplatform.com",
+    "http://www.coreflexiotsplatform.com",
+
     # ✅ KEEP THESE (older/alternate domain spelling)
     "https://coreflexiiotsplatform.com",
     "https://www.coreflexiiotsplatform.com",
+    "http://coreflexiiotsplatform.com",
+    "http://www.coreflexiiotsplatform.com",
+
     # ✅ Local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",
