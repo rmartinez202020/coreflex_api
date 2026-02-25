@@ -1,7 +1,7 @@
 # routers/control_bindings.py
 
 import os
-import threading
+import uuid
 import requests
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -53,22 +53,66 @@ def _node_red_headers() -> dict:
   return headers
 
 
-def _post_to_node_red_async(url: str, payload: dict, headers: dict):
+def _safe_json(res):
+  try:
+    return res.json()
+  except Exception:
+    return None
+
+
+def _post_to_node_red_wait(
+  url: str,
+  payload: dict,
+  headers: dict,
+  timeout_sec: float = 3.5,
+):
   """
-  Fire-and-forget sender.
-  We intentionally do NOT fail the API call if Node-RED doesn't respond.
+  Send DO write to Node-RED and WAIT briefly for an ACK response.
+  - Never blocks forever (separate connect/read timeouts)
+  - If Node-RED is slow, returns pending=True (frontend can confirm via DO polling)
   """
   try:
-    # keep timeout short to avoid stuck threads
-    r = requests.post(url, json=payload, headers=headers, timeout=4)
-    if r.status_code >= 400:
-      try:
-        print("❌ Node-RED write failed:", r.status_code, (r.text or "").strip())
-      except Exception:
-        print("❌ Node-RED write failed:", r.status_code)
+    connect_t = min(1.5, max(0.5, timeout_sec / 2))
+    read_t = max(0.5, timeout_sec - connect_t)
+
+    r = requests.post(url, json=payload, headers=headers, timeout=(connect_t, read_t))
+
+    data = _safe_json(r)
+    text = (r.text or "").strip()
+
+    if 200 <= r.status_code < 300:
+      return {
+        "ok": True,
+        "nodeRedOk": True,
+        "pending": False,
+        "status": r.status_code,
+        "data": data if data is not None else {"raw": text},
+      }
+
+    return {
+      "ok": False,
+      "nodeRedOk": False,
+      "pending": False,
+      "status": r.status_code,
+      "error": data if data is not None else (text or "Node-RED write failed"),
+    }
+
+  except requests.Timeout:
+    return {
+      "ok": True,
+      "nodeRedOk": False,
+      "pending": True,
+      "status": 504,
+      "warning": "Node-RED timeout (pending)",
+    }
   except Exception as e:
-    # Don't crash API; just log
-    print("❌ Node-RED unreachable:", repr(e))
+    return {
+      "ok": False,
+      "nodeRedOk": False,
+      "pending": False,
+      "status": 502,
+      "error": f"Node-RED unreachable: {repr(e)}",
+    }
 
 
 # ===============================
@@ -302,11 +346,14 @@ def write_control_do(
   # 4) value01 -> boolean (matches your Node-RED inject true/false)
   value_bool = True if int(req.value01) == 1 else False
 
-  # 5) forward to node-red (fire-and-forget)
+  # 5) forward to node-red (WAIT for response, short)
   if not NODE_RED_DO_WRITE_URL:
     _raise_node_red_not_configured()
 
+  request_id = str(uuid.uuid4())
+
   payload = {
+    "request_id": request_id,  # ✅ correlate API call ↔ Node-RED response
     "device_id": device_id,
     "do": do_num,
     "value": value_bool,
@@ -315,19 +362,20 @@ def write_control_do(
     "user_id": user.id,
   }
 
-  # ✅ Do NOT wait for Node-RED response (prevents 502/timeouts)
-  t = threading.Thread(
-    target=_post_to_node_red_async,
-    args=(NODE_RED_DO_WRITE_URL, payload, _node_red_headers()),
-    daemon=True,
+  result = _post_to_node_red_wait(
+    NODE_RED_DO_WRITE_URL,
+    payload,
+    _node_red_headers(),
+    timeout_sec=3.5,
   )
-  t.start()
 
-  # ✅ Always return OK immediately
+  # ✅ Always return a structured response to frontend
+  # - ok/nodeRedOk/pending tells UI what happened
+  # - requestId helps you correlate logs across systems
   return {
-    "ok": True,
-    "sent": True,
+    "requestId": request_id,
     "deviceId": device_id,
     "field": field,
     "value01": int(req.value01),
+    **result,
   }
