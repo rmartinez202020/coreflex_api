@@ -12,6 +12,9 @@ from models import ZHC1921Device, User
 # ✅ IMPORTANT: your project uses auth_utils.get_current_user (see user_profile.py)
 from auth_utils import get_current_user
 
+# ✅ NEW: in-memory live telemetry cache
+from utils.zhc1921_live_cache import set_latest, get_latest
+
 router = APIRouter(prefix="/zhc1921", tags=["ZHC1921 Devices"])
 
 # ✅ Offline timeout window (seconds)
@@ -115,8 +118,24 @@ def to_row_for_table(r: ZHC1921Device):
        NOT "authorized_at" (when owner created it).
 
     ✅ Status is derived from last_seen (truth), not from the stored r.status field.
+
+    ✅ NEW: Live DI/DO/AI prefer in-memory cache (fast, avoids DB telemetry reads on polling).
     """
-    status = _compute_online_status(r.last_seen)
+    cached = get_latest(r.device_id) or {}
+
+    # prefer cache last_seen if present, else DB last_seen
+    cache_ls = cached.get("last_seen")
+    ls = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+
+    status = _compute_online_status(ls)
+
+    def bit(name: str, fallback: int = 0) -> int:
+        v = cached.get(name, getattr(r, name, fallback))
+        return int(v or 0)
+
+    def ai(name: str):
+        v = cached.get(name, getattr(r, name, None))
+        return v if v is not None else ""
 
     return {
         "deviceId": r.device_id,
@@ -126,25 +145,25 @@ def to_row_for_table(r: ZHC1921Device):
 
         "ownedBy": r.claimed_by_email or "—",
         "status": status,
-        "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
+        "lastSeen": ls.isoformat() if ls else "—",
 
         # ✅ 6 DIs
-        "in1": int(r.di1 or 0),
-        "in2": int(r.di2 or 0),
-        "in3": int(r.di3 or 0),
-        "in4": int(r.di4 or 0),
-        "in5": int(getattr(r, "di5", 0) or 0),
-        "in6": int(getattr(r, "di6", 0) or 0),
+        "in1": bit("di1"),
+        "in2": bit("di2"),
+        "in3": bit("di3"),
+        "in4": bit("di4"),
+        "in5": bit("di5"),
+        "in6": bit("di6"),
 
-        "do1": int(r.do1 or 0),
-        "do2": int(r.do2 or 0),
-        "do3": int(r.do3 or 0),
-        "do4": int(r.do4 or 0),
+        "do1": bit("do1"),
+        "do2": bit("do2"),
+        "do3": bit("do3"),
+        "do4": bit("do4"),
 
-        "ai1": r.ai1 if r.ai1 is not None else "",
-        "ai2": r.ai2 if r.ai2 is not None else "",
-        "ai3": r.ai3 if r.ai3 is not None else "",
-        "ai4": r.ai4 if r.ai4 is not None else "",
+        "ai1": ai("ai1"),
+        "ai2": ai("ai2"),
+        "ai3": ai("ai3"),
+        "ai4": ai("ai4"),
     }
 
 
@@ -199,7 +218,6 @@ def ingest_zhc1921_telemetry(
     row.di4 = _coerce_bit(body.di4)
 
     # These columns exist after your ALTER TABLE (di5/di6)
-    # If you deploy backend before migration, this could error; so ensure DB is migrated first.
     row.di5 = _coerce_bit(body.di5)
     row.di6 = _coerce_bit(body.di6)
 
@@ -213,6 +231,32 @@ def ingest_zhc1921_telemetry(
     row.ai2 = body.ai2
     row.ai3 = body.ai3
     row.ai4 = body.ai4
+
+    # ✅ NEW: update in-memory cache (fast read path)
+    # We use parsed last_seen when available; if missing, cache last_seen stays None
+    # (status on UI still works because DB last_seen exists; next telemetry will populate cache timestamp too).
+    set_latest(
+        device_id,
+        {
+            "device_id": device_id,
+            "status": (body.status or "online").strip().lower(),
+            "last_seen": parsed,
+            "di1": _coerce_bit(body.di1),
+            "di2": _coerce_bit(body.di2),
+            "di3": _coerce_bit(body.di3),
+            "di4": _coerce_bit(body.di4),
+            "di5": _coerce_bit(body.di5),
+            "di6": _coerce_bit(body.di6),
+            "do1": _coerce_bit(body.do1),
+            "do2": _coerce_bit(body.do2),
+            "do3": _coerce_bit(body.do3),
+            "do4": _coerce_bit(body.do4),
+            "ai1": body.ai1,
+            "ai2": body.ai2,
+            "ai3": body.ai3,
+            "ai4": body.ai4,
+        },
+    )
 
     db.add(row)
     db.commit()
@@ -358,7 +402,7 @@ def claim_zhc1921_device(
 
     return {
         "ok": True,
-        "device_id": row.device_id,
+        "device_id": device_id,
         "claimed": True,
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
     }
