@@ -5,6 +5,8 @@ import uuid
 import requests
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -282,32 +284,44 @@ def get_used_dos(
 # ===============================
 # 🗑️ Delete Control Binding Row
 # ===============================
-@router.delete("")
+# ✅ IMPORTANT CHANGE:
+# - route is now "/" (explicit) instead of ""
+# - dashboardId is OPTIONAL
+#   - If dashboardId provided: delete that exact (user + dashboard + widget) row
+#   - If dashboardId omitted: delete ANY binding rows for that widgetId for this user
+@router.delete("/")
 def delete_control_binding(
-    dashboardId: str = Query(...),
-    widgetId: str = Query(...),
+    widgetId: str = Query(..., min_length=1),
+    dashboardId: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    dash_id = dashboardId.strip()
     wid = widgetId.strip()
+    dash_id = (dashboardId or "").strip() or None
 
-    row = (
-        db.query(ControlBinding)
-        .filter(
-            ControlBinding.user_id == user.id,
-            ControlBinding.dashboard_id == dash_id,
-            ControlBinding.widget_id == wid,
-        )
-        .first()
+    q = db.query(ControlBinding).filter(
+        ControlBinding.user_id == user.id,
+        ControlBinding.widget_id == wid,
     )
 
-    if not row:
-        return {"ok": True, "deleted": 0}
+    if dash_id:
+        q = q.filter(ControlBinding.dashboard_id == dash_id)
 
-    db.delete(row)
-    db.commit()
-    return {"ok": True, "deleted": 1}
+    rows = q.all()
+    if not rows:
+        return {"ok": True, "deleted": 0, "dashboardId": dash_id, "widgetId": wid}
+
+    deleted = 0
+    try:
+        for r in rows:
+            db.delete(r)
+            deleted += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete control binding")
+
+    return {"ok": True, "deleted": deleted, "dashboardId": dash_id, "widgetId": wid}
 
 
 # ===============================
