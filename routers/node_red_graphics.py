@@ -8,8 +8,6 @@ from database import get_db
 from auth_utils import get_current_user
 from models import User, GraphicDisplayBinding
 
-from routers.node_red_graphics import start_graphic_stream
-
 router = APIRouter(prefix="/graphic-display-bindings", tags=["Graphic Display Bindings"])
 
 
@@ -20,12 +18,12 @@ class UpsertGraphicBindingBody(BaseModel):
     dashboard_id: str = "main"
     widget_id: str
 
-    # binding
-    bind_model: str = "zhc1921"
+    # binding (matches your table)
+    bind_model: str = "zhc1921"   # zhc1921 / zhc1661 / tp4000
     bind_device_id: str
     bind_field: str = "ai1"
 
-    # display settings (optional but we persist them)
+    # display settings (stored)
     title: str = "Graphic Display"
     time_unit: str = "seconds"
     window_size: int = 60
@@ -58,6 +56,15 @@ def _clean_text(v, default=""):
     return s if s else default
 
 
+def _normalize_bind_model(v: str) -> str:
+    m = _clean_text(v, "zhc1921").lower()
+    allowed = {"zhc1921", "zhc1661", "tp4000"}
+    if m not in allowed:
+        # default safely instead of error (avoids breaking older frontend payloads)
+        return "zhc1921"
+    return m
+
+
 @router.post("/upsert")
 def upsert_graphic_display_binding(
     body: UpsertGraphicBindingBody,
@@ -66,7 +73,8 @@ def upsert_graphic_display_binding(
 ):
     dashboard_id = _clean_text(body.dashboard_id, "main")
     widget_id = _clean_text(body.widget_id)
-    bind_model = _clean_text(body.bind_model, "zhc1921").lower()
+
+    bind_model = _normalize_bind_model(body.bind_model)
     bind_device_id = _clean_text(body.bind_device_id)
     bind_field = _clean_text(body.bind_field, "ai1")
 
@@ -150,14 +158,21 @@ def upsert_graphic_display_binding(
 
     # ✅ start/update node-red stream ONLY if enabled and not deleted
     if row.is_enabled and row.deleted_at is None:
-        start_graphic_stream(
-            user_id=current_user.id,
-            dash_id=row.dashboard_id,
-            widget_id=row.widget_id,
-            device_id=row.bind_device_id,
-            field=row.bind_field,
-            sample_ms=row.sample_ms,
-        )
+        try:
+            # ✅ lazy import avoids circular-import problems
+            from routers.node_red_graphics import start_graphic_stream
+
+            start_graphic_stream(
+                user_id=current_user.id,
+                dash_id=row.dashboard_id,
+                widget_id=row.widget_id,
+                device_id=row.bind_device_id,
+                field=row.bind_field,
+                sample_ms=row.sample_ms,
+            )
+        except Exception as e:
+            # Never fail the upsert if node-red is temporarily unavailable
+            print(f"[graphic_display_bindings] start_graphic_stream failed: {e}")
 
     return {
         "ok": True,
