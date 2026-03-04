@@ -103,6 +103,14 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ NEW: one user -> many graphic display bindings
+    graphic_display_bindings = relationship(
+        "GraphicDisplayBinding",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
 
 # ===============================
 # 🧾 USER PROFILE (Optional info)
@@ -562,3 +570,65 @@ class ControlActionLock(Base):
 
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+# ===============================
+# 📈 GRAPHIC DISPLAY BINDINGS (matches your DB table exactly)
+# Table: public.graphic_display_bindings
+# ===============================
+class GraphicDisplayBinding(Base):
+    __tablename__ = "graphic_display_bindings"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # who / where
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    dashboard_id = Column(String, nullable=False, index=True, server_default="main")
+    widget_id = Column(String, nullable=False, index=True)
+
+    # binding
+    bind_model = Column(String, nullable=False, server_default="zhc1921")  # zhc1921 / zhc1661 / tp4000
+    bind_device_id = Column(String, nullable=False, index=True)
+    bind_field = Column(String, nullable=False, server_default="ai1")      # ai1/ai2/ai3/ai4...
+
+    # display settings
+    title = Column(String, nullable=False, server_default="Graphic Display")
+    time_unit = Column(String, nullable=False, server_default="seconds")
+    window_size = Column(Integer, nullable=False, server_default="60")
+    sample_ms = Column(Integer, nullable=False, server_default="3000")
+    y_min = Column(Float, nullable=False, server_default="0")
+    y_max = Column(Float, nullable=False, server_default="100")
+    line_color = Column(String, nullable=False, server_default="#0c5ac8")
+    graph_style = Column(String, nullable=False, server_default="line")
+
+    # math
+    math_formula = Column(String, nullable=False, server_default="")
+
+    # totalizer
+    totalizer_enabled = Column(Boolean, nullable=False, server_default=func.false())
+    totalizer_unit = Column(String, nullable=False, server_default="")
+
+    # single units
+    single_units_enabled = Column(Boolean, nullable=False, server_default=func.false())
+    single_unit = Column(String, nullable=False, server_default="")
+
+    # retention
+    retention_days = Column(Integer, nullable=False, server_default="35")
+
+    # soft control
+    is_enabled = Column(Boolean, nullable=False, server_default=func.true())
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "dashboard_id",
+            "widget_id",
+            name="uq_gdb_user_dash_widget",
+        ),
+    )
+
+    user = relationship("User", back_populates="graphic_display_bindings")

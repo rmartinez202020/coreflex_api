@@ -157,12 +157,6 @@ app.include_router(images_router)
 
 # ========================================
 # ✅ ZHC1921 DEVICES ROUTES (CF-2000)
-# endpoints:
-#   GET    /zhc1921/devices          (OWNER)
-#   POST   /zhc1921/devices          (OWNER)
-#   POST   /zhc1921/claim            (USER)
-#   DELETE /zhc1921/unclaim/{id}     (USER)
-#   GET    /zhc1921/my-devices       (USER)
 # ========================================
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
 
@@ -170,12 +164,6 @@ app.include_router(zhc1921_router)
 
 # ========================================
 # ✅ ZHC1661 DEVICES ROUTES (CF-1600)
-# endpoints:
-#   GET    /zhc1661/devices          (OWNER)
-#   POST   /zhc1661/devices          (OWNER)
-#   POST   /zhc1661/claim            (USER)
-#   DELETE /zhc1661/unclaim/{id}     (USER)
-#   GET    /zhc1661/my-devices       (USER)
 # ========================================
 from routers.zhc1661_devices import router as zhc1661_router  # noqa: E402
 
@@ -183,12 +171,6 @@ app.include_router(zhc1661_router)
 
 # ========================================
 # ✅ TP-4000 DEVICES ROUTES
-# endpoints (pattern identical to zhc1661):
-#   GET    /tp4000/devices           (OWNER)
-#   POST   /tp4000/devices           (OWNER)
-#   POST   /tp4000/claim             (USER)
-#   DELETE /tp4000/unclaim/{id}      (USER)
-#   GET    /tp4000/my-devices        (USER)
 # ========================================
 from routers.tp4000_devices import router as tp4000_router  # noqa: E402
 
@@ -196,12 +178,6 @@ app.include_router(tp4000_router)
 
 # ========================================
 # ✅ DEVICE COUNTERS ROUTES (PERSISTENT COUNTERS)
-# endpoints:
-#   GET    /device-counters
-#   GET    /device-counters/by-widget/{widget_id}
-#   POST   /device-counters/upsert
-#   POST   /device-counters/reset
-#   DELETE /device-counters?widget_id=...&dashboard_id=...
 # ========================================
 from routers.device_counters import router as device_counters_router  # noqa: E402
 
@@ -209,14 +185,33 @@ app.include_router(device_counters_router)
 
 # ========================================
 # ✅ CONTROL BINDINGS ROUTES (DO UNIQUE PER DASHBOARD)
-# endpoints:
-#   POST   /control-bindings/bind
-#   GET    /control-bindings/used?dashboardId=...&deviceId=...
-#   DELETE /control-bindings?dashboardId=...&widgetId=...
 # ========================================
 from routers.control_bindings import router as control_bindings_router  # noqa: E402
 
 app.include_router(control_bindings_router)
+
+# ========================================
+# ✅ NODE-RED GRAPHICS ROUTES + HELPERS
+# endpoints:
+#   GET /node-red/ping
+# (helpers used internally to start streams from Apply route)
+# ========================================
+from routers.node_red_graphics import router as node_red_graphics_router  # noqa: E402
+
+app.include_router(node_red_graphics_router)
+
+# ========================================
+# ✅ GRAPHIC DISPLAY BINDINGS ROUTES (NEW)
+# endpoints:
+#   POST /graphic-display-bindings/upsert
+#   GET  /graphic-display-bindings/list?dashboard_id=main
+#   POST /graphic-display-bindings/delete
+# ========================================
+from routers.graphic_display_bindings import (  # noqa: E402
+    router as graphic_display_bindings_router,
+)
+
+app.include_router(graphic_display_bindings_router)
 
 # ========================================
 # ❤️ HEALTH CHECK
