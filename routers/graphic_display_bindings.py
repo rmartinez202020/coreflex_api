@@ -6,27 +6,24 @@ from sqlalchemy.sql import func
 
 from database import get_db
 from auth_utils import get_current_user
-from models import User
-
-# ✅ Node-RED helper
-from routers.node_red_graphics import start_graphic_stream
-
-# ✅ Binding model mapped to public.graphic_display_bindings
-from models import GraphicDisplayBinding
+from models import User, GraphicDisplayBinding
 
 router = APIRouter(prefix="/graphic-display-bindings", tags=["Graphic Display Bindings"])
 
 
-class UpsertBindingBody(BaseModel):
+# =========================
+# BODY: UPSERT (Apply button)
+# =========================
+class UpsertGraphicBindingBody(BaseModel):
     dashboard_id: str = "main"
     widget_id: str
 
-    # ✅ binding (matches your table)
-    bind_model: str = "zhc1921"       # zhc1921 / zhc1661 / tp4000
-    bind_device_id: str              # device id string
-    bind_field: str = "ai1"          # ai1/ai2/...
+    # binding
+    bind_model: str = "zhc1921"
+    bind_device_id: str
+    bind_field: str = "ai1"
 
-    # ✅ display settings (optional but stored)
+    # display settings (optional but we persist them)
     title: str = "Graphic Display"
     time_unit: str = "seconds"
     window_size: int = 60
@@ -36,21 +33,21 @@ class UpsertBindingBody(BaseModel):
     line_color: str = "#0c5ac8"
     graph_style: str = "line"
 
-    # ✅ math
+    # math
     math_formula: str = ""
 
-    # ✅ totalizer
+    # totalizer
     totalizer_enabled: bool = False
     totalizer_unit: str = ""
 
-    # ✅ single units
+    # single units
     single_units_enabled: bool = False
     single_unit: str = ""
 
-    # ✅ retention
+    # retention
     retention_days: int = 35
 
-    # ✅ soft control
+    # control
     is_enabled: bool = True
 
 
@@ -60,14 +57,13 @@ def _clean_text(v, default=""):
 
 
 @router.post("/upsert")
-def upsert_binding(
-    body: UpsertBindingBody,
+def upsert_graphic_display_binding(
+    body: UpsertGraphicBindingBody,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     dashboard_id = _clean_text(body.dashboard_id, "main")
     widget_id = _clean_text(body.widget_id)
-
     bind_model = _clean_text(body.bind_model, "zhc1921").lower()
     bind_device_id = _clean_text(body.bind_device_id)
     bind_field = _clean_text(body.bind_field, "ai1")
@@ -79,7 +75,7 @@ def upsert_binding(
     if not bind_field:
         raise HTTPException(status_code=400, detail="bind_field is required")
 
-    # ✅ sanitize numeric fields
+    # keep in a safe range
     sample_ms = int(body.sample_ms or 3000)
     if sample_ms < 1000:
         sample_ms = 1000
@@ -94,10 +90,7 @@ def upsert_binding(
     if retention_days > 366:
         retention_days = 366
 
-    y_min = float(body.y_min if body.y_min is not None else 0)
-    y_max = float(body.y_max if body.y_max is not None else 100)
-
-    # ✅ One binding per (user + dashboard + widget)
+    # ✅ find existing row (unique per user+dashboard+widget)
     row = (
         db.query(GraphicDisplayBinding)
         .filter(
@@ -117,37 +110,33 @@ def upsert_binding(
         )
         db.add(row)
 
-    # ✅ update binding
+    # ✅ update fields
     row.bind_model = bind_model
     row.bind_device_id = bind_device_id
     row.bind_field = bind_field
 
-    # ✅ update display settings
     row.title = _clean_text(body.title, "Graphic Display")
     row.time_unit = _clean_text(body.time_unit, "seconds")
     row.window_size = window_size
     row.sample_ms = sample_ms
-    row.y_min = y_min
-    row.y_max = y_max
+    row.y_min = float(body.y_min if body.y_min is not None else 0)
+    row.y_max = float(body.y_max if body.y_max is not None else 100)
     row.line_color = _clean_text(body.line_color, "#0c5ac8")
     row.graph_style = _clean_text(body.graph_style, "line")
 
-    # ✅ math
     row.math_formula = str(body.math_formula or "")
 
-    # ✅ totalizer
     row.totalizer_enabled = bool(body.totalizer_enabled)
     row.totalizer_unit = str(body.totalizer_unit or "")
 
-    # ✅ single units
     row.single_units_enabled = bool(body.single_units_enabled)
     row.single_unit = str(body.single_unit or "")
 
-    # ✅ retention
     row.retention_days = retention_days
 
-    # ✅ enabled / deleted
     row.is_enabled = bool(body.is_enabled)
+
+    # if re-enabling, clear deleted_at
     if row.is_enabled:
         row.deleted_at = None
 
@@ -157,16 +146,23 @@ def upsert_binding(
     db.commit()
     db.refresh(row)
 
-    # ✅ LIVE: tell Node-RED to start/update the stream (only if active)
+    # ✅ start/update node-red stream ONLY if enabled and not deleted
     if row.is_enabled and row.deleted_at is None:
-        start_graphic_stream(
-            user_id=current_user.id,
-            dash_id=row.dashboard_id,
-            widget_id=row.widget_id,
-            device_id=row.bind_device_id,
-            field=row.bind_field,
-            sample_ms=row.sample_ms,
-        )
+        try:
+            # ✅ Lazy import prevents startup crash if Node-RED helper changes
+            from routers.node_red_graphics import start_graphic_stream
+
+            start_graphic_stream(
+                user_id=current_user.id,
+                dash_id=row.dashboard_id,
+                widget_id=row.widget_id,
+                device_id=row.bind_device_id,
+                field=row.bind_field,
+                sample_ms=row.sample_ms,
+            )
+        except Exception as e:
+            # never crash backend if node-red is down or helper missing
+            print(f"[graphic-display-bindings] start_graphic_stream failed: {e}")
 
     return {
         "ok": True,
@@ -200,8 +196,11 @@ def upsert_binding(
     }
 
 
+# =========================
+# GET: list current user's bindings for a dashboard
+# =========================
 @router.get("/list")
-def list_bindings(
+def list_graphic_display_bindings(
     dashboard_id: str = "main",
     include_disabled: bool = False,
     db: Session = Depends(get_db),
@@ -257,14 +256,17 @@ def list_bindings(
     ]
 
 
-class DeleteBindingBody(BaseModel):
+# =========================
+# POST: soft delete (keeps history)
+# =========================
+class SoftDeleteBody(BaseModel):
     dashboard_id: str = "main"
     widget_id: str
 
 
-@router.post("/delete")
-def delete_binding(
-    body: DeleteBindingBody,
+@router.post("/soft-delete")
+def soft_delete_graphic_display_binding(
+    body: SoftDeleteBody,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -287,12 +289,10 @@ def delete_binding(
     if not row:
         return {"ok": True, "deleted": False}
 
-    # ✅ soft delete (matches your table design)
     row.is_enabled = False
     row.deleted_at = func.now()
     row.updated_at = func.now()
     db.add(row)
     db.commit()
 
-    # Optional later: call stop_graphic_stream() if you implement a stop endpoint.
     return {"ok": True, "deleted": True}
