@@ -133,7 +133,6 @@ def upsert_graphic_display_binding(
     row.single_unit = str(body.single_unit or "")
 
     row.retention_days = retention_days
-
     row.is_enabled = bool(body.is_enabled)
 
     # if re-enabling, clear deleted_at
@@ -258,6 +257,7 @@ def list_graphic_display_bindings(
 
 # =========================
 # POST: soft delete (keeps history)
+# ✅ NOW ALSO tells Node-RED to stop the stream
 # =========================
 class SoftDeleteBody(BaseModel):
     dashboard_id: str = "main"
@@ -289,10 +289,25 @@ def soft_delete_graphic_display_binding(
     if not row:
         return {"ok": True, "deleted": False}
 
+    # ✅ soft-delete in DB
     row.is_enabled = False
     row.deleted_at = func.now()
     row.updated_at = func.now()
     db.add(row)
     db.commit()
+    db.refresh(row)
+
+    # ✅ ALSO stop node-red stream (so file writing stops immediately)
+    try:
+        from routers.node_red_graphics import stop_graphic_stream
+
+        stop_graphic_stream(
+            user_id=current_user.id,
+            dash_id=row.dashboard_id,
+            widget_id=row.widget_id,
+        )
+    except Exception as e:
+        # never crash backend if node-red is down or helper missing
+        print(f"[graphic-display-bindings] stop_graphic_stream failed: {e}")
 
     return {"ok": True, "deleted": True}

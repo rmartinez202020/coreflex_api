@@ -10,7 +10,7 @@ from models import User
 router = APIRouter(prefix="/node-red", tags=["Node-RED Graphics"])
 
 NODE_RED_BASE_URL = (os.getenv("NODE_RED_BASE_URL") or "").rstrip("/")
-NODE_RED_KEY = (os.getenv("COREFLEX_NODE_RED_KEY") or "").strip()
+NODE_RED_KEY = (os.getenv("NODE_RED_COMMAND_KEY") or "").strip()
 
 
 def _headers() -> dict:
@@ -32,6 +32,8 @@ def start_graphic_stream(
     device_id: str,
     field: str,
     sample_ms: int,
+    # ✅ NEW: pass math formula from backend -> node-red
+    math_formula: str = "",
 ) -> bool:
     if not NODE_RED_BASE_URL:
         return False
@@ -45,6 +47,8 @@ def start_graphic_stream(
         "deviceId": str(device_id),
         "field": str(field),
         "sampleMs": int(sample_ms or 3000),
+        # ✅ NEW: node-red can compute/store this per stream
+        "mathFormula": str(math_formula or ""),
     }
 
     try:
@@ -65,7 +69,11 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
         return False
 
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/stop"
-    payload = {"userId": int(user_id), "dashId": (dash_id or "main"), "widgetId": str(widget_id)}
+    payload = {
+        "userId": int(user_id),
+        "dashId": (dash_id or "main"),
+        "widgetId": str(widget_id),
+    }
 
     try:
         r = requests.post(url, json=payload, headers=_headers(), timeout=3)
