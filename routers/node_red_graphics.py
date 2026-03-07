@@ -161,6 +161,86 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
 
 
 # =========================================================
+# ✅ Helper: Read historian from Node-RED server
+# =========================================================
+def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
+    if not NODE_RED_BASE_URL:
+        print("[node-red] get_graphic_history skipped: NODE_RED_BASE_URL not set")
+        return {
+            "ok": False,
+            "error": "NODE_RED_BASE_URL not set",
+            "files": [],
+            "points": [],
+            "count": 0,
+        }
+
+    url = f"{NODE_RED_BASE_URL}/coreflex/graphics/history/read"
+    payload = {
+        "userId": int(user_id),
+        "dashId": str(dash_id or "main").strip() or "main",
+        "widgetId": str(widget_id or "").strip(),
+    }
+
+    try:
+        r = requests.post(url, json=payload, headers=_headers(), timeout=20)
+
+        if not (200 <= r.status_code < 300):
+            print(
+                f"[node-red] get_graphic_history bad response: "
+                f"status={r.status_code} url={url} body={r.text}"
+            )
+            return {
+                "ok": False,
+                "error": f"Node-RED bad response ({r.status_code})",
+                "status_code": r.status_code,
+                "body": r.text,
+                "files": [],
+                "points": [],
+                "count": 0,
+            }
+
+        try:
+            data = r.json()
+        except Exception:
+            print("[node-red] get_graphic_history invalid JSON response")
+            return {
+                "ok": False,
+                "error": "Invalid JSON returned by Node-RED history endpoint",
+                "status_code": r.status_code,
+                "body": r.text,
+                "files": [],
+                "points": [],
+                "count": 0,
+            }
+
+        if not isinstance(data, dict):
+            print("[node-red] get_graphic_history response is not an object")
+            return {
+                "ok": False,
+                "error": "Invalid Node-RED history payload",
+                "files": [],
+                "points": [],
+                "count": 0,
+            }
+
+        data.setdefault("ok", True)
+        data.setdefault("files", [])
+        data.setdefault("points", [])
+        data.setdefault("count", len(data.get("points", []) or []))
+        return data
+
+    except Exception as e:
+        print(f"[node-red] get_graphic_history failed: {e}")
+        return {
+            "ok": False,
+            "error": str(e),
+            "files": [],
+            "points": [],
+            "count": 0,
+        }
+
+
+# =========================================================
 # ✅ Optional: Test endpoint
 # =========================================================
 @router.get("/ping")
