@@ -472,9 +472,14 @@ def get_graphic_display_history(
             "count": 0,
         }
 
+    print("HISTORY DIR =", history_dir)
+    print("DIR EXISTS =", os.path.isdir(history_dir))
+
     try:
         all_names = os.listdir(history_dir)
+        print("ALL NAMES =", all_names)
     except Exception as e:
+        print("LISTDIR ERROR =", repr(e))
         _dbg(
             "HISTORY DIR LIST ERROR",
             history_dir=history_dir,
@@ -493,6 +498,9 @@ def get_graphic_display_history(
             if name.startswith(prefix) and name.endswith(".jsonl")
         ]
     )
+
+    print("PREFIX =", prefix)
+    print("MATCHED FILES =", matched_files)
 
     _dbg(
         "HISTORY FILE MATCHING",
