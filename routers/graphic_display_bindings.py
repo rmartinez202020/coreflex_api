@@ -51,6 +51,23 @@ class UpsertGraphicBindingBody(BaseModel):
     is_enabled: bool = True
 
 
+# =========================
+# BODY: VISIBILITY
+# =========================
+class GraphicVisibilityBody(BaseModel):
+    dashboard_id: str = "main"
+    widget_id: str
+    is_visible: bool
+
+
+# =========================
+# BODY: soft delete
+# =========================
+class SoftDeleteBody(BaseModel):
+    dashboard_id: str = "main"
+    widget_id: str
+
+
 def _clean_text(v, default=""):
     s = str(v or "").strip()
     return s if s else default
@@ -152,32 +169,27 @@ def upsert_graphic_display_binding(
             from routers.node_red_graphics import start_graphic_stream
 
             start_graphic_stream(
-    user_id=current_user.id,
-    dash_id=row.dashboard_id,
-    widget_id=row.widget_id,
-
-    bind_model=row.bind_model,
-    device_id=row.bind_device_id,
-    field=row.bind_field,
-
-    title=row.title,
-    time_unit=row.time_unit,
-    window_size=row.window_size,
-    sample_ms=row.sample_ms,
-    y_min=row.y_min,
-    y_max=row.y_max,
-    line_color=row.line_color,
-    graph_style=row.graph_style,
-    math_formula=row.math_formula,
-
-    totalizer_enabled=row.totalizer_enabled,
-    totalizer_unit=row.totalizer_unit,
-
-    single_units_enabled=row.single_units_enabled,
-    single_unit=row.single_unit,
-
-    retention_days=row.retention_days,
-)
+                user_id=current_user.id,
+                dash_id=row.dashboard_id,
+                widget_id=row.widget_id,
+                bind_model=row.bind_model,
+                device_id=row.bind_device_id,
+                field=row.bind_field,
+                title=row.title,
+                time_unit=row.time_unit,
+                window_size=row.window_size,
+                sample_ms=row.sample_ms,
+                y_min=row.y_min,
+                y_max=row.y_max,
+                line_color=row.line_color,
+                graph_style=row.graph_style,
+                math_formula=row.math_formula,
+                totalizer_enabled=row.totalizer_enabled,
+                totalizer_unit=row.totalizer_unit,
+                single_units_enabled=row.single_units_enabled,
+                single_unit=row.single_unit,
+                retention_days=row.retention_days,
+            )
         except Exception as e:
             # never crash backend if node-red is down or helper missing
             print(f"[graphic-display-bindings] start_graphic_stream failed: {e}")
@@ -212,6 +224,62 @@ def upsert_graphic_display_binding(
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         },
     }
+
+
+# =========================
+# POST: visibility update
+# ✅ tells Node-RED visible vs hidden
+# =========================
+@router.post("/visibility")
+def set_graphic_display_visibility(
+    body: GraphicVisibilityBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dash = _clean_text(body.dashboard_id, "main")
+    wid = _clean_text(body.widget_id)
+
+    if not wid:
+        raise HTTPException(status_code=400, detail="widget_id is required")
+
+    row = (
+        db.query(GraphicDisplayBinding)
+        .filter(
+            GraphicDisplayBinding.user_id == current_user.id,
+            GraphicDisplayBinding.dashboard_id == dash,
+            GraphicDisplayBinding.widget_id == wid,
+        )
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Graphic display binding not found")
+
+    try:
+        from routers.node_red_graphics import set_graphic_stream_visibility
+
+        ok = set_graphic_stream_visibility(
+            user_id=current_user.id,
+            dash_id=dash,
+            widget_id=wid,
+            is_visible=bool(body.is_visible),
+        )
+
+        return {
+            "ok": ok,
+            "dashboard_id": dash,
+            "widget_id": wid,
+            "is_visible": bool(body.is_visible),
+        }
+    except Exception as e:
+        print(f"[graphic-display-bindings] set visibility failed: {e}")
+        return {
+            "ok": False,
+            "dashboard_id": dash,
+            "widget_id": wid,
+            "is_visible": bool(body.is_visible),
+            "error": str(e),
+        }
 
 
 # =========================
@@ -278,11 +346,6 @@ def list_graphic_display_bindings(
 # POST: soft delete (keeps history)
 # ✅ NOW ALSO tells Node-RED to stop the stream
 # =========================
-class SoftDeleteBody(BaseModel):
-    dashboard_id: str = "main"
-    widget_id: str
-
-
 @router.post("/soft-delete")
 def soft_delete_graphic_display_binding(
     body: SoftDeleteBody,
