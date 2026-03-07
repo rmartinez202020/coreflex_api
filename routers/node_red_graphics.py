@@ -19,6 +19,17 @@ def _headers() -> dict:
     return headers
 
 
+def _dbg(label: str, **kwargs):
+    try:
+        print("\n========== NODE-RED GRAPHICS DEBUG ==========")
+        print(label)
+        for k, v in kwargs.items():
+            print(f"{k} = {v}")
+        print("============================================\n")
+    except Exception:
+        pass
+
+
 # =========================================================
 # ✅ Helper: Start/Update stream on Node-RED
 # =========================================================
@@ -74,9 +85,27 @@ def start_graphic_stream(
         "retentionDays": max(1, min(366, int(retention_days or 35))),
     }
 
+    _dbg(
+        "START GRAPHIC STREAM REQUEST",
+        node_red_base_url=NODE_RED_BASE_URL,
+        url=url,
+        user_id=user_id,
+        dash_id=payload["dashId"],
+        widget_id=payload["widgetId"],
+        device_id=payload["deviceId"],
+        field=payload["field"],
+    )
+
     try:
         r = requests.post(url, json=payload, headers=_headers(), timeout=5)
         ok = 200 <= r.status_code < 300
+
+        _dbg(
+            "START GRAPHIC STREAM RESPONSE",
+            status_code=r.status_code,
+            ok=ok,
+            body=r.text[:1000],
+        )
 
         if not ok:
             print(
@@ -113,9 +142,26 @@ def set_graphic_stream_visibility(
         "isVisible": bool(is_visible),
     }
 
+    _dbg(
+        "SET VISIBILITY REQUEST",
+        node_red_base_url=NODE_RED_BASE_URL,
+        url=url,
+        user_id=user_id,
+        dash_id=payload["dashId"],
+        widget_id=payload["widgetId"],
+        is_visible=payload["isVisible"],
+    )
+
     try:
         r = requests.post(url, json=payload, headers=_headers(), timeout=5)
         ok = 200 <= r.status_code < 300
+
+        _dbg(
+            "SET VISIBILITY RESPONSE",
+            status_code=r.status_code,
+            ok=ok,
+            body=r.text[:1000],
+        )
 
         if not ok:
             print(
@@ -144,9 +190,25 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
         "widgetId": str(widget_id or "").strip(),
     }
 
+    _dbg(
+        "STOP GRAPHIC STREAM REQUEST",
+        node_red_base_url=NODE_RED_BASE_URL,
+        url=url,
+        user_id=user_id,
+        dash_id=payload["dashId"],
+        widget_id=payload["widgetId"],
+    )
+
     try:
         r = requests.post(url, json=payload, headers=_headers(), timeout=5)
         ok = 200 <= r.status_code < 300
+
+        _dbg(
+            "STOP GRAPHIC STREAM RESPONSE",
+            status_code=r.status_code,
+            ok=ok,
+            body=r.text[:1000],
+        )
 
         if not ok:
             print(
@@ -164,6 +226,15 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
 # ✅ Helper: Read historian from Node-RED server
 # =========================================================
 def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
+    _dbg(
+        "GET GRAPHIC HISTORY CALLED",
+        node_red_base_url=NODE_RED_BASE_URL,
+        user_id=user_id,
+        dash_id=dash_id,
+        widget_id=widget_id,
+        node_red_key_present=bool(NODE_RED_KEY),
+    )
+
     if not NODE_RED_BASE_URL:
         print("[node-red] get_graphic_history skipped: NODE_RED_BASE_URL not set")
         return {
@@ -181,8 +252,23 @@ def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
         "widgetId": str(widget_id or "").strip(),
     }
 
+    _dbg(
+        "GET GRAPHIC HISTORY REQUEST",
+        url=url,
+        payload=payload,
+        headers=_headers(),
+    )
+
     try:
         r = requests.post(url, json=payload, headers=_headers(), timeout=20)
+
+        _dbg(
+            "GET GRAPHIC HISTORY RAW RESPONSE",
+            status_code=r.status_code,
+            reason=getattr(r, "reason", ""),
+            content_type=r.headers.get("content-type"),
+            body_preview=r.text[:2000],
+        )
 
         if not (200 <= r.status_code < 300):
             print(
@@ -201,8 +287,13 @@ def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
 
         try:
             data = r.json()
-        except Exception:
+        except Exception as e:
             print("[node-red] get_graphic_history invalid JSON response")
+            _dbg(
+                "GET GRAPHIC HISTORY JSON PARSE ERROR",
+                error=str(e),
+                raw_text=r.text[:2000],
+            )
             return {
                 "ok": False,
                 "error": "Invalid JSON returned by Node-RED history endpoint",
@@ -215,6 +306,11 @@ def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
 
         if not isinstance(data, dict):
             print("[node-red] get_graphic_history response is not an object")
+            _dbg(
+                "GET GRAPHIC HISTORY INVALID PAYLOAD TYPE",
+                payload_type=str(type(data)),
+                payload_value=data,
+            )
             return {
                 "ok": False,
                 "error": "Invalid Node-RED history payload",
@@ -227,10 +323,29 @@ def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
         data.setdefault("files", [])
         data.setdefault("points", [])
         data.setdefault("count", len(data.get("points", []) or []))
+
+        _dbg(
+            "GET GRAPHIC HISTORY PARSED RESPONSE",
+            ok=data.get("ok"),
+            error=data.get("error"),
+            historyDir=data.get("historyDir"),
+            prefix=data.get("prefix"),
+            allNames_count=len(data.get("allNames") or []),
+            files_count=len(data.get("files") or []),
+            points_count=len(data.get("points") or []),
+            count=data.get("count"),
+        )
+
         return data
 
     except Exception as e:
         print(f"[node-red] get_graphic_history failed: {e}")
+        _dbg(
+            "GET GRAPHIC HISTORY REQUEST FAILED",
+            error=str(e),
+            url=url,
+            payload=payload,
+        )
         return {
             "ok": False,
             "error": str(e),
