@@ -1,6 +1,4 @@
 # routers/graphic_display_bindings.py
-import json
-import os
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -11,9 +9,6 @@ from auth_utils import get_current_user
 from models import User, GraphicDisplayBinding
 
 router = APIRouter(prefix="/graphic-display-bindings", tags=["Graphic Display Bindings"])
-
-# ✅ historian root written by Node-RED
-SCADA_ROOT = os.getenv("SCADA_ROOT", r"C:\scada").strip() or r"C:\scada"
 
 
 # =========================
@@ -92,64 +87,6 @@ def _clean_text(v, default=""):
     return s if s else default
 
 
-def _history_dir_for(user_id: int, dashboard_id: str) -> str:
-    dash = _clean_text(dashboard_id, "main")
-
-    # TEMP DEBUG: force same folder where Node-RED is writing
-    forced_user = 11
-
-    print("DEBUG HISTORY PATH")
-    print("incoming user_id =", user_id)
-    print("forced_user =", forced_user)
-    print("dashboard =", dash)
-
-    return os.path.join(SCADA_ROOT, f"user_{forced_user}", f"dash_{dash}")
-
-
-def _history_prefix_for(widget_id: str) -> str:
-    wid = _clean_text(widget_id)
-    return f"widget_{wid}_"
-
-
-def _safe_history_rows_from_file(path: str):
-    rows = []
-    bad_lines = 0
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for idx, line in enumerate(f, start=1):
-                s = line.strip()
-                if not s:
-                    continue
-                try:
-                    obj = json.loads(s)
-                    if isinstance(obj, dict):
-                        rows.append(obj)
-                    else:
-                        bad_lines += 1
-                except Exception:
-                    # skip bad/corrupt lines, never break whole history load
-                    bad_lines += 1
-                    continue
-    except Exception as e:
-        _dbg(
-            "HISTORY FILE READ ERROR",
-            path=path,
-            error=str(e),
-        )
-        return []
-
-    _dbg(
-        "HISTORY FILE READ OK",
-        path=path,
-        rows_loaded=len(rows),
-        bad_lines=bad_lines,
-        first_row=rows[0] if rows else None,
-        last_row=rows[-1] if rows else None,
-    )
-    return rows
-
-
 @router.post("/upsert")
 def upsert_graphic_display_binding(
     body: UpsertGraphicBindingBody,
@@ -169,7 +106,6 @@ def upsert_graphic_display_binding(
     if not bind_field:
         raise HTTPException(status_code=400, detail="bind_field is required")
 
-    # keep in a safe range
     sample_ms = int(body.sample_ms or 3000)
     if sample_ms < 1000:
         sample_ms = 1000
@@ -184,7 +120,6 @@ def upsert_graphic_display_binding(
     if retention_days > 366:
         retention_days = 366
 
-    # ✅ find existing row (unique per user+dashboard+widget)
     row = (
         db.query(GraphicDisplayBinding)
         .filter(
@@ -204,7 +139,6 @@ def upsert_graphic_display_binding(
         )
         db.add(row)
 
-    # ✅ update fields
     row.bind_model = bind_model
     row.bind_device_id = bind_device_id
     row.bind_field = bind_field
@@ -229,7 +163,6 @@ def upsert_graphic_display_binding(
     row.retention_days = retention_days
     row.is_enabled = bool(body.is_enabled)
 
-    # if re-enabling, clear deleted_at
     if row.is_enabled:
         row.deleted_at = None
 
@@ -253,15 +186,10 @@ def upsert_graphic_display_binding(
         sample_ms=row.sample_ms,
         retention_days=row.retention_days,
         is_enabled=row.is_enabled,
-        scada_root=SCADA_ROOT,
-        history_dir=_history_dir_for(current_user.id, row.dashboard_id),
-        history_prefix=_history_prefix_for(row.widget_id),
     )
 
-    # ✅ start/update node-red stream ONLY if enabled and not deleted
     if row.is_enabled and row.deleted_at is None:
         try:
-            # ✅ Lazy import prevents startup crash if Node-RED helper changes
             from routers.node_red_graphics import start_graphic_stream
 
             start_graphic_stream(
@@ -287,7 +215,6 @@ def upsert_graphic_display_binding(
                 retention_days=row.retention_days,
             )
         except Exception as e:
-            # never crash backend if node-red is down or helper missing
             print(f"[graphic-display-bindings] start_graphic_stream failed: {e}")
 
     return {
@@ -324,7 +251,6 @@ def upsert_graphic_display_binding(
 
 # =========================
 # POST: visibility update
-# ✅ tells Node-RED visible vs hidden
 # =========================
 @router.post("/visibility")
 def set_graphic_display_visibility(
@@ -395,8 +321,8 @@ def set_graphic_display_visibility(
 
 
 # =========================
-# GET: ALL historian available for current user/dashboard/widget
-# ✅ reads ALL JSONL history files from Node-RED historian folder
+# GET: historian for current user/dashboard/widget
+# ✅ NOW reads via Node-RED instead of local Render disk
 # =========================
 @router.get("/history")
 def get_graphic_display_history(
@@ -415,13 +341,11 @@ def get_graphic_display_history(
         dashboard_id_clean=dash,
         widget_id_raw=widget_id,
         widget_id_clean=wid,
-        scada_root=SCADA_ROOT,
     )
 
     if not wid:
         raise HTTPException(status_code=400, detail="widget_id is required")
 
-    # ✅ verify this widget belongs to current user on this dashboard
     row = (
         db.query(GraphicDisplayBinding)
         .filter(
@@ -441,108 +365,59 @@ def get_graphic_display_history(
         )
         raise HTTPException(status_code=404, detail="Graphic display binding not found")
 
-    history_dir = _history_dir_for(current_user.id, dash)
-    prefix = _history_prefix_for(wid)
+    try:
+        from routers.node_red_graphics import get_graphic_history
 
-    _dbg(
-        "HISTORY PATH INFO",
-        current_user_id=current_user.id,
-        dashboard_id=dash,
-        widget_id=wid,
-        history_dir=history_dir,
-        prefix=prefix,
-        dir_exists=os.path.isdir(history_dir),
-    )
+        data = get_graphic_history(
+            user_id=current_user.id,
+            dash_id=dash,
+            widget_id=wid,
+        )
 
-    if not os.path.isdir(history_dir):
         _dbg(
-            "HISTORY DIR MISSING",
+            "HISTORY NODE-RED RESPONSE",
             current_user_id=current_user.id,
             dashboard_id=dash,
             widget_id=wid,
-            history_dir=history_dir,
+            ok=data.get("ok"),
+            error=data.get("error"),
+            history_dir=data.get("historyDir"),
+            prefix=data.get("prefix"),
+            all_names_count=len(data.get("allNames") or []),
+            matched_files=data.get("files") or [],
+            count=data.get("count"),
         )
+
         return {
-            "ok": True,
+            "ok": bool(data.get("ok", True)),
             "dashboard_id": dash,
             "widget_id": wid,
-            "history_dir": history_dir,
+            "history_dir": data.get("historyDir"),
+            "prefix": data.get("prefix"),
+            "all_names": data.get("allNames", []),
+            "files": data.get("files", []),
+            "file_point_counts": data.get("filePointCounts", {}),
+            "points": data.get("points", []),
+            "count": int(data.get("count", 0) or 0),
+            **({"error": data.get("error")} if data.get("error") else {}),
+        }
+    except Exception as e:
+        _dbg(
+            "HISTORY NODE-RED CALL FAILED",
+            current_user_id=current_user.id,
+            dashboard_id=dash,
+            widget_id=wid,
+            error=str(e),
+        )
+        return {
+            "ok": False,
+            "dashboard_id": dash,
+            "widget_id": wid,
             "files": [],
             "points": [],
             "count": 0,
+            "error": str(e),
         }
-
-    print("HISTORY DIR =", history_dir)
-    print("DIR EXISTS =", os.path.isdir(history_dir))
-
-    try:
-        all_names = os.listdir(history_dir)
-        print("ALL NAMES =", all_names)
-    except Exception as e:
-        print("LISTDIR ERROR =", repr(e))
-        _dbg(
-            "HISTORY DIR LIST ERROR",
-            history_dir=history_dir,
-            error=str(e),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to read historian directory: {e}",
-        )
-
-    # ✅ match only this widget's JSONL files and sort oldest -> newest by filename/date
-    matched_files = sorted(
-        [
-            name
-            for name in all_names
-            if name.startswith(prefix) and name.endswith(".jsonl")
-        ]
-    )
-
-    print("PREFIX =", prefix)
-    print("MATCHED FILES =", matched_files)
-
-    _dbg(
-        "HISTORY FILE MATCHING",
-        history_dir=history_dir,
-        total_names=len(all_names),
-        first_20_names=all_names[:20],
-        prefix=prefix,
-        matched_files=matched_files,
-        matched_count=len(matched_files),
-    )
-
-    points = []
-    file_point_counts = {}
-
-    for name in matched_files:
-        full_path = os.path.join(history_dir, name)
-        rows = _safe_history_rows_from_file(full_path)
-        points.extend(rows)
-        file_point_counts[name] = len(rows)
-
-    _dbg(
-        "HISTORY FINAL RESULT",
-        current_user_id=current_user.id,
-        dashboard_id=dash,
-        widget_id=wid,
-        history_dir=history_dir,
-        matched_files=matched_files,
-        file_point_counts=file_point_counts,
-        total_points=len(points),
-        first_point=points[0] if points else None,
-        last_point=points[-1] if points else None,
-    )
-
-    return {
-        "ok": True,
-        "dashboard_id": dash,
-        "widget_id": wid,
-        "history_dir": history_dir,
-        "files": matched_files,
-        "points": points,
-        "count": len(points),
-    }
 
 
 # =========================
@@ -616,7 +491,6 @@ def list_graphic_display_bindings(
 
 # =========================
 # POST: soft delete (keeps history)
-# ✅ NOW ALSO tells Node-RED to stop the stream
 # =========================
 @router.post("/soft-delete")
 def soft_delete_graphic_display_binding(
@@ -649,7 +523,6 @@ def soft_delete_graphic_display_binding(
         )
         return {"ok": True, "deleted": False}
 
-    # ✅ soft-delete in DB
     row.is_enabled = False
     row.deleted_at = func.now()
     row.updated_at = func.now()
@@ -665,7 +538,6 @@ def soft_delete_graphic_display_binding(
         deleted=True,
     )
 
-    # ✅ ALSO stop node-red stream (so file writing stops immediately)
     try:
         from routers.node_red_graphics import stop_graphic_stream
 
@@ -675,7 +547,6 @@ def soft_delete_graphic_display_binding(
             widget_id=row.widget_id,
         )
     except Exception as e:
-        # never crash backend if node-red is down or helper missing
         print(f"[graphic-display-bindings] stop_graphic_stream failed: {e}")
 
     return {"ok": True, "deleted": True}
