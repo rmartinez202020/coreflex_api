@@ -17,6 +17,20 @@ SCADA_ROOT = os.getenv("SCADA_ROOT", r"C:\scada").strip() or r"C:\scada"
 
 
 # =========================
+# DEBUG HELPERS
+# =========================
+def _dbg(label: str, **kwargs):
+    try:
+        print("\n========== GRAPHIC DISPLAY DEBUG ==========")
+        print(label)
+        for k, v in kwargs.items():
+            print(f"{k} = {v}")
+        print("==========================================\n")
+    except Exception:
+        pass
+
+
+# =========================
 # BODY: UPSERT (Apply button)
 # =========================
 class UpsertGraphicBindingBody(BaseModel):
@@ -90,9 +104,11 @@ def _history_prefix_for(widget_id: str) -> str:
 
 def _safe_history_rows_from_file(path: str):
     rows = []
+    bad_lines = 0
+
     try:
         with open(path, "r", encoding="utf-8") as f:
-            for line in f:
+            for idx, line in enumerate(f, start=1):
                 s = line.strip()
                 if not s:
                     continue
@@ -100,11 +116,28 @@ def _safe_history_rows_from_file(path: str):
                     obj = json.loads(s)
                     if isinstance(obj, dict):
                         rows.append(obj)
+                    else:
+                        bad_lines += 1
                 except Exception:
                     # skip bad/corrupt lines, never break whole history load
+                    bad_lines += 1
                     continue
-    except Exception:
+    except Exception as e:
+        _dbg(
+            "HISTORY FILE READ ERROR",
+            path=path,
+            error=str(e),
+        )
         return []
+
+    _dbg(
+        "HISTORY FILE READ OK",
+        path=path,
+        rows_loaded=len(rows),
+        bad_lines=bad_lines,
+        first_row=rows[0] if rows else None,
+        last_row=rows[-1] if rows else None,
+    )
     return rows
 
 
@@ -197,6 +230,25 @@ def upsert_graphic_display_binding(
     db.commit()
     db.refresh(row)
 
+    _dbg(
+        "UPSERT GRAPHIC DISPLAY BINDING",
+        user_id=current_user.id,
+        dashboard_id=row.dashboard_id,
+        widget_id=row.widget_id,
+        bind_model=row.bind_model,
+        bind_device_id=row.bind_device_id,
+        bind_field=row.bind_field,
+        title=row.title,
+        time_unit=row.time_unit,
+        window_size=row.window_size,
+        sample_ms=row.sample_ms,
+        retention_days=row.retention_days,
+        is_enabled=row.is_enabled,
+        scada_root=SCADA_ROOT,
+        history_dir=_history_dir_for(current_user.id, row.dashboard_id),
+        history_prefix=_history_prefix_for(row.widget_id),
+    )
+
     # ✅ start/update node-red stream ONLY if enabled and not deleted
     if row.is_enabled and row.deleted_at is None:
         try:
@@ -288,6 +340,13 @@ def set_graphic_display_visibility(
     )
 
     if not row:
+        _dbg(
+            "VISIBILITY ROW NOT FOUND",
+            user_id=current_user.id,
+            dashboard_id=dash,
+            widget_id=wid,
+            is_visible=bool(body.is_visible),
+        )
         raise HTTPException(status_code=404, detail="Graphic display binding not found")
 
     try:
@@ -298,6 +357,15 @@ def set_graphic_display_visibility(
             dash_id=dash,
             widget_id=wid,
             is_visible=bool(body.is_visible),
+        )
+
+        _dbg(
+            "VISIBILITY UPDATE",
+            user_id=current_user.id,
+            dashboard_id=dash,
+            widget_id=wid,
+            is_visible=bool(body.is_visible),
+            ok=ok,
         )
 
         return {
@@ -331,6 +399,16 @@ def get_graphic_display_history(
     dash = _clean_text(dashboard_id, "main")
     wid = _clean_text(widget_id)
 
+    _dbg(
+        "HISTORY REQUEST START",
+        current_user_id=current_user.id,
+        dashboard_id_raw=dashboard_id,
+        dashboard_id_clean=dash,
+        widget_id_raw=widget_id,
+        widget_id_clean=wid,
+        scada_root=SCADA_ROOT,
+    )
+
     if not wid:
         raise HTTPException(status_code=400, detail="widget_id is required")
 
@@ -346,12 +424,35 @@ def get_graphic_display_history(
     )
 
     if not row:
+        _dbg(
+            "HISTORY DB ROW NOT FOUND",
+            current_user_id=current_user.id,
+            dashboard_id=dash,
+            widget_id=wid,
+        )
         raise HTTPException(status_code=404, detail="Graphic display binding not found")
 
     history_dir = _history_dir_for(current_user.id, dash)
     prefix = _history_prefix_for(wid)
 
+    _dbg(
+        "HISTORY PATH INFO",
+        current_user_id=current_user.id,
+        dashboard_id=dash,
+        widget_id=wid,
+        history_dir=history_dir,
+        prefix=prefix,
+        dir_exists=os.path.isdir(history_dir),
+    )
+
     if not os.path.isdir(history_dir):
+        _dbg(
+            "HISTORY DIR MISSING",
+            current_user_id=current_user.id,
+            dashboard_id=dash,
+            widget_id=wid,
+            history_dir=history_dir,
+        )
         return {
             "ok": True,
             "dashboard_id": dash,
@@ -365,6 +466,11 @@ def get_graphic_display_history(
     try:
         all_names = os.listdir(history_dir)
     except Exception as e:
+        _dbg(
+            "HISTORY DIR LIST ERROR",
+            history_dir=history_dir,
+            error=str(e),
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Failed to read historian directory: {e}",
@@ -379,10 +485,37 @@ def get_graphic_display_history(
         ]
     )
 
+    _dbg(
+        "HISTORY FILE MATCHING",
+        history_dir=history_dir,
+        total_names=len(all_names),
+        first_20_names=all_names[:20],
+        prefix=prefix,
+        matched_files=matched_files,
+        matched_count=len(matched_files),
+    )
+
     points = []
+    file_point_counts = {}
+
     for name in matched_files:
         full_path = os.path.join(history_dir, name)
-        points.extend(_safe_history_rows_from_file(full_path))
+        rows = _safe_history_rows_from_file(full_path)
+        points.extend(rows)
+        file_point_counts[name] = len(rows)
+
+    _dbg(
+        "HISTORY FINAL RESULT",
+        current_user_id=current_user.id,
+        dashboard_id=dash,
+        widget_id=wid,
+        history_dir=history_dir,
+        matched_files=matched_files,
+        file_point_counts=file_point_counts,
+        total_points=len(points),
+        first_point=points[0] if points else None,
+        last_point=points[-1] if points else None,
+    )
 
     return {
         "ok": True,
@@ -423,6 +556,15 @@ def list_graphic_display_bindings(
         )
 
     rows = q.all()
+
+    _dbg(
+        "LIST GRAPHIC DISPLAY BINDINGS",
+        current_user_id=current_user.id,
+        dashboard_id=dash,
+        include_disabled=include_disabled,
+        count=len(rows),
+        widget_ids=[r.widget_id for r in rows],
+    )
 
     return [
         {
@@ -482,6 +624,12 @@ def soft_delete_graphic_display_binding(
     )
 
     if not row:
+        _dbg(
+            "SOFT DELETE ROW NOT FOUND",
+            current_user_id=current_user.id,
+            dashboard_id=dash,
+            widget_id=wid,
+        )
         return {"ok": True, "deleted": False}
 
     # ✅ soft-delete in DB
@@ -491,6 +639,14 @@ def soft_delete_graphic_display_binding(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    _dbg(
+        "SOFT DELETE GRAPHIC DISPLAY",
+        current_user_id=current_user.id,
+        dashboard_id=row.dashboard_id,
+        widget_id=row.widget_id,
+        deleted=True,
+    )
 
     # ✅ ALSO stop node-red stream (so file writing stops immediately)
     try:
