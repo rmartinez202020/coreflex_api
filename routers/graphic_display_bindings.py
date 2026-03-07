@@ -94,7 +94,16 @@ def _clean_text(v, default=""):
 
 def _history_dir_for(user_id: int, dashboard_id: str) -> str:
     dash = _clean_text(dashboard_id, "main")
-    return os.path.join(SCADA_ROOT, f"user_{int(user_id)}", f"dash_{dash}")
+
+    # TEMP DEBUG: force same folder where Node-RED is writing
+    forced_user = 11
+
+    print("DEBUG HISTORY PATH")
+    print("incoming user_id =", user_id)
+    print("forced_user =", forced_user)
+    print("dashboard =", dash)
+
+    return os.path.join(SCADA_ROOT, f"user_{forced_user}", f"dash_{dash}")
 
 
 def _history_prefix_for(widget_id: str) -> str:
