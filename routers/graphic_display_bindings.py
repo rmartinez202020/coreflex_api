@@ -1,5 +1,7 @@
 # routers/graphic_display_bindings.py
-from fastapi import APIRouter, Depends, HTTPException
+import json
+import os
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
@@ -9,6 +11,9 @@ from auth_utils import get_current_user
 from models import User, GraphicDisplayBinding
 
 router = APIRouter(prefix="/graphic-display-bindings", tags=["Graphic Display Bindings"])
+
+# ✅ historian root written by Node-RED
+SCADA_ROOT = os.getenv("SCADA_ROOT", r"C:\scada").strip() or r"C:\scada"
 
 
 # =========================
@@ -71,6 +76,36 @@ class SoftDeleteBody(BaseModel):
 def _clean_text(v, default=""):
     s = str(v or "").strip()
     return s if s else default
+
+
+def _history_dir_for(user_id: int, dashboard_id: str) -> str:
+    dash = _clean_text(dashboard_id, "main")
+    return os.path.join(SCADA_ROOT, f"user_{int(user_id)}", f"dash_{dash}")
+
+
+def _history_prefix_for(widget_id: str) -> str:
+    wid = _clean_text(widget_id)
+    return f"widget_{wid}_"
+
+
+def _safe_history_rows_from_file(path: str):
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                    if isinstance(obj, dict):
+                        rows.append(obj)
+                except Exception:
+                    # skip bad/corrupt lines, never break whole history load
+                    continue
+    except Exception:
+        return []
+    return rows
 
 
 @router.post("/upsert")
@@ -280,6 +315,84 @@ def set_graphic_display_visibility(
             "is_visible": bool(body.is_visible),
             "error": str(e),
         }
+
+
+# =========================
+# GET: ALL historian available for current user/dashboard/widget
+# ✅ reads ALL JSONL history files from Node-RED historian folder
+# =========================
+@router.get("/history")
+def get_graphic_display_history(
+    dashboard_id: str = Query("main"),
+    widget_id: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dash = _clean_text(dashboard_id, "main")
+    wid = _clean_text(widget_id)
+
+    if not wid:
+        raise HTTPException(status_code=400, detail="widget_id is required")
+
+    # ✅ verify this widget belongs to current user on this dashboard
+    row = (
+        db.query(GraphicDisplayBinding)
+        .filter(
+            GraphicDisplayBinding.user_id == current_user.id,
+            GraphicDisplayBinding.dashboard_id == dash,
+            GraphicDisplayBinding.widget_id == wid,
+        )
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Graphic display binding not found")
+
+    history_dir = _history_dir_for(current_user.id, dash)
+    prefix = _history_prefix_for(wid)
+
+    if not os.path.isdir(history_dir):
+        return {
+            "ok": True,
+            "dashboard_id": dash,
+            "widget_id": wid,
+            "history_dir": history_dir,
+            "files": [],
+            "points": [],
+            "count": 0,
+        }
+
+    try:
+        all_names = os.listdir(history_dir)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read historian directory: {e}",
+        )
+
+    # ✅ match only this widget's JSONL files and sort oldest -> newest by filename/date
+    matched_files = sorted(
+        [
+            name
+            for name in all_names
+            if name.startswith(prefix) and name.endswith(".jsonl")
+        ]
+    )
+
+    points = []
+    for name in matched_files:
+        full_path = os.path.join(history_dir, name)
+        points.extend(_safe_history_rows_from_file(full_path))
+
+    return {
+        "ok": True,
+        "dashboard_id": dash,
+        "widget_id": wid,
+        "history_dir": history_dir,
+        "files": matched_files,
+        "points": points,
+        "count": len(points),
+    }
 
 
 # =========================
