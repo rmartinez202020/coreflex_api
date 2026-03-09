@@ -1,5 +1,4 @@
 # routers/control_bindings.py
-
 import os
 import uuid
 import requests
@@ -19,7 +18,7 @@ from models import ControlBinding, ZHC1921Device, ControlActionLock
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
 ALLOWED_FIELDS = {"do1", "do2", "do3", "do4"}
-ALLOWED_TYPES = {"toggle", "push_no", "push_nc", "pushbuttonno", "pushbuttonnc"}
+ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
 
 # ✅ Frontend uses this to hold "Control Action in Progress" locally
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
@@ -77,7 +76,12 @@ def _post_to_node_red_wait(
         connect_t = min(1.5, max(0.5, timeout_sec / 2))
         read_t = max(0.5, timeout_sec - connect_t)
 
-        r = requests.post(url, json=payload, headers=headers, timeout=(connect_t, read_t))
+        r = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(connect_t, read_t),
+        )
 
         data = _safe_json(r)
         text_body = (r.text or "").strip()
@@ -173,10 +177,11 @@ def bind_control(
     device_id = req.deviceId.strip()
     field = req.field.strip().lower()
 
+    # ✅ Normalize frontend widget names to backend canonical types
     if widget_type == "pushbuttonno":
-    widget_type = "push_no"
-elif widget_type == "pushbuttonnc":
-    widget_type = "push_nc"
+        widget_type = "push_no"
+    elif widget_type == "pushbuttonnc":
+        widget_type = "push_nc"
 
     if widget_type not in ALLOWED_TYPES:
         raise HTTPException(status_code=400, detail="Invalid widgetType")
