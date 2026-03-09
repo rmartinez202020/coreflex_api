@@ -19,7 +19,7 @@ from models import ControlBinding, ZHC1921Device, ControlActionLock
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
 ALLOWED_FIELDS = {"do1", "do2", "do3", "do4"}
-ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
+ALLOWED_TYPES = {"toggle", "push_no", "push_nc", "pushbuttonno", "pushbuttonnc"}
 
 # ✅ Frontend uses this to hold "Control Action in Progress" locally
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
@@ -172,6 +172,11 @@ def bind_control(
     widget_type = req.widgetType.strip().lower()
     device_id = req.deviceId.strip()
     field = req.field.strip().lower()
+
+    if widget_type == "pushbuttonno":
+    widget_type = "push_no"
+elif widget_type == "pushbuttonnc":
+    widget_type = "push_nc"
 
     if widget_type not in ALLOWED_TYPES:
         raise HTTPException(status_code=400, detail="Invalid widgetType")
