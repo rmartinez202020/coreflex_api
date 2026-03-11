@@ -510,7 +510,9 @@ class CustomerDashboard(Base):
 # ===============================
 # 🎛 CONTROL BINDINGS (Toggle / Push NO / Push NC)
 # One row per control widget instance that binds to a DO
-# Enforces: only one widget can use a DO per dashboard (per user)
+# Enforces:
+# - one widget row per (user + dashboard + widget)
+# - one DO per user/device across all dashboards
 # ===============================
 class ControlBinding(Base):
     __tablename__ = "control_bindings"
@@ -525,6 +527,10 @@ class ControlBinding(Base):
     )
 
     dashboard_id = Column(String, nullable=False, index=True)
+    # ✅ NEW: store dashboard display name so used-DO dropdowns can show
+    # the dashboard NAME instead of only dashboard_id / numeric id
+    dashboard_name = Column(String(160), nullable=True)
+
     widget_id = Column(String, nullable=False, index=True)
 
     # ✅ "toggle" | "push_no" | "push_nc" (future: selector, interlock, etc.)
@@ -545,12 +551,12 @@ class ControlBinding(Base):
             "widget_id",
             name="uq_control_widget_once",
         ),
+        # ✅ GLOBAL uniqueness per user/device/DO across ALL dashboards
         UniqueConstraint(
             "user_id",
-            "dashboard_id",
             "bind_device_id",
             "bind_field",
-            name="uq_control_do_once_per_dashboard",
+            name="uq_control_do_once_per_user_device",
         ),
     )
 

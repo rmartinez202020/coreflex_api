@@ -148,6 +148,7 @@ def _cleanup_expired_locks(db: Session) -> None:
 # ===============================
 class ControlBindRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
+    dashboardName: str | None = None  # ✅ NEW: human-readable dashboard name
     widgetId: str = Field(..., min_length=1)
     widgetType: str = Field(..., min_length=1)  # toggle | push_no | push_nc
     title: str | None = None
@@ -172,6 +173,7 @@ def bind_control(
     user=Depends(get_current_user),
 ):
     dashboard_id = req.dashboardId.strip()
+    dashboard_name = (req.dashboardName or "").strip() or None
     widget_id = req.widgetId.strip()
     widget_type = req.widgetType.strip().lower()
     device_id = req.deviceId.strip()
@@ -223,6 +225,7 @@ def bind_control(
                 "usedByTitle": used.title,
                 "usedByType": used.widget_type,
                 "usedByDashboardId": used.dashboard_id,
+                "usedByDashboardName": used.dashboard_name,
             },
         )
 
@@ -245,6 +248,7 @@ def bind_control(
         )
         db.add(row)
 
+    row.dashboard_name = dashboard_name
     row.widget_type = widget_type
     row.title = (req.title or "").strip() or None
     row.bind_device_id = device_id
@@ -274,10 +278,15 @@ def bind_control(
                 "usedByTitle": used.title if used else None,
                 "usedByType": used.widget_type if used else None,
                 "usedByDashboardId": used.dashboard_id if used else None,
+                "usedByDashboardName": used.dashboard_name if used else None,
             },
         )
 
-    return {"ok": True}
+    return {
+        "ok": True,
+        "dashboardId": row.dashboard_id,
+        "dashboardName": row.dashboard_name,
+    }
 
 
 # ===============================
@@ -308,6 +317,7 @@ def get_used_dos(
             "title": r.title,
             "widgetType": r.widget_type,
             "dashboardId": r.dashboard_id,
+            "dashboardName": r.dashboard_name,
         }
         for r in rows
         if r.bind_field
