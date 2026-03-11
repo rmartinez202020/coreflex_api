@@ -103,9 +103,17 @@ class User(Base):
         passive_deletes=True,
     )
 
-    # ✅ NEW: one user -> many graphic display bindings
+    # ✅ one user -> many graphic display bindings
     graphic_display_bindings = relationship(
         "GraphicDisplayBinding",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    # ✅ NEW: one user -> many alarm log windows
+    alarm_log_windows = relationship(
+        "AlarmLogWindow",
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -632,3 +640,47 @@ class GraphicDisplayBinding(Base):
     )
 
     user = relationship("User", back_populates="graphic_display_bindings")
+
+
+# ===============================
+# 🚨 ALARM LOG WINDOWS
+# One row per alarm log window per user/dashboard
+# ===============================
+class AlarmLogWindow(Base):
+    __tablename__ = "alarm_log_windows"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    dashboard_id = Column(String(255), nullable=False, server_default="main", index=True)
+    window_key = Column(String(100), nullable=False, server_default="alarmLog", index=True)
+    title = Column(String(255), nullable=False, server_default="Alarms Log (DI-AI)")
+
+    pos_x = Column(Integer, nullable=False, server_default="140")
+    pos_y = Column(Integer, nullable=False, server_default="90")
+    width = Column(Integer, nullable=False, server_default="900")
+    height = Column(Integer, nullable=False, server_default="420")
+
+    is_open = Column(Boolean, nullable=False, server_default=func.true())
+    is_minimized = Column(Boolean, nullable=False, server_default=func.false())
+    is_launched = Column(Boolean, nullable=False, server_default=func.false())
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "dashboard_id",
+            "window_key",
+            name="uq_alarm_log_windows_user_dashboard_key",
+        ),
+    )
+
+    user = relationship("User", back_populates="alarm_log_windows")

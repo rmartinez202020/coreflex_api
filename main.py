@@ -214,6 +214,16 @@ from routers.graphic_display_bindings import (  # noqa: E402
 app.include_router(graphic_display_bindings_router)
 
 # ========================================
+# ✅ ALARM LOG WINDOWS ROUTES (NEW)
+# endpoints:
+#   POST /alarm-log-windows/upsert
+#   GET  /alarm-log-windows/by-dashboard?dashboard_id=main&window_key=alarmLog
+# ========================================
+from routers.alarm_log_windows import router as alarm_log_windows_router  # noqa: E402
+
+app.include_router(alarm_log_windows_router)
+
+# ========================================
 # ❤️ HEALTH CHECK
 # ========================================
 @app.get("/health")
