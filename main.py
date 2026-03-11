@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -29,25 +29,23 @@ from routers.device_counters_tick import (  # noqa: E402
 app = FastAPI(title="CoreFlex API", version="1.0.0")
 
 # ========================================
-# 🌍 CORS (ROBUST FOR BOTH DOMAIN SPELLINGS)
-# ✅ Supports:
-#    - coreflexiotsplatform.com
-#    - coreflexiiotsplatform.com
-#    - with/without www
-#    - http/https
+# 🌍 CORS
+# ✅ Keep exact frontend origins
+# ✅ Keep regex too
+# ✅ Add explicit OPTIONS fallback below for stubborn preflight cases
 # ========================================
 ALLOWED_ORIGINS = [
-    # ✅ current / primary domain variants
-    "https://coreflexiotsplatform.com",
-    "https://www.coreflexiotsplatform.com",
-    "http://coreflexiotsplatform.com",
-    "http://www.coreflexiotsplatform.com",
-
-    # ✅ alternate spelling variants
-    "https://coreflexiiotsplatform.com",
+    # ✅ CURRENT LIVE FRONTEND
     "https://www.coreflexiiotsplatform.com",
-    "http://coreflexiiotsplatform.com",
+    "https://coreflexiiotsplatform.com",
     "http://www.coreflexiiotsplatform.com",
+    "http://coreflexiiotsplatform.com",
+
+    # ✅ optional older/alternate spelling support
+    "https://www.coreflexiotsplatform.com",
+    "https://coreflexiotsplatform.com",
+    "http://www.coreflexiotsplatform.com",
+    "http://coreflexiotsplatform.com",
 
     # ✅ local dev
     "http://localhost:5173",
@@ -59,13 +57,42 @@ ALLOWED_ORIGINS = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    # ✅ extra-safe regex so even if you switch between iots / iiots + www it still works
     allow_origin_regex=r"https?://(www\.)?coreflexi{1,2}otsplatform\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# ========================================
+# ✅ EXPLICIT OPTIONS FALLBACK
+# Helps if browser preflight is still stubborn on some routes/proxies
+# ========================================
+@app.options("/{full_path:path}")
+async def options_preflight_handler(full_path: str, request: Request):
+    origin = request.headers.get("origin", "")
+    allow_origin = origin if origin in ALLOWED_ORIGINS else ""
+
+    # allow regex match too
+    if not allow_origin:
+        import re
+
+        if re.match(r"^https?://(www\.)?coreflexi{1,2}otsplatform\.com$", origin):
+            allow_origin = origin
+
+    headers = {
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": request.headers.get(
+            "access-control-request-headers", "*"
+        ),
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+    }
+
+    if allow_origin:
+        headers["Access-Control-Allow-Origin"] = allow_origin
+
+    return Response(status_code=200, headers=headers)
 
 # ========================================
 # ✅ CREATE TABLES + INIT CLOUDINARY + START COUNTER TICK
@@ -84,8 +111,6 @@ async def on_startup():
         init_cloudinary()
         print("✅ Cloudinary initialized on startup")
     except Exception as e:
-        # Don't crash the whole app if Cloudinary is misconfigured;
-        # you will still see the error in Render logs.
         print("❌ Cloudinary init failed:", repr(e))
 
     # 3) ✅ Start persistent counter engine (keeps counting even if UI is closed)
@@ -210,11 +235,7 @@ from routers.node_red_graphics import router as node_red_graphics_router  # noqa
 app.include_router(node_red_graphics_router)
 
 # ========================================
-# ✅ GRAPHIC DISPLAY BINDINGS ROUTES (NEW)
-# endpoints:
-#   POST /graphic-display-bindings/upsert
-#   GET  /graphic-display-bindings/list?dashboard_id=main
-#   POST /graphic-display-bindings/delete
+# ✅ GRAPHIC DISPLAY BINDINGS ROUTES
 # ========================================
 from routers.graphic_display_bindings import (  # noqa: E402
     router as graphic_display_bindings_router,
@@ -223,10 +244,7 @@ from routers.graphic_display_bindings import (  # noqa: E402
 app.include_router(graphic_display_bindings_router)
 
 # ========================================
-# ✅ ALARM LOG WINDOWS ROUTES (NEW)
-# endpoints:
-#   POST /alarm-log-windows/upsert
-#   GET  /alarm-log-windows/by-dashboard?dashboard_id=main&window_key=alarmLog
+# ✅ ALARM LOG WINDOWS ROUTES
 # ========================================
 from routers.alarm_log_windows import router as alarm_log_windows_router  # noqa: E402
 
