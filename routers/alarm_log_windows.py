@@ -22,6 +22,12 @@ class UpsertAlarmLogWindowBody(BaseModel):
     is_launched: bool = False
 
 
+# ✅ NEW: body for deleting the saved alarm log window row
+class DeleteAlarmLogWindowBody(BaseModel):
+    dashboard_id: str = "main"
+    window_key: str = "alarmLog"
+
+
 @router.post("/upsert")
 def upsert_alarm_log_window(
     body: UpsertAlarmLogWindowBody,
@@ -124,6 +130,69 @@ def upsert_alarm_log_window(
         raise HTTPException(
             status_code=500,
             detail=f"Alarm log upsert failed: {repr(e)}",
+        )
+
+
+# ✅ NEW: delete saved alarm log window row
+@router.post("/delete")
+def delete_alarm_log_window(
+    body: DeleteAlarmLogWindowBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dashboard_id = str(body.dashboard_id or "main").strip() or "main"
+    window_key = str(body.window_key or "alarmLog").strip() or "alarmLog"
+
+    print("🗑️ ALARM LOG DELETE HIT")
+    print("🗑️ current_user.id =", current_user.id)
+    print("🗑️ dashboard_id =", dashboard_id)
+    print("🗑️ window_key =", window_key)
+
+    try:
+        row = (
+            db.query(AlarmLogWindow)
+            .filter(
+                AlarmLogWindow.user_id == current_user.id,
+                AlarmLogWindow.dashboard_id == dashboard_id,
+                AlarmLogWindow.window_key == window_key,
+            )
+            .first()
+        )
+
+        print("🗑️ row found for delete =", bool(row))
+
+        if not row:
+            result = {
+                "ok": True,
+                "deleted": False,
+                "message": "No alarm log window row found",
+                "dashboard_id": dashboard_id,
+                "window_key": window_key,
+            }
+            print("🗑️ returning =", result)
+            return result
+
+        db.delete(row)
+        print("🗑️ row marked for delete")
+
+        db.commit()
+        print("🗑️ delete commit ok")
+
+        result = {
+            "ok": True,
+            "deleted": True,
+            "dashboard_id": dashboard_id,
+            "window_key": window_key,
+        }
+        print("🗑️ returning =", result)
+        return result
+
+    except Exception as e:
+        db.rollback()
+        print("❌ alarm_log_windows delete failed:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Alarm log delete failed: {repr(e)}",
         )
 
 
