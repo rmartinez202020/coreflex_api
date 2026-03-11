@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -28,62 +28,103 @@ def upsert_alarm_log_window(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    dashboard_id = str(body.dashboard_id or "main").strip()
+    dashboard_id = str(body.dashboard_id or "main").strip() or "main"
     window_key = str(body.window_key or "alarmLog").strip() or "alarmLog"
 
-    row = (
-        db.query(AlarmLogWindow)
-        .filter(
-            AlarmLogWindow.user_id == current_user.id,
-            AlarmLogWindow.dashboard_id == dashboard_id,
-            AlarmLogWindow.window_key == window_key,
-        )
-        .first()
+    print("🚨 ALARM LOG UPSERT HIT")
+    print(
+        "🚨 body =",
+        {
+            "dashboard_id": body.dashboard_id,
+            "window_key": body.window_key,
+            "title": body.title,
+            "pos_x": body.pos_x,
+            "pos_y": body.pos_y,
+            "width": body.width,
+            "height": body.height,
+            "is_open": body.is_open,
+            "is_minimized": body.is_minimized,
+            "is_launched": body.is_launched,
+        },
     )
+    print("🚨 current_user.id =", current_user.id)
+    print("🚨 normalized dashboard_id =", dashboard_id)
+    print("🚨 normalized window_key =", window_key)
 
-    if row:
-        row.title = body.title
-        row.pos_x = body.pos_x
-        row.pos_y = body.pos_y
-        row.width = body.width
-        row.height = body.height
-        row.is_open = body.is_open
-        row.is_minimized = body.is_minimized
-        row.is_launched = body.is_launched
-    else:
-        row = AlarmLogWindow(
-            user_id=current_user.id,
-            dashboard_id=dashboard_id,
-            window_key=window_key,
-            title=body.title,
-            pos_x=body.pos_x,
-            pos_y=body.pos_y,
-            width=body.width,
-            height=body.height,
-            is_open=body.is_open,
-            is_minimized=body.is_minimized,
-            is_launched=body.is_launched,
+    try:
+        row = (
+            db.query(AlarmLogWindow)
+            .filter(
+                AlarmLogWindow.user_id == current_user.id,
+                AlarmLogWindow.dashboard_id == dashboard_id,
+                AlarmLogWindow.window_key == window_key,
+            )
+            .first()
         )
-        db.add(row)
 
-    db.commit()
-    db.refresh(row)
+        print("🚨 existing row found =", bool(row))
 
-    return {
-        "ok": True,
-        "id": row.id,
-        "user_id": row.user_id,
-        "dashboard_id": row.dashboard_id,
-        "window_key": row.window_key,
-        "title": row.title,
-        "pos_x": row.pos_x,
-        "pos_y": row.pos_y,
-        "width": row.width,
-        "height": row.height,
-        "is_open": row.is_open,
-        "is_minimized": row.is_minimized,
-        "is_launched": row.is_launched,
-    }
+        if row:
+            row.title = body.title
+            row.pos_x = body.pos_x
+            row.pos_y = body.pos_y
+            row.width = body.width
+            row.height = body.height
+            row.is_open = body.is_open
+            row.is_minimized = body.is_minimized
+            row.is_launched = body.is_launched
+            print("🚨 updated existing row in session")
+        else:
+            row = AlarmLogWindow(
+                user_id=current_user.id,
+                dashboard_id=dashboard_id,
+                window_key=window_key,
+                title=body.title,
+                pos_x=body.pos_x,
+                pos_y=body.pos_y,
+                width=body.width,
+                height=body.height,
+                is_open=body.is_open,
+                is_minimized=body.is_minimized,
+                is_launched=body.is_launched,
+            )
+            db.add(row)
+            print("🚨 created new row in session")
+
+        print("🚨 before commit")
+        db.commit()
+        print("🚨 commit ok")
+
+        print("🚨 before refresh")
+        db.refresh(row)
+        print("🚨 refresh ok")
+
+        result = {
+            "ok": True,
+            "id": row.id,
+            "user_id": row.user_id,
+            "dashboard_id": row.dashboard_id,
+            "window_key": row.window_key,
+            "title": row.title,
+            "pos_x": row.pos_x,
+            "pos_y": row.pos_y,
+            "width": row.width,
+            "height": row.height,
+            "is_open": row.is_open,
+            "is_minimized": row.is_minimized,
+            "is_launched": row.is_launched,
+        }
+
+        print("🚨 returning success =", result)
+        return result
+
+    except Exception as e:
+        db.rollback()
+        print("❌ alarm_log_windows upsert failed:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Alarm log upsert failed: {repr(e)}",
+        )
 
 
 @router.get("/by-dashboard")
@@ -93,32 +134,53 @@ def get_alarm_log_window(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    row = (
-        db.query(AlarmLogWindow)
-        .filter(
-            AlarmLogWindow.user_id == current_user.id,
-            AlarmLogWindow.dashboard_id == dashboard_id,
-            AlarmLogWindow.window_key == window_key,
+    dashboard_id = str(dashboard_id or "main").strip() or "main"
+    window_key = str(window_key or "alarmLog").strip() or "alarmLog"
+
+    print("🔎 ALARM LOG GET BY DASHBOARD HIT")
+    print("🔎 current_user.id =", current_user.id)
+    print("🔎 dashboard_id =", dashboard_id)
+    print("🔎 window_key =", window_key)
+
+    try:
+        row = (
+            db.query(AlarmLogWindow)
+            .filter(
+                AlarmLogWindow.user_id == current_user.id,
+                AlarmLogWindow.dashboard_id == dashboard_id,
+                AlarmLogWindow.window_key == window_key,
+            )
+            .first()
         )
-        .first()
-    )
 
-    if not row:
-        return {"ok": True, "found": False}
+        print("🔎 row found =", bool(row))
 
-    return {
-        "ok": True,
-        "found": True,
-        "id": row.id,
-        "user_id": row.user_id,
-        "dashboard_id": row.dashboard_id,
-        "window_key": row.window_key,
-        "title": row.title,
-        "pos_x": row.pos_x,
-        "pos_y": row.pos_y,
-        "width": row.width,
-        "height": row.height,
-        "is_open": row.is_open,
-        "is_minimized": row.is_minimized,
-        "is_launched": row.is_launched,
-    }
+        if not row:
+            return {"ok": True, "found": False}
+
+        result = {
+            "ok": True,
+            "found": True,
+            "id": row.id,
+            "user_id": row.user_id,
+            "dashboard_id": row.dashboard_id,
+            "window_key": row.window_key,
+            "title": row.title,
+            "pos_x": row.pos_x,
+            "pos_y": row.pos_y,
+            "width": row.width,
+            "height": row.height,
+            "is_open": row.is_open,
+            "is_minimized": row.is_minimized,
+            "is_launched": row.is_launched,
+        }
+
+        print("🔎 returning row =", result)
+        return result
+
+    except Exception as e:
+        print("❌ alarm_log_windows by-dashboard failed:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Alarm log fetch failed: {repr(e)}",
+        )
