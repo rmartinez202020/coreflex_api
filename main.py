@@ -29,6 +29,45 @@ from routers.device_counters_tick import (  # noqa: E402
 app = FastAPI(title="CoreFlex API", version="1.0.0")
 
 # ========================================
+# 🌍 CORS (ROBUST FOR BOTH DOMAIN SPELLINGS)
+# ✅ Supports:
+#    - coreflexiotsplatform.com
+#    - coreflexiiotsplatform.com
+#    - with/without www
+#    - http/https
+# ========================================
+ALLOWED_ORIGINS = [
+    # ✅ current / primary domain variants
+    "https://coreflexiotsplatform.com",
+    "https://www.coreflexiotsplatform.com",
+    "http://coreflexiotsplatform.com",
+    "http://www.coreflexiotsplatform.com",
+
+    # ✅ alternate spelling variants
+    "https://coreflexiiotsplatform.com",
+    "https://www.coreflexiiotsplatform.com",
+    "http://coreflexiiotsplatform.com",
+    "http://www.coreflexiiotsplatform.com",
+
+    # ✅ local dev
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    # ✅ extra-safe regex so even if you switch between iots / iiots + www it still works
+    allow_origin_regex=r"https?://(www\.)?coreflexi{1,2}otsplatform\.com",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
+# ========================================
 # ✅ CREATE TABLES + INIT CLOUDINARY + START COUNTER TICK
 # ========================================
 @app.on_event("startup")
@@ -68,37 +107,6 @@ async def on_shutdown():
 
 
 # ========================================
-# 🌍 CORS (PRODUCTION SAFE)
-# ✅ FIX: Your browser error shows Origin = http://www.coreflexiiotsplatform.com
-# so we must allow http + https for BOTH spellings, plus www variants.
-# ========================================
-ALLOWED_ORIGINS = [
-    # ✅ CURRENT FRONTEND DOMAIN (from your src/config/api.js)
-    "https://coreflexiotsplatform.com",
-    "https://www.coreflexiotsplatform.com",
-    "http://coreflexiotsplatform.com",
-    "http://www.coreflexiotsplatform.com",
-
-    # ✅ KEEP THESE (older/alternate domain spelling)
-    "https://coreflexiiotsplatform.com",
-    "https://www.coreflexiiotsplatform.com",
-    "http://coreflexiiotsplatform.com",
-    "http://www.coreflexiiotsplatform.com",
-
-    # ✅ Local dev
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ========================================
 # ✅ GLOBAL ERROR HANDLER (so you SEE real errors)
 # ========================================
 @app.exception_handler(Exception)
@@ -112,6 +120,7 @@ async def global_exception_handler(request: Request, exc: Exception):
             "path": str(request.url.path),
         },
     )
+
 
 # ========================================
 # 🔐 AUTH ROUTES
