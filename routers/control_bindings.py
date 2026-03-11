@@ -201,6 +201,31 @@ def bind_control(
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
 
+    # ✅ GLOBAL uniqueness check across ALL dashboards
+    # Same user + same device + same DO cannot be used by another widget,
+    # no matter which dashboard it is on.
+    used = (
+        db.query(ControlBinding)
+        .filter(
+            ControlBinding.user_id == user.id,
+            ControlBinding.bind_device_id == device_id,
+            ControlBinding.bind_field == field,
+            ControlBinding.widget_id != widget_id,
+        )
+        .first()
+    )
+    if used:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": f"{field.upper()} already used",
+                "usedByWidgetId": used.widget_id,
+                "usedByTitle": used.title,
+                "usedByType": used.widget_type,
+                "usedByDashboardId": used.dashboard_id,
+            },
+        )
+
     # ✅ Upsert by (user, dashboard, widget)
     row = (
         db.query(ControlBinding)
@@ -234,7 +259,6 @@ def bind_control(
             db.query(ControlBinding)
             .filter(
                 ControlBinding.user_id == user.id,
-                ControlBinding.dashboard_id == dashboard_id,
                 ControlBinding.bind_device_id == device_id,
                 ControlBinding.bind_field == field,
                 ControlBinding.widget_id != widget_id,
@@ -249,6 +273,7 @@ def bind_control(
                 "usedByWidgetId": used.widget_id if used else None,
                 "usedByTitle": used.title if used else None,
                 "usedByType": used.widget_type if used else None,
+                "usedByDashboardId": used.dashboard_id if used else None,
             },
         )
 
@@ -256,23 +281,20 @@ def bind_control(
 
 
 # ===============================
-# 📡 Get Used DOs for Dashboard+Device
+# 📡 Get Used DOs for Device (ALL dashboards)
 # ===============================
 @router.get("/used")
 def get_used_dos(
-    dashboardId: str = Query(...),
     deviceId: str = Query(...),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    dash_id = dashboardId.strip()
     dev_id = deviceId.strip()
 
     rows = (
         db.query(ControlBinding)
         .filter(
             ControlBinding.user_id == user.id,
-            ControlBinding.dashboard_id == dash_id,
             ControlBinding.bind_device_id == dev_id,
             ControlBinding.bind_field.isnot(None),
         )
@@ -285,6 +307,7 @@ def get_used_dos(
             "widgetId": r.widget_id,
             "title": r.title,
             "widgetType": r.widget_type,
+            "dashboardId": r.dashboard_id,
         }
         for r in rows
         if r.bind_field
