@@ -11,6 +11,7 @@ router = APIRouter(prefix="/alarm-log-windows", tags=["Alarm Log Windows"])
 
 class UpsertAlarmLogWindowBody(BaseModel):
     dashboard_id: str = "main"
+    dashboard_name: str = "Main Dashboard"  # ✅ NEW
     window_key: str = "alarmLog"
     title: str = "Alarms Log (DI-AI)"
     pos_x: int = 140
@@ -35,6 +36,7 @@ def upsert_alarm_log_window(
     current_user: User = Depends(get_current_user),
 ):
     dashboard_id = str(body.dashboard_id or "main").strip() or "main"
+    dashboard_name = str(body.dashboard_name or "").strip() or "Main Dashboard"
     window_key = str(body.window_key or "alarmLog").strip() or "alarmLog"
 
     print("🚨 ALARM LOG UPSERT HIT")
@@ -42,6 +44,7 @@ def upsert_alarm_log_window(
         "🚨 body =",
         {
             "dashboard_id": body.dashboard_id,
+            "dashboard_name": body.dashboard_name,
             "window_key": body.window_key,
             "title": body.title,
             "pos_x": body.pos_x,
@@ -55,6 +58,7 @@ def upsert_alarm_log_window(
     )
     print("🚨 current_user.id =", current_user.id)
     print("🚨 normalized dashboard_id =", dashboard_id)
+    print("🚨 normalized dashboard_name =", dashboard_name)
     print("🚨 normalized window_key =", window_key)
 
     try:
@@ -71,6 +75,7 @@ def upsert_alarm_log_window(
         print("🚨 existing row found =", bool(row))
 
         if row:
+            row.dashboard_name = dashboard_name  # ✅ NEW
             row.title = body.title
             row.pos_x = body.pos_x
             row.pos_y = body.pos_y
@@ -84,6 +89,7 @@ def upsert_alarm_log_window(
             row = AlarmLogWindow(
                 user_id=current_user.id,
                 dashboard_id=dashboard_id,
+                dashboard_name=dashboard_name,  # ✅ NEW
                 window_key=window_key,
                 title=body.title,
                 pos_x=body.pos_x,
@@ -110,6 +116,7 @@ def upsert_alarm_log_window(
             "id": row.id,
             "user_id": row.user_id,
             "dashboard_id": row.dashboard_id,
+            "dashboard_name": row.dashboard_name,  # ✅ NEW
             "window_key": row.window_key,
             "title": row.title,
             "pos_x": row.pos_x,
@@ -233,6 +240,7 @@ def get_alarm_log_window(
             "id": row.id,
             "user_id": row.user_id,
             "dashboard_id": row.dashboard_id,
+            "dashboard_name": row.dashboard_name,  # ✅ NEW
             "window_key": row.window_key,
             "title": row.title,
             "pos_x": row.pos_x,

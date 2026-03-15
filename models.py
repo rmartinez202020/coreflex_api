@@ -647,7 +647,6 @@ class GraphicDisplayBinding(Base):
 
     user = relationship("User", back_populates="graphic_display_bindings")
 
-
 # ===============================
 # 🚨 ALARM LOG WINDOWS
 # One row per alarm log window per user/dashboard
@@ -665,6 +664,10 @@ class AlarmLogWindow(Base):
     )
 
     dashboard_id = Column(String(255), nullable=False, server_default="main", index=True)
+
+    # ✅ NEW: store dashboard display name
+    dashboard_name = Column(String(255), nullable=True, server_default="Main Dashboard")
+
     window_key = Column(String(100), nullable=False, server_default="alarmLog", index=True)
     title = Column(String(255), nullable=False, server_default="Alarms Log (DI-AI)")
 
