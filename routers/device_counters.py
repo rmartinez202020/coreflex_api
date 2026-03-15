@@ -227,6 +227,10 @@ def create_placeholder_counter(
     return _row_to_dict(row)
 
 
+# ✅ accept BOTH:
+#    GET /device-counters
+#    GET /device-counters/
+@router.get("")
 @router.get("/")
 def list_counters(
     dashboard_id: Optional[str] = None,
