@@ -251,6 +251,13 @@ from routers.alarm_log_windows import router as alarm_log_windows_router  # noqa
 app.include_router(alarm_log_windows_router)
 
 # ========================================
+# ✅ ALARM DEFINITIONS ROUTES
+# ========================================
+from routers.alarm_definitions import router as alarm_definitions_router  # noqa: E402
+
+app.include_router(alarm_definitions_router)
+
+# ========================================
 # ❤️ HEALTH CHECK
 # ========================================
 @app.get("/health")

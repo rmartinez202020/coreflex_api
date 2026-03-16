@@ -702,3 +702,61 @@ class AlarmLogWindow(Base):
     )
 
     user = relationship("User", back_populates="alarm_log_windows")
+
+    # ===============================
+# 🚨 ALARM DEFINITIONS
+# Stores alarm configuration created by users
+# Alarm EVENTS will be stored later in AWS
+# ===============================
+class AlarmDefinition(Base):
+    __tablename__ = "alarm_definitions"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # owner of the alarm
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # device information
+    device_id = Column(String(255), nullable=False, index=True)
+    model = Column(String(120), nullable=True)
+
+    # tag that triggers alarm
+    tag = Column(String(120), nullable=False, index=True)
+
+    # DI or AI
+    alarm_type = Column(String(20), nullable=False)
+
+    # for AI alarms
+    operator = Column(String(10), nullable=True)
+    threshold = Column(Float, nullable=True)
+
+    # optional math formula
+    math_formula = Column(String, nullable=True)
+
+    # grouping / severity
+    group_name = Column(String(120), nullable=True)
+    severity = Column(String(50), nullable=True)
+
+    # alarm message
+    message = Column(String, nullable=False)
+
+    # enable / disable
+    enabled = Column(Boolean, nullable=False, server_default=func.true())
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
