@@ -702,8 +702,7 @@ class AlarmLogWindow(Base):
     )
 
     user = relationship("User", back_populates="alarm_log_windows")
-
-    # ===============================
+# ===============================
 # 🚨 ALARM DEFINITIONS
 # Stores alarm configuration created by users
 # Alarm EVENTS will be stored later in AWS
@@ -730,6 +729,9 @@ class AlarmDefinition(Base):
 
     # DI or AI
     alarm_type = Column(String(20), nullable=False)
+
+    # ✅ for DI alarms
+    contact_type = Column(String(5), nullable=True)
 
     # for AI alarms
     operator = Column(String(10), nullable=True)
