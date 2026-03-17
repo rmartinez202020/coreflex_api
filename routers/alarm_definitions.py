@@ -34,6 +34,7 @@ def create_alarm_definition(
 
     operator = StringOrNone(payload.get("operator"))
     threshold = payload.get("threshold")
+    alarm_log_key = StringOrNone(payload.get("alarm_log_key"))
 
     if alarm_type == "DI":
         operator = None
@@ -52,6 +53,7 @@ def create_alarm_definition(
         severity=payload.get("severity"),
         message=payload["message"],
         enabled=payload.get("enabled", True),
+        alarm_log_key=alarm_log_key,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -65,6 +67,7 @@ def create_alarm_definition(
         "alarm_id": alarm.id,
         "contact_type": alarm.contact_type,
         "math_formula": alarm.math_formula,
+        "alarm_log_key": alarm.alarm_log_key,
     }
 
 
@@ -138,6 +141,9 @@ def update_alarm_definition(
     if "tag" in payload:
         alarm.tag = payload["tag"]
 
+    if "alarm_log_key" in payload:
+        alarm.alarm_log_key = StringOrNone(payload.get("alarm_log_key"))
+
     alarm.alarm_type = alarm_type
     alarm.contact_type = contact_type
     alarm.operator = operator
@@ -166,6 +172,7 @@ def update_alarm_definition(
         "alarm_id": alarm.id,
         "contact_type": alarm.contact_type,
         "math_formula": alarm.math_formula,
+        "alarm_log_key": alarm.alarm_log_key,
     }
 
 
