@@ -10,8 +10,9 @@ from database import SessionLocal
 import models
 from utils.zhc1921_live_cache import get_latest as get_latest_1921
 
-# 🔗 Node-RED endpoint (replace with your real endpoint)
-NODE_RED_URL = "http://YOUR_NODE_RED_SERVER/alarm-log"
+# 🔗 Node-RED endpoint
+NODE_RED_URL = "http://98.90.225.131:1880/alarm-log"
+NODE_RED_COMMAND_KEY = "CFX_k29sLx92Jd8s1Qp4NzT7MartinezVx93LwQa2"
 
 POLL_INTERVAL = 10  # seconds
 
@@ -140,8 +141,25 @@ def send_to_historian(alarm, raw_value, computed_value, state, device_status):
         "contact_type": alarm.contact_type,
     }
 
+    headers = {
+        "Content-Type": "application/json",
+        "x-command-key": NODE_RED_COMMAND_KEY,
+    }
+
     try:
-        requests.post(NODE_RED_URL, json=payload, timeout=3)
+        res = requests.post(
+            NODE_RED_URL,
+            json=payload,
+            headers=headers,
+            timeout=3,
+        )
+
+        if not res.ok:
+            print(
+                "❌ Node-RED historian rejected event:",
+                res.status_code,
+                res.text[:300],
+            )
     except Exception as e:
         print("❌ Node-RED send failed:", e)
 
