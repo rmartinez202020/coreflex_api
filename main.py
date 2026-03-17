@@ -98,6 +98,7 @@ async def options_preflight_handler(full_path: str, request: Request):
 
     return Response(status_code=200, headers=headers)
 
+
 # ========================================
 # ✅ CREATE TABLES + INIT CLOUDINARY + START COUNTER TICK + ALARM ENGINE
 # ========================================
@@ -272,6 +273,13 @@ app.include_router(alarm_log_windows_router)
 from routers.alarm_definitions import router as alarm_definitions_router  # noqa: E402
 
 app.include_router(alarm_definitions_router)
+
+# ========================================
+# ✅ ALARM HISTORY ROUTES
+# ========================================
+from routers.alarm_history import router as alarm_history_router  # noqa: E402
+
+app.include_router(alarm_history_router)
 
 # ========================================
 # ❤️ HEALTH CHECK
