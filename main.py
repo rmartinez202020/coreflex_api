@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 from sqlalchemy.orm import Session
+import threading
 
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
@@ -22,6 +23,9 @@ from routers.device_counters_tick import (  # noqa: E402
     start_device_counters_tick,
     stop_device_counters_tick,
 )
+
+# ✅ NEW: alarm engine background loop
+from routers.alarm_engine import alarm_engine_loop  # noqa: E402
 
 # ========================================
 # 🚀 FASTAPI APP
@@ -95,7 +99,7 @@ async def options_preflight_handler(full_path: str, request: Request):
     return Response(status_code=200, headers=headers)
 
 # ========================================
-# ✅ CREATE TABLES + INIT CLOUDINARY + START COUNTER TICK
+# ✅ CREATE TABLES + INIT CLOUDINARY + START COUNTER TICK + ALARM ENGINE
 # ========================================
 @app.on_event("startup")
 async def on_startup():
@@ -118,6 +122,18 @@ async def on_startup():
         start_device_counters_tick()
     except Exception as e:
         print("❌ start_device_counters_tick failed:", repr(e))
+
+    # 4) ✅ Start alarm engine background loop
+    try:
+        alarm_thread = threading.Thread(
+            target=alarm_engine_loop,
+            daemon=True,
+            name="alarm-engine-loop",
+        )
+        alarm_thread.start()
+        print("✅ Alarm engine thread started")
+    except Exception as e:
+        print("❌ alarm_engine_loop failed to start:", repr(e))
 
 
 # ========================================
