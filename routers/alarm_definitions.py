@@ -87,6 +87,52 @@ def get_user_alarm_definitions(
 
 
 # ==========================================
+# DELETE USER ALARM DEFINITIONS
+# ==========================================
+@router.delete("/")
+def delete_alarm_definitions(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    raw_ids = payload.get("ids") or []
+
+    ids = []
+    for value in raw_ids:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    if not ids:
+        return {
+            "success": True,
+            "deleted_count": 0,
+            "deleted_ids": [],
+        }
+
+    rows = (
+        db.query(models.AlarmDefinition)
+        .filter(models.AlarmDefinition.user_id == current_user.id)
+        .filter(models.AlarmDefinition.id.in_(ids))
+        .all()
+    )
+
+    deleted_ids = [row.id for row in rows]
+
+    for row in rows:
+        db.delete(row)
+
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+    }
+
+
+# ==========================================
 # SMALL HELPER
 # ==========================================
 def StringOrNone(value):
