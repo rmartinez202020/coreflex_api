@@ -34,7 +34,9 @@ class User(Base):
 
     # 🔐 Control & Automation Terms Acceptance (REGISTER PAGE)
     # NOTE: Use func.false() for a clean Postgres boolean default
-    accepted_control_terms = Column(Boolean, nullable=False, server_default=func.false())
+    accepted_control_terms = Column(
+        Boolean, nullable=False, server_default=func.false()
+    )
     control_terms_version = Column(String(20), nullable=True)
     control_terms_accepted_at = Column(
         DateTime(timezone=True),
@@ -541,7 +543,9 @@ class ControlBinding(Base):
     bind_device_id = Column(String, nullable=True, index=True)
     bind_field = Column(String, nullable=True, index=True)  # do1..do4
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
     __table_args__ = (
@@ -583,7 +587,9 @@ class ControlActionLock(Base):
     user_id = Column(Integer, nullable=True, index=True)
 
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 # ===============================
@@ -596,14 +602,20 @@ class GraphicDisplayBinding(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     # who / where
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     dashboard_id = Column(String, nullable=False, index=True, server_default="main")
     widget_id = Column(String, nullable=False, index=True)
 
     # binding
-    bind_model = Column(String, nullable=False, server_default="zhc1921")  # zhc1921 / zhc1661 / tp4000
+    bind_model = Column(
+        String, nullable=False, server_default="zhc1921"
+    )  # zhc1921 / zhc1661 / tp4000
     bind_device_id = Column(String, nullable=False, index=True)
-    bind_field = Column(String, nullable=False, server_default="ai1")      # ai1/ai2/ai3/ai4...
+    bind_field = Column(
+        String, nullable=False, server_default="ai1"
+    )  # ai1/ai2/ai3/ai4...
 
     # display settings
     title = Column(String, nullable=False, server_default="Graphic Display")
@@ -633,7 +645,9 @@ class GraphicDisplayBinding(Base):
     is_enabled = Column(Boolean, nullable=False, server_default=func.true())
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
     updated_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
@@ -646,6 +660,7 @@ class GraphicDisplayBinding(Base):
     )
 
     user = relationship("User", back_populates="graphic_display_bindings")
+
 
 # ===============================
 # 🚨 ALARM LOG WINDOWS
@@ -663,13 +678,21 @@ class AlarmLogWindow(Base):
         index=True,
     )
 
-    dashboard_id = Column(String(255), nullable=False, server_default="main", index=True)
+    dashboard_id = Column(
+        String(255), nullable=False, server_default="main", index=True
+    )
 
     # ✅ NEW: store dashboard display name
-    dashboard_name = Column(String(255), nullable=True, server_default="Main Dashboard")
+    dashboard_name = Column(
+        String(255), nullable=True, server_default="Main Dashboard"
+    )
 
-    window_key = Column(String(100), nullable=False, server_default="alarmLog", index=True)
-    title = Column(String(255), nullable=False, server_default="Alarms Log (DI-AI)")
+    window_key = Column(
+        String(100), nullable=False, server_default="alarmLog", index=True
+    )
+    title = Column(
+        String(255), nullable=False, server_default="Alarms Log (DI-AI)"
+    )
 
     pos_x = Column(Integer, nullable=False, server_default="140")
     pos_y = Column(Integer, nullable=False, server_default="90")
@@ -702,6 +725,8 @@ class AlarmLogWindow(Base):
     )
 
     user = relationship("User", back_populates="alarm_log_windows")
+
+
 # ===============================
 # 🚨 ALARM DEFINITIONS
 # Stores alarm configuration created by users
@@ -739,6 +764,9 @@ class AlarmDefinition(Base):
 
     # optional math formula
     math_formula = Column(String, nullable=True)
+
+    # ✅ historian / alarm log key
+    alarm_log_key = Column(String(255), nullable=True, index=True)
 
     # grouping / severity
     group_name = Column(String(120), nullable=True)
