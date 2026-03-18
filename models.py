@@ -765,8 +765,17 @@ class AlarmDefinition(Base):
     # optional math formula
     math_formula = Column(String, nullable=True)
 
-    # ✅ historian / alarm log key
-    alarm_log_key = Column(String(255), nullable=True, index=True)
+    # ==========================================
+    # 🔥 CRITICAL FIX: Alarm Log Isolation
+    # ==========================================
+    # Each Alarm Log window has its own key
+    # This prevents alarms from mixing across logs
+    alarm_log_key = Column(
+        String(255),
+        nullable=False,
+        index=True,
+        server_default="alarmLog",
+    )
 
     # grouping / severity
     group_name = Column(String(120), nullable=True)
@@ -789,4 +798,22 @@ class AlarmDefinition(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    # ==========================================
+    # 🔥 OPTIONAL (GOOD PRACTICE)
+    # ==========================================
+    user = relationship("User")
+
+    # ==========================================
+    # 🔥 PERFORMANCE + DATA INTEGRITY
+    # ==========================================
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "device_id",
+            "tag",
+            "alarm_log_key",
+            name="uq_alarm_per_tag_per_log",
+        ),
     )

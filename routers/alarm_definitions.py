@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from database import get_db
 from auth_utils import get_current_user
@@ -6,6 +6,14 @@ import models
 from datetime import datetime
 
 router = APIRouter(prefix="/alarm-definitions", tags=["Alarm Definitions"])
+
+
+# ==========================================
+# SMALL HELPER
+# ==========================================
+def StringOrNone(value):
+    s = str(value).strip() if value is not None else ""
+    return s or None
 
 
 # ==========================================
@@ -34,13 +42,15 @@ def create_alarm_definition(
 
     operator = StringOrNone(payload.get("operator"))
     threshold = payload.get("threshold")
-    alarm_log_key = StringOrNone(payload.get("alarm_log_key"))
+
+    # 🔥 CRITICAL FIX: enforce alarm_log_key
+    alarm_log_key = StringOrNone(payload.get("alarm_log_key")) or "alarmLog"
 
     if alarm_type == "DI":
         operator = None
 
     alarm = models.AlarmDefinition(
-        user_id=current_user.id,  # ✅ secure (not from frontend)
+        user_id=current_user.id,
         device_id=payload["device_id"],
         model=payload.get("model"),
         tag=payload["tag"],
@@ -53,7 +63,10 @@ def create_alarm_definition(
         severity=payload.get("severity"),
         message=payload["message"],
         enabled=payload.get("enabled", True),
+
+        # 🔥 IMPORTANT
         alarm_log_key=alarm_log_key,
+
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -65,23 +78,23 @@ def create_alarm_definition(
     return {
         "success": True,
         "alarm_id": alarm.id,
-        "contact_type": alarm.contact_type,
-        "math_formula": alarm.math_formula,
         "alarm_log_key": alarm.alarm_log_key,
     }
 
 
 # ==========================================
-# GET USER ALARMS
+# GET USER ALARMS (FIXED 🔥)
 # ==========================================
 @router.get("/")
 def get_user_alarm_definitions(
+    alarm_log_key: str = Query("alarmLog"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     alarms = (
         db.query(models.AlarmDefinition)
         .filter(models.AlarmDefinition.user_id == current_user.id)
+        .filter(models.AlarmDefinition.alarm_log_key == alarm_log_key)  # 🔥 FIX
         .order_by(models.AlarmDefinition.id.asc())
         .all()
     )
@@ -141,8 +154,11 @@ def update_alarm_definition(
     if "tag" in payload:
         alarm.tag = payload["tag"]
 
+    # 🔥 FIX: update log key safely
     if "alarm_log_key" in payload:
-        alarm.alarm_log_key = StringOrNone(payload.get("alarm_log_key"))
+        alarm.alarm_log_key = (
+            StringOrNone(payload.get("alarm_log_key")) or "alarmLog"
+        )
 
     alarm.alarm_type = alarm_type
     alarm.contact_type = contact_type
@@ -170,8 +186,6 @@ def update_alarm_definition(
     return {
         "success": True,
         "alarm_id": alarm.id,
-        "contact_type": alarm.contact_type,
-        "math_formula": alarm.math_formula,
         "alarm_log_key": alarm.alarm_log_key,
     }
 
@@ -220,11 +234,3 @@ def delete_alarm_definitions(
         "deleted_count": len(deleted_ids),
         "deleted_ids": deleted_ids,
     }
-
-
-# ==========================================
-# SMALL HELPER
-# ==========================================
-def StringOrNone(value):
-    s = str(value).strip() if value is not None else ""
-    return s or None
