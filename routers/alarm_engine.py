@@ -17,7 +17,9 @@ NODE_RED_COMMAND_KEY = "CFX_k29sLx92Jd8s1Qp4NzT7MartinezVx93LwQa2"
 POLL_INTERVAL = 10  # seconds
 
 # ==========================================
-# 🧠 ANTI-SPAM STATE MEMORY
+# 🧠 RUNTIME STATE MEMORY
+# ✅ kept ONLY to detect single RETURNED event
+# ✅ ACTIVE is now sent every poll while alarm is present
 # key = (user_id, alarm_id)
 # value = {
 #   "state": "ACTIVE" | "NORMAL",
@@ -165,7 +167,9 @@ def send_to_historian(alarm, raw_value, computed_value, state, device_status):
 
 
 # ==========================================
-# 🔁 PROCESS ONE ALARM WITH ANTI-SPAM
+# 🔁 PROCESS ONE ALARM
+# ✅ ACTIVE is now sent EVERY POLL while present
+# ✅ RETURNED is still sent once when alarm clears
 # ✅ READS REAL VALUES FROM LIVE CACHE ONLY
 # ==========================================
 def process_alarm(db: Session, alarm):
@@ -195,9 +199,10 @@ def process_alarm(db: Session, alarm):
         current_state = "ACTIVE" if triggered else "NORMAL"
 
     # --------------------------------------
-    # ANTI-SPAM STATE TRANSITIONS
+    # ✅ NO ACTIVE ANTI-SPAM
+    # Send ACTIVE every poll while alarm is present
     # --------------------------------------
-    if prev_state == "NORMAL" and current_state == "ACTIVE":
+    if current_state == "ACTIVE":
         send_to_historian(
             alarm=alarm,
             raw_value=raw_value,
@@ -210,6 +215,9 @@ def process_alarm(db: Session, alarm):
             f"device:{alarm.device_id} tag:{alarm.tag}"
         )
 
+    # --------------------------------------
+    # ✅ Keep single RETURNED event when alarm clears
+    # --------------------------------------
     elif prev_state == "ACTIVE" and current_state == "NORMAL":
         send_to_historian(
             alarm=alarm,
