@@ -31,6 +31,15 @@ ALARM_RUNTIME_STATE = {}
 
 
 # ==========================================
+# 🕒 HELPER — LOCAL TIME WITH TIMEZONE
+# ✅ timezone-aware local server time
+# ✅ frontend can display correctly without weird UTC shift
+# ==========================================
+def now_local_iso():
+    return datetime.now().astimezone().isoformat()
+
+
+# ==========================================
 # 🔧 HELPER — APPLY MATH
 # ==========================================
 def apply_math(value, formula):
@@ -123,7 +132,8 @@ def get_tag_value_from_cache(data, tag):
 # ==========================================
 def send_to_historian(alarm, raw_value, computed_value, state, device_status):
     payload = {
-        "ts": datetime.utcnow().isoformat(),
+        # ✅ use local timezone-aware timestamp
+        "ts": now_local_iso(),
         "user_id": alarm.user_id,
         "alarm_log_key": alarm.alarm_log_key,
         "alarm_definition_id": alarm.id,
@@ -236,7 +246,7 @@ def process_alarm(db: Session, alarm):
         "state": current_state,
         "last_value": computed_value,
         "last_device_status": device_status,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": now_local_iso(),
     }
 
 
