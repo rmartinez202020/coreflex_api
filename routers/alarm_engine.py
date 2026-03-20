@@ -18,8 +18,7 @@ POLL_INTERVAL = 10  # seconds
 
 # ==========================================
 # 🧠 RUNTIME STATE MEMORY
-# ✅ kept ONLY to detect single RETURNED event
-# ✅ ACTIVE is now sent every poll while alarm is present
+# ✅ used to detect state transitions only
 # key = (user_id, alarm_id)
 # value = {
 #   "state": "ACTIVE" | "NORMAL",
@@ -178,9 +177,10 @@ def send_to_historian(alarm, raw_value, computed_value, state, device_status):
 
 # ==========================================
 # 🔁 PROCESS ONE ALARM
-# ✅ ACTIVE is now sent EVERY POLL while present
-# ✅ RETURNED is still sent once when alarm clears
-# ✅ READS REAL VALUES FROM LIVE CACHE ONLY
+# ✅ send ACTIVE only on transition NORMAL -> ACTIVE
+# ✅ send RETURNED only on transition ACTIVE -> NORMAL
+# ✅ keep monitoring silently while alarm remains ACTIVE
+# ✅ reads real values from live cache only
 # ==========================================
 def process_alarm(db: Session, alarm):
     _ = db  # keep signature consistent for future use
@@ -209,10 +209,9 @@ def process_alarm(db: Session, alarm):
         current_state = "ACTIVE" if triggered else "NORMAL"
 
     # --------------------------------------
-    # ✅ NO ACTIVE ANTI-SPAM
-    # Send ACTIVE every poll while alarm is present
+    # ✅ Send ACTIVE only once when alarm becomes active
     # --------------------------------------
-    if current_state == "ACTIVE":
+    if prev_state != "ACTIVE" and current_state == "ACTIVE":
         send_to_historian(
             alarm=alarm,
             raw_value=raw_value,
@@ -226,7 +225,7 @@ def process_alarm(db: Session, alarm):
         )
 
     # --------------------------------------
-    # ✅ Keep single RETURNED event when alarm clears
+    # ✅ Send RETURNED only once when alarm clears
     # --------------------------------------
     elif prev_state == "ACTIVE" and current_state == "NORMAL":
         send_to_historian(
@@ -240,6 +239,12 @@ def process_alarm(db: Session, alarm):
             f"✅ RETURNED -> user:{alarm.user_id} alarm:{alarm.id} "
             f"device:{alarm.device_id} tag:{alarm.tag}"
         )
+
+    # --------------------------------------
+    # ✅ Otherwise keep monitoring silently
+    # ACTIVE -> ACTIVE  => do nothing
+    # NORMAL -> NORMAL  => do nothing
+    # --------------------------------------
 
     # update runtime state
     ALARM_RUNTIME_STATE[key] = {
