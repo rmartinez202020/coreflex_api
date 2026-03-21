@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import secrets
+import string
 import time
 from threading import RLock
 from types import SimpleNamespace
@@ -35,6 +38,34 @@ def verify_password(plain_password: str, hashed_password: str):
 
 
 # ========================================
+# 🔐 PASSWORD RESET HELPERS
+# ========================================
+
+RESET_CODE_LENGTH = 6
+RESET_CODE_ALPHABET = string.digits
+
+
+def normalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
+
+
+def generate_reset_code(length: int = RESET_CODE_LENGTH) -> str:
+    # ✅ numeric 6-digit code like 483921
+    return "".join(secrets.choice(RESET_CODE_ALPHABET) for _ in range(length))
+
+
+def hash_reset_code(code: str) -> str:
+    raw = str(code or "").strip()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def verify_reset_code(plain_code: str, code_hash: str) -> bool:
+    if not plain_code or not code_hash:
+        return False
+    return hash_reset_code(plain_code) == str(code_hash).strip()
+
+
+# ========================================
 # 👤 CURRENT USER DEPENDENCY (JWT)
 # ========================================
 
@@ -45,8 +76,8 @@ _TOKEN_USER_CACHE: dict[str, tuple[int, str, float]] = {}
 _CACHE_LOCK = RLock()
 
 # Safe defaults
-DEFAULT_CACHE_TTL_SEC = 300        # 5 minutes
-MAX_CACHE_ENTRIES = 10000          # protect memory
+DEFAULT_CACHE_TTL_SEC = 300  # 5 minutes
+MAX_CACHE_ENTRIES = 10000  # protect memory
 
 
 def _credentials_exception():
@@ -123,7 +154,7 @@ def get_current_user(
     except JWTError:
         raise _credentials_exception()
 
-    email: str = (payload.get("sub") or "").strip().lower()
+    email: str = normalize_email(payload.get("sub"))
     if not email:
         raise _credentials_exception()
 
@@ -165,7 +196,7 @@ def get_current_user(
         except Exception:
             ttl = DEFAULT_CACHE_TTL_SEC
 
-    _cache_set(token, int(user.id), user.email.lower().strip(), ttl)
+    _cache_set(token, int(user.id), normalize_email(user.email), ttl)
 
     # return lightweight user-like object (avoid returning ORM object tied to session)
-    return SimpleNamespace(id=int(user.id), email=user.email.lower().strip())
+    return SimpleNamespace(id=int(user.id), email=normalize_email(user.email))

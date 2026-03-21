@@ -52,6 +52,14 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ NEW: one user -> many password reset codes
+    password_reset_codes = relationship(
+        "PasswordResetCode",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     # ✅ one user -> many customer locations
     customer_locations = relationship(
         "CustomerLocation",
@@ -120,6 +128,37 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+
+# ===============================
+# 🔐 PASSWORD RESET CODES
+# Separate table for forgot-password flow
+# One user -> many reset code rows
+# ===============================
+class PasswordResetCode(Base):
+    __tablename__ = "password_reset_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    email = Column(String(255), nullable=False, index=True)
+    code_hash = Column(String(255), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    used = Column(Boolean, nullable=False, server_default=func.false())
+    attempt_count = Column(Integer, nullable=False, server_default="0")
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    user = relationship("User", back_populates="password_reset_codes")
 
 
 # ===============================
