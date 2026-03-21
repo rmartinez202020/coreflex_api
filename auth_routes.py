@@ -17,6 +17,7 @@ from auth_utils import (
     verify_reset_code,
 )
 from jwt_handler import create_access_token
+from utils.email_service import send_reset_code_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -57,24 +58,6 @@ class ResetPasswordRequest(BaseModel):
 # -------------------------------
 RESET_CODE_TTL_MINUTES = 10
 RESET_CODE_MAX_ATTEMPTS = 5
-
-
-def send_reset_code_email(to_email: str, code: str):
-    """
-    ✅ TEMP STUB FOR NOW
-    Replace this with real SMTP / Resend / SendGrid later.
-
-    For now this keeps backend flow ready without breaking your system.
-    """
-    print("==============================================")
-    print("📧 CORELFEX PASSWORD RESET EMAIL")
-    print(f"To: {to_email}")
-    print("Subject: CoreFlex Password Reset Code")
-    print("")
-    print(f"Your CoreFlex password reset code is: {code}")
-    print(f"This code expires in {RESET_CODE_TTL_MINUTES} minutes.")
-    print("If you did not request this, please ignore this email.")
-    print("==============================================")
 
 
 def get_latest_active_reset_code(
@@ -200,7 +183,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
 # -------------------------------
 # FORGOT PASSWORD
 # STEP 1 → user enters email
-# Backend creates a temporary code and "emails" it
+# Backend creates a temporary code and emails it
 # -------------------------------
 @router.post("/forgot-password")
 def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
@@ -238,9 +221,12 @@ def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db
         db.add(reset_row)
         db.commit()
 
-        # ✅ TEMP: currently prints in backend terminal
-        # later replace this helper with real email sending
-        send_reset_code_email(clean_email, raw_code)
+        # ✅ REAL email service (Resend)
+        send_reset_code_email(
+            to_email=clean_email,
+            code=raw_code,
+            expires_minutes=RESET_CODE_TTL_MINUTES,
+        )
 
         return {"message": generic_message}
 
