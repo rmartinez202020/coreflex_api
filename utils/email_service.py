@@ -23,13 +23,19 @@ def send_reset_code_email(
     }
 
     data = {
-        # ✅ default sender (works immediately)
-        "from": "CoreFlex <onboarding@resend.dev>",
+        # ✅ display name shown by most inboxes
+        "from": "CoreFlex IIoTs Platform <onboarding@resend.dev>",
         "to": [to_email],
-        "subject": "CoreFlex Password Reset Code",
+        "subject": "CoreFlex IIoTs Platform Password Reset Code",
+        "text": (
+            f"CoreFlex IIoTs Platform Password Reset\n\n"
+            f"Your temporary password reset code is: {code}\n\n"
+            f"This code will expire in {expires_minutes} minutes.\n\n"
+            f"If you did not request this, you can ignore this email."
+        ),
         "html": f"""
         <div style="font-family:Arial;padding:20px;">
-            <h2 style="color:#22c55e;">CoreFlex Password Reset</h2>
+            <h2 style="color:#22c55e;">CoreFlex IIoTs Platform Password Reset</h2>
 
             <p>Your temporary password reset code is:</p>
 
