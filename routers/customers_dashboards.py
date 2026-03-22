@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func as sa_func
 from typing import Optional, List, Any, Dict
 from datetime import datetime
+import os
 
 from database import get_db
 from models import User, CustomerLocation, CustomerDashboard
@@ -44,8 +45,42 @@ class CustomerDashboardSave(BaseModel):
 # =========================
 # ✅ Helpers
 # =========================
+DEFAULT_LAYOUT = {
+    "version": "1.0",
+    "canvas": {"objects": []},
+    "meta": {"savedAt": None},
+}
+
+
 def _norm(s: Optional[str]) -> str:
     return (s or "").strip()
+
+
+def _get_owner_emails() -> set[str]:
+    """
+    Supports one or more owner emails via env:
+      PLATFORM_OWNER_EMAIL=roquemartinez_8@hotmail.com
+    or
+      PLATFORM_OWNER_EMAILS=a@x.com,b@y.com
+    """
+    single = _norm(os.getenv("PLATFORM_OWNER_EMAIL"))
+    multi = _norm(os.getenv("PLATFORM_OWNER_EMAILS"))
+
+    emails = set()
+
+    if single:
+        emails.add(single.lower())
+
+    if multi:
+        for item in multi.split(","):
+            v = _norm(item).lower()
+            if v:
+                emails.add(v)
+
+    if not emails:
+        emails.add("roquemartinez_8@hotmail.com")
+
+    return emails
 
 
 def _require_customer_exists(db: Session, user_id: int, customer_name: str) -> None:
@@ -64,6 +99,35 @@ def _require_customer_exists(db: Session, user_id: int, customer_name: str) -> N
             status_code=400,
             detail="Customer not found. Create a Customer/Location first, then create dashboards for that customer.",
         )
+
+
+def _serialize_dashboard(row: CustomerDashboard) -> CustomerDashboardOut:
+    """
+    Safely normalize old/bad DB rows so response_model does not crash with 500.
+    """
+    raw_layout = row.layout if isinstance(row.layout, dict) else DEFAULT_LAYOUT
+
+    customer_name = _norm(getattr(row, "customer_name", ""))
+    dashboard_name = _norm(getattr(row, "dashboard_name", ""))
+
+    return CustomerDashboardOut(
+        id=row.id,
+        user_id=row.user_id,
+        customer_name=customer_name,
+        dashboard_name=dashboard_name,
+        layout=raw_layout,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _assert_owner(current_user: User) -> None:
+    user_email = _norm(getattr(current_user, "email", "")).lower()
+    if not user_email:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if user_email not in _get_owner_emails():
+        raise HTTPException(status_code=403, detail="Not authorized")
 
 
 # =========================
@@ -108,13 +172,13 @@ def create_customer_dashboard(
         user_id=current_user.id,
         customer_name=customer_name,
         dashboard_name=dashboard_name,
-        layout={"version": "1.0", "canvas": {"objects": []}, "meta": {"savedAt": None}},
+        layout=DEFAULT_LAYOUT,
     )
 
     db.add(row)
     db.commit()
     db.refresh(row)
-    return row
+    return _serialize_dashboard(row)
 
 
 # =========================
@@ -139,7 +203,27 @@ def list_customer_dashboards(
             sa_func.lower(CustomerDashboard.customer_name) == customer_name.lower()
         )
 
-    return q.all()
+    rows = q.all()
+    return [_serialize_dashboard(r) for r in rows]
+
+
+# =========================
+# 📊 OWNER: ALL DASHBOARDS REPORT
+# =========================
+@router.get("/admin/all", response_model=List[CustomerDashboardOut])
+def list_all_dashboards_admin(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _assert_owner(current_user)
+
+    rows = (
+        db.query(CustomerDashboard)
+        .order_by(CustomerDashboard.updated_at.desc())
+        .all()
+    )
+
+    return [_serialize_dashboard(r) for r in rows]
 
 
 # =========================
@@ -159,7 +243,7 @@ def get_customer_dashboard(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    return row
+    return _serialize_dashboard(row)
 
 
 # =========================
@@ -188,7 +272,7 @@ def save_customer_dashboard(
     row.layout = body.layout
     db.commit()
     db.refresh(row)
-    return row
+    return _serialize_dashboard(row)
 
 
 # =========================
@@ -222,24 +306,3 @@ def delete_customer_dashboard(
         "deleted_id": dashboard_id,
         "dashboard_name": deleted_name,
     }
-
-
-# =========================
-# 📊 OWNER: ALL DASHBOARDS REPORT
-# =========================
-@router.get("/admin/all", response_model=List[CustomerDashboardOut])
-def list_all_dashboards_admin(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # 🔐 Only allow platform owner
-    if current_user.email.lower() != "roquemartinez_8@hotmail.com":
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    rows = (
-        db.query(CustomerDashboard)
-        .order_by(CustomerDashboard.updated_at.desc())
-        .all()
-    )
-
-    return 
