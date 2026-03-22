@@ -13,7 +13,12 @@ def send_reset_code_email(
 ):
     if not RESEND_API_KEY:
         print("❌ RESEND_API_KEY missing")
-        return
+        return False
+
+    clean_to = str(to_email or "").strip().lower()
+    if not clean_to:
+        print("❌ Missing destination email")
+        return False
 
     url = "https://api.resend.com/emails"
 
@@ -25,7 +30,7 @@ def send_reset_code_email(
     data = {
         # ✅ use your verified domain sender
         "from": "CoreFlex IIoTs Platform <noreply@coreflexiiotsplatform.com>",
-        "to": [to_email],
+        "to": [clean_to],
         "subject": "CoreFlex IIoTs Platform Password Reset Code",
         "text": (
             f"CoreFlex IIoTs Platform Password Reset\n\n"
@@ -80,12 +85,23 @@ def send_reset_code_email(
     }
 
     try:
-        response = requests.post(url, headers=headers, json=data)
+        print("📧 RESEND SEND START")
+        print(f"📧 TO: {clean_to}")
+        print(f"📧 FROM: {data['from']}")
+        print(f"📧 SUBJECT: {data['subject']}")
+
+        response = requests.post(url, headers=headers, json=data, timeout=20)
+
+        print(f"📧 RESEND STATUS: {response.status_code}")
+        print(f"📧 RESEND RESPONSE: {response.text}")
 
         if response.status_code >= 400:
             print("❌ RESEND ERROR:", response.text)
-        else:
-            print("✅ Email sent via Resend")
+            return False
+
+        print("✅ Email sent via Resend")
+        return True
 
     except Exception as e:
         print("🔥 EMAIL ERROR:", e)
+        return False
