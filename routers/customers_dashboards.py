@@ -242,4 +242,4 @@ def list_all_dashboards_admin(
         .all()
     )
 
-    return rows
+    return 

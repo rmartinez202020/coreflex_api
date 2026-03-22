@@ -23,37 +23,58 @@ def send_reset_code_email(
     }
 
     data = {
-        # ✅ display name shown by most inboxes
-        "from": "CoreFlex IIoTs Platform <onboarding@resend.dev>",
+        # ✅ use your verified domain sender
+        "from": "CoreFlex IIoTs Platform <noreply@coreflexiiotsplatform.com>",
         "to": [to_email],
         "subject": "CoreFlex IIoTs Platform Password Reset Code",
         "text": (
             f"CoreFlex IIoTs Platform Password Reset\n\n"
             f"Your temporary password reset code is: {code}\n\n"
             f"This code will expire in {expires_minutes} minutes.\n\n"
+            f"This is an automated message. Please do not reply.\n\n"
             f"If you did not request this, you can ignore this email."
         ),
         "html": f"""
-        <div style="font-family:Arial;padding:20px;">
-            <h2 style="color:#22c55e;">CoreFlex IIoTs Platform Password Reset</h2>
-
-            <p>Your temporary password reset code is:</p>
-
+        <div style="font-family:Arial,Helvetica,sans-serif;padding:20px;background:#f8fafc;">
             <div style="
-                font-size:32px;
-                font-weight:bold;
-                letter-spacing:6px;
-                margin:20px 0;
-                color:#22c55e;
+                max-width:560px;
+                margin:0 auto;
+                background:#ffffff;
+                border:1px solid #e5e7eb;
+                border-radius:12px;
+                padding:32px 28px;
+                box-shadow:0 2px 8px rgba(0,0,0,0.04);
             ">
-                {code}
+                <h2 style="margin:0 0 18px 0;color:#22c55e;">
+                    CoreFlex IIoTs Platform Password Reset
+                </h2>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    Your temporary password reset code is:
+                </p>
+
+                <div style="
+                    font-size:32px;
+                    font-weight:bold;
+                    letter-spacing:6px;
+                    margin:20px 0 24px 0;
+                    color:#22c55e;
+                ">
+                    {code}
+                </div>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    This code will expire in {expires_minutes} minutes.
+                </p>
+
+                <p style="margin:18px 0 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
+                    This is an automated message. Please do not reply.
+                </p>
+
+                <p style="margin:8px 0 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
+                    If you did not request this, you can ignore this email.
+                </p>
             </div>
-
-            <p>This code will expire in {expires_minutes} minutes.</p>
-
-            <p style="color:#888;">
-                If you did not request this, you can ignore this email.
-            </p>
         </div>
         """,
     }
