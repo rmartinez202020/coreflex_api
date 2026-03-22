@@ -222,3 +222,24 @@ def delete_customer_dashboard(
         "deleted_id": dashboard_id,
         "dashboard_name": deleted_name,
     }
+
+
+# =========================
+# 📊 OWNER: ALL DASHBOARDS REPORT
+# =========================
+@router.get("/admin/all", response_model=List[CustomerDashboardOut])
+def list_all_dashboards_admin(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 🔐 Only allow platform owner
+    if current_user.email.lower() != "roquemartinez_8@hotmail.com":
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    rows = (
+        db.query(CustomerDashboard)
+        .order_by(CustomerDashboard.updated_at.desc())
+        .all()
+    )
+
+    return rows
