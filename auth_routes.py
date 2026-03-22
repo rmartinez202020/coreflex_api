@@ -15,11 +15,15 @@ from auth_utils import (
     generate_reset_code,
     hash_reset_code,
     verify_reset_code,
+    get_current_user,
 )
 from jwt_handler import create_access_token
 from utils.email_service import send_reset_code_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# ✅ owner allowlist
+PLATFORM_OWNER_EMAIL = "roquemartinez_8@hotmail.com"
 
 
 # -------------------------------
@@ -58,6 +62,11 @@ class ResetPasswordRequest(BaseModel):
 # -------------------------------
 RESET_CODE_TTL_MINUTES = 10
 RESET_CODE_MAX_ATTEMPTS = 5
+
+
+def is_platform_owner(user) -> bool:
+    user_email = normalize_email(getattr(user, "email", ""))
+    return user_email == normalize_email(PLATFORM_OWNER_EMAIL)
 
 
 def get_latest_active_reset_code(
@@ -125,7 +134,6 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         )
 
         # ✅ Use DB timestamp (safer than app server time)
-        # Set on the instance before commit so it persists.
         from sqlalchemy.sql import func
 
         new_user.control_terms_accepted_at = func.now()
@@ -137,7 +145,7 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         return {"message": "User created successfully"}
 
     except HTTPException:
-        raise  # ✅ let FastAPI handle it
+        raise
 
     except Exception as e:
         print("🔥 REGISTER ERROR:", e)
@@ -158,8 +166,6 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         if not user or not verify_password(request.password, user.hashed_password):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        # ✅ IMPORTANT: include BOTH email and user_id in token
-        # This lets the frontend safely detect user changes and reset state.
         token = create_access_token(
             {
                 "sub": user.email,
@@ -173,10 +179,52 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         }
 
     except HTTPException:
-        raise  # ✅ let FastAPI handle it
+        raise
 
     except Exception as e:
         print("🔥 LOGIN ERROR:", e)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# -------------------------------
+# OWNER-ONLY: LIST REGISTERED USERS
+# ✅ excludes hashed_password
+# -------------------------------
+@router.get("/business-users")
+def get_business_users(
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        if not is_platform_owner(current_user):
+            raise HTTPException(status_code=403, detail="Owner access required")
+
+        users = (
+            db.query(User)
+            .order_by(User.id.asc())
+            .all()
+        )
+
+        return {
+            "users": [
+                {
+                    "id": u.id,
+                    "name": u.name,
+                    "company": u.company,
+                    "email": u.email,
+                    "control_terms_accepted_at": u.control_terms_accepted_at,
+                    "control_terms_version": u.control_terms_version,
+                    "accepted_control_terms": bool(u.accepted_control_terms),
+                }
+                for u in users
+            ]
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print("🔥 BUSINESS USERS ERROR:", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -190,21 +238,17 @@ def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db
     try:
         clean_email = normalize_email(request.email)
 
-        # ✅ Security-friendly generic response
         generic_message = (
             "If an account exists for this email, a temporary code has been sent."
         )
 
         user = db.query(User).filter(User.email == clean_email).first()
 
-        # ✅ Do not reveal whether email exists
         if not user:
             return {"message": generic_message}
 
-        # ✅ Invalidate any previous unused reset codes for this user/email
         invalidate_existing_reset_codes(db, user.id, clean_email)
 
-        # ✅ Generate raw code + hash
         raw_code = generate_reset_code()
         code_hash = hash_reset_code(raw_code)
         expires_at = datetime.utcnow() + timedelta(minutes=RESET_CODE_TTL_MINUTES)
@@ -221,7 +265,6 @@ def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db
         db.add(reset_row)
         db.commit()
 
-        # ✅ REAL email service (Resend)
         send_reset_code_email(
             to_email=clean_email,
             code=raw_code,
@@ -272,7 +315,6 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
                 detail="Invalid or expired reset code",
             )
 
-        # ✅ Expired
         if reset_row.expires_at < datetime.utcnow():
             reset_row.used = True
             db.commit()
@@ -281,7 +323,6 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
                 detail="The reset code is invalid or has expired",
             )
 
-        # ✅ Too many attempts
         if int(reset_row.attempt_count or 0) >= RESET_CODE_MAX_ATTEMPTS:
             reset_row.used = True
             db.commit()
@@ -290,7 +331,6 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
                 detail="Too many invalid attempts. Please request a new reset code",
             )
 
-        # ✅ Wrong code
         if not verify_reset_code(code, reset_row.code_hash):
             reset_row.attempt_count = int(reset_row.attempt_count or 0) + 1
 
@@ -304,13 +344,8 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
                 detail="The reset code is invalid or has expired",
             )
 
-        # ✅ Success → update password
         user.hashed_password = hash_password(new_password)
-
-        # ✅ mark current row as used
         reset_row.used = True
-
-        # ✅ also invalidate any other still-open codes just in case
         invalidate_existing_reset_codes(db, user.id, clean_email)
 
         db.commit()
