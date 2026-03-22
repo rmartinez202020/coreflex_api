@@ -1,6 +1,9 @@
 # utils/email_service.py
 
 import os
+from datetime import datetime, timezone
+from email.utils import format_datetime
+
 import requests
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
@@ -27,11 +30,20 @@ def send_reset_code_email(
         "Content-Type": "application/json",
     }
 
+    # ✅ Proper RFC 2822 Date header in UTC
+    # Email clients should convert this to each user's local timezone.
+    now_utc = datetime.now(timezone.utc)
+    formatted_date = format_datetime(now_utc)
+
     data = {
         # ✅ use your verified domain sender
         "from": "CoreFlex IIoTs Platform <noreply@coreflexiiotsplatform.com>",
         "to": [clean_to],
         "subject": "CoreFlex IIoTs Platform Password Reset Code",
+        # ✅ Explicit Date header so mail clients can render local time correctly
+        "headers": {
+            "Date": formatted_date,
+        },
         "text": (
             f"CoreFlex IIoTs Platform Password Reset\n\n"
             f"Your temporary password reset code is: {code}\n\n"
@@ -89,6 +101,7 @@ def send_reset_code_email(
         print(f"📧 TO: {clean_to}")
         print(f"📧 FROM: {data['from']}")
         print(f"📧 SUBJECT: {data['subject']}")
+        print(f"📧 DATE HEADER: {formatted_date}")
 
         response = requests.post(url, headers=headers, json=data, timeout=20)
 
