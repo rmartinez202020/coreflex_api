@@ -5,6 +5,8 @@ from sqlalchemy import func as sa_func
 from typing import Optional, List, Any, Dict
 from datetime import datetime
 import os
+import re
+import secrets
 
 from database import get_db
 from models import User, CustomerLocation, CustomerDashboard
@@ -26,6 +28,10 @@ class CustomerDashboardOut(BaseModel):
     user_id: int
     customer_name: str
     dashboard_name: str
+    dashboard_slug: Optional[str] = None
+    public_launch_id: Optional[str] = None
+    is_public_launch_enabled: bool = False
+    public_launch_url: Optional[str] = None
     layout: Dict[str, Any]
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -51,9 +57,45 @@ DEFAULT_LAYOUT = {
     "meta": {"savedAt": None},
 }
 
+PUBLIC_DASHBOARD_BASE_URL = (
+    os.getenv("PUBLIC_DASHBOARD_BASE_URL")
+    or "https://www.coreflexiiotsplatform.com/launchDashboard"
+)
+
 
 def _norm(s: Optional[str]) -> str:
     return (s or "").strip()
+
+
+def _slugify_dashboard_name(name: str) -> str:
+    value = _norm(name).lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    value = re.sub(r"-{2,}", "-", value).strip("-")
+    return value or "dashboard"
+
+
+def _is_main_dashboard_name(name: str) -> bool:
+    return _norm(name).lower() == "main dashboard"
+
+
+def _generate_public_launch_id() -> str:
+    return secrets.token_hex(16)
+
+
+def _build_public_launch_url(row: CustomerDashboard) -> Optional[str]:
+    if not row:
+        return None
+
+    enabled = bool(getattr(row, "is_public_launch_enabled", False))
+    public_id = _norm(getattr(row, "public_launch_id", ""))
+    slug = _norm(getattr(row, "dashboard_slug", "")) or _slugify_dashboard_name(
+        getattr(row, "dashboard_name", "")
+    )
+
+    if not enabled or not public_id:
+        return None
+
+    return f"{PUBLIC_DASHBOARD_BASE_URL}/{slug}/{public_id}"
 
 
 def _get_owner_emails() -> set[str]:
@@ -109,12 +151,20 @@ def _serialize_dashboard(row: CustomerDashboard) -> CustomerDashboardOut:
 
     customer_name = _norm(getattr(row, "customer_name", ""))
     dashboard_name = _norm(getattr(row, "dashboard_name", ""))
+    dashboard_slug = _norm(getattr(row, "dashboard_slug", ""))
+    public_launch_id = _norm(getattr(row, "public_launch_id", ""))
 
     return CustomerDashboardOut(
         id=row.id,
         user_id=row.user_id,
         customer_name=customer_name,
         dashboard_name=dashboard_name,
+        dashboard_slug=dashboard_slug or None,
+        public_launch_id=public_launch_id or None,
+        is_public_launch_enabled=bool(
+            getattr(row, "is_public_launch_enabled", False)
+        ),
+        public_launch_url=_build_public_launch_url(row),
         layout=raw_layout,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -128,6 +178,49 @@ def _assert_owner(current_user: User) -> None:
 
     if user_email not in _get_owner_emails():
         raise HTTPException(status_code=403, detail="Not authorized")
+
+
+def _ensure_public_fields(row: CustomerDashboard, db: Session) -> CustomerDashboard:
+    """
+    Backfill old rows if needed:
+    - non-main dashboards get slug/public id/enabled
+    - main dashboard names are always disabled
+    """
+    changed = False
+    dashboard_name = _norm(getattr(row, "dashboard_name", ""))
+
+    if _is_main_dashboard_name(dashboard_name):
+        if getattr(row, "is_public_launch_enabled", False):
+            row.is_public_launch_enabled = False
+            changed = True
+        if getattr(row, "public_launch_id", None):
+            row.public_launch_id = None
+            changed = True
+        if getattr(row, "dashboard_slug", None):
+            row.dashboard_slug = None
+            changed = True
+    else:
+        slug = _norm(getattr(row, "dashboard_slug", ""))
+        public_id = _norm(getattr(row, "public_launch_id", ""))
+
+        if not slug:
+            row.dashboard_slug = _slugify_dashboard_name(dashboard_name)
+            changed = True
+
+        if not public_id:
+            row.public_launch_id = _generate_public_launch_id()
+            changed = True
+
+        if not bool(getattr(row, "is_public_launch_enabled", False)):
+            row.is_public_launch_enabled = True
+            changed = True
+
+    if changed:
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+
+    return row
 
 
 # =========================
@@ -168,10 +261,15 @@ def create_customer_dashboard(
 
     _require_customer_exists(db, current_user.id, customer_name)
 
+    is_main = _is_main_dashboard_name(dashboard_name)
+
     row = CustomerDashboard(
         user_id=current_user.id,
         customer_name=customer_name,
         dashboard_name=dashboard_name,
+        dashboard_slug=None if is_main else _slugify_dashboard_name(dashboard_name),
+        public_launch_id=None if is_main else _generate_public_launch_id(),
+        is_public_launch_enabled=False if is_main else True,
         layout=DEFAULT_LAYOUT,
     )
 
@@ -204,7 +302,12 @@ def list_customer_dashboards(
         )
 
     rows = q.all()
-    return [_serialize_dashboard(r) for r in rows]
+
+    normalized_rows = []
+    for r in rows:
+        normalized_rows.append(_ensure_public_fields(r, db))
+
+    return [_serialize_dashboard(r) for r in normalized_rows]
 
 
 # =========================
@@ -223,7 +326,49 @@ def list_all_dashboards_admin(
         .all()
     )
 
-    return [_serialize_dashboard(r) for r in rows]
+    normalized_rows = []
+    for r in rows:
+        normalized_rows.append(_ensure_public_fields(r, db))
+
+    return [_serialize_dashboard(r) for r in normalized_rows]
+
+
+# =========================
+# 🌐 PUBLIC GET ONE DASHBOARD (NO LOGIN)
+# Used by public launch route:
+# /launchDashboard/{dashboard_slug}/{public_launch_id}
+# =========================
+@router.get("/public/{dashboard_slug}/{public_launch_id}", response_model=CustomerDashboardOut)
+def get_public_customer_dashboard(
+    dashboard_slug: str,
+    public_launch_id: str,
+    db: Session = Depends(get_db),
+):
+    row = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.public_launch_id == public_launch_id)
+        .filter(CustomerDashboard.is_public_launch_enabled.is_(True))
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Public dashboard not found")
+
+    row = _ensure_public_fields(row, db)
+
+    # extra protection: main dashboard should never be public
+    if _is_main_dashboard_name(row.dashboard_name):
+        raise HTTPException(status_code=404, detail="Public dashboard not found")
+
+    actual_slug = _norm(getattr(row, "dashboard_slug", "")) or _slugify_dashboard_name(
+        row.dashboard_name
+    )
+
+    # slug mismatch -> treat as not found to keep URL strict
+    if actual_slug != _norm(dashboard_slug):
+        raise HTTPException(status_code=404, detail="Public dashboard not found")
+
+    return _serialize_dashboard(row)
 
 
 # =========================
@@ -243,6 +388,8 @@ def get_customer_dashboard(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Dashboard not found")
+
+    row = _ensure_public_fields(row, db)
     return _serialize_dashboard(row)
 
 
@@ -270,6 +417,19 @@ def save_customer_dashboard(
         raise HTTPException(status_code=400, detail="layout must be an object")
 
     row.layout = body.layout
+
+    # keep public launch rules consistent
+    if _is_main_dashboard_name(row.dashboard_name):
+        row.dashboard_slug = None
+        row.public_launch_id = None
+        row.is_public_launch_enabled = False
+    else:
+        if not _norm(row.dashboard_slug):
+            row.dashboard_slug = _slugify_dashboard_name(row.dashboard_name)
+        if not _norm(row.public_launch_id):
+            row.public_launch_id = _generate_public_launch_id()
+        row.is_public_launch_enabled = True
+
     db.commit()
     db.refresh(row)
     return _serialize_dashboard(row)

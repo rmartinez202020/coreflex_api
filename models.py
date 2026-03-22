@@ -530,6 +530,19 @@ class CustomerDashboard(Base):
     # dashboard display name
     dashboard_name = Column(String(160), nullable=False)
 
+    # ✅ NEW: slug for pretty public URL
+    dashboard_slug = Column(String(220), nullable=True, index=True)
+
+    # ✅ NEW: unique public launch token
+    public_launch_id = Column(String(64), nullable=True, unique=True, index=True)
+
+    # ✅ NEW: whether public launch is enabled
+    is_public_launch_enabled = Column(
+        Boolean,
+        nullable=False,
+        server_default=func.false(),
+    )
+
     # 🧱 saved layout (same style as main dashboard)
     layout = Column(JSONB, nullable=False, default=dict)
 
