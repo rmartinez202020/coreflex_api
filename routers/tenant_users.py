@@ -1,5 +1,6 @@
 # routers/tenant_users.py
 
+import os
 from datetime import datetime, timezone
 import secrets
 import string
@@ -24,6 +25,15 @@ from utils.email_service import send_tenant_credentials_email
 router = APIRouter(prefix="/tenant-users", tags=["Tenant Users"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+PLATFORM_LOGIN_URL = os.getenv(
+    "PLATFORM_LOGIN_URL",
+    "https://coreflexiiotsplatform.com/app",
+)
+API_BASE_URL = os.getenv(
+    "API_BASE_URL",
+    "https://coreflex-api.onrender.com",
+)
 
 
 # =========================
@@ -206,6 +216,33 @@ def _get_tenant_user_owned_by_admin(
     return row
 
 
+def _build_dashboard_public_links(rows: List[CustomerDashboard]) -> List[dict]:
+    links = []
+    api_base = _norm(API_BASE_URL).rstrip("/")
+
+    for row in rows or []:
+        dashboard_name = _norm(getattr(row, "dashboard_name", "")) or f"Dashboard {row.id}"
+        dashboard_slug = _norm(getattr(row, "dashboard_slug", ""))
+        public_launch_id = _norm(getattr(row, "public_launch_id", ""))
+
+        if not dashboard_slug or not public_launch_id:
+            continue
+
+        url = (
+            f"{api_base}/customers-dashboards/public/"
+            f"{dashboard_slug}/{public_launch_id}"
+        )
+
+        links.append(
+            {
+                "name": dashboard_name,
+                "url": url,
+            }
+        )
+
+    return links
+
+
 # =========================
 # ✅ CREATE TENANT USER
 # =========================
@@ -277,11 +314,14 @@ def create_tenant_user(
     db.commit()
     db.refresh(new_user)
 
+    dashboard_links = _build_dashboard_public_links(dashboard_rows)
+
     email_sent = send_tenant_credentials_email(
         to_email=new_user.email,
         temporary_password=plain_password,
         tenant_name=new_user.full_name,
-        admin_email=current_user.email,
+        dashboard_links=dashboard_links,
+        portal_login_url=PLATFORM_LOGIN_URL,
     )
     if not email_sent:
         print("❌ Tenant credentials email failed to send")
@@ -346,7 +386,6 @@ def update_tenant_user(
     if not customer_name:
         raise HTTPException(status_code=400, detail="Customer is required.")
 
-    # ✅ Do not allow email changes once created
     if email != _norm(row.email).lower():
         raise HTTPException(
             status_code=400,
