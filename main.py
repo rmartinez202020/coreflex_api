@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, Request, Depends, Response
+from fastapi import FastAPI, Request, Depends, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -326,20 +326,24 @@ def update_sensor(data: SensorUpdate):
 # Return the current user's CLAIMED devices (ZHC1921 + ZHC1661 + TP4000)
 # ========================================
 from auth_utils import get_current_user  # noqa: E402
-from models import ZHC1921Device, ZHC1661Device, TP4000Device, User  # noqa: E402
+from models import (  # noqa: E402
+    ZHC1921Device,
+    ZHC1661Device,
+    TP4000Device,
+    User,
+    TenantUser,
+    TenantUserDashboardAccess,
+    CustomerDashboard,
+)
 
 
-@app.get("/devices")
-def list_devices(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
     out = []
 
     # ---- ZHC1921 (CF-2000) ----
     rows_1921 = (
         db.query(ZHC1921Device)
-        .filter(ZHC1921Device.claimed_by_user_id == current_user.id)
+        .filter(ZHC1921Device.claimed_by_user_id == owner_user_id)
         .order_by(ZHC1921Device.id.asc())
         .all()
     )
@@ -370,7 +374,7 @@ def list_devices(
     # ---- ZHC1661 (CF-1600) ----
     rows_1661 = (
         db.query(ZHC1661Device)
-        .filter(ZHC1661Device.claimed_by_user_id == current_user.id)
+        .filter(ZHC1661Device.claimed_by_user_id == owner_user_id)
         .order_by(ZHC1661Device.id.asc())
         .all()
     )
@@ -395,7 +399,7 @@ def list_devices(
     # ---- TP-4000 ----
     rows_tp4000 = (
         db.query(TP4000Device)
-        .filter(TP4000Device.claimed_by_user_id == current_user.id)
+        .filter(TP4000Device.claimed_by_user_id == owner_user_id)
         .order_by(TP4000Device.id.asc())
         .all()
     )
@@ -420,3 +424,82 @@ def list_devices(
         )
 
     return out
+
+
+def _resolve_public_tenant_owner_user_id(
+    db: Session,
+    dashboard_slug: str,
+    public_launch_id: str,
+    tenant_email: str,
+) -> int:
+    clean_slug = str(dashboard_slug or "").strip()
+    clean_public_id = str(public_launch_id or "").strip()
+    clean_email = str(tenant_email or "").strip().lower()
+
+    if not clean_slug or not clean_public_id or not clean_email:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing tenant public access parameters.",
+        )
+
+    dashboard = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.public_launch_id == clean_public_id)
+        .filter(CustomerDashboard.dashboard_slug == clean_slug)
+        .filter(CustomerDashboard.is_public_launch_enabled.is_(True))
+        .first()
+    )
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Public dashboard not found.")
+
+    tenant = (
+        db.query(TenantUser)
+        .filter(TenantUser.owner_user_id == dashboard.user_id)
+        .filter(TenantUser.customer_name.ilike(dashboard.customer_name))
+        .filter(TenantUser.email.ilike(clean_email))
+        .filter(TenantUser.is_active.is_(True))
+        .first()
+    )
+    if not tenant:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user not authorized for this dashboard.",
+        )
+
+    has_access = (
+        db.query(TenantUserDashboardAccess.id)
+        .filter(TenantUserDashboardAccess.tenant_user_id == tenant.id)
+        .filter(TenantUserDashboardAccess.dashboard_id == dashboard.id)
+        .first()
+    )
+    if not has_access:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user not authorized for this dashboard.",
+        )
+
+    return dashboard.user_id
+
+
+@app.get("/devices")
+def list_devices(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _append_claimed_devices_for_owner(db, current_user.id)
+
+
+@app.get("/tenant-access/devices")
+def list_tenant_public_devices(
+    dashboard_slug: str,
+    public_launch_id: str,
+    tenant_email: str,
+    db: Session = Depends(get_db),
+):
+    owner_user_id = _resolve_public_tenant_owner_user_id(
+        db=db,
+        dashboard_slug=dashboard_slug,
+        public_launch_id=public_launch_id,
+        tenant_email=tenant_email,
+    )
+    return _append_claimed_devices_for_owner(db, owner_user_id)
