@@ -9,7 +9,13 @@ import re
 import secrets
 
 from database import get_db
-from models import User, CustomerLocation, CustomerDashboard, TenantUser
+from models import (
+    User,
+    CustomerLocation,
+    CustomerDashboard,
+    TenantUser,
+    TenantUserDashboardAccess,
+)
 from auth_utils import get_current_user
 from passlib.context import CryptContext
 
