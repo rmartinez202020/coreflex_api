@@ -190,6 +190,22 @@ def _sync_dashboard_access(
         )
 
 
+def _get_tenant_user_owned_by_admin(
+    db: Session,
+    tenant_user_id: int,
+    owner_user_id: int,
+) -> TenantUser:
+    row = (
+        db.query(TenantUser)
+        .filter(TenantUser.id == tenant_user_id)
+        .filter(TenantUser.owner_user_id == owner_user_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Tenant user not found.")
+    return row
+
+
 # =========================
 # ✅ CREATE TENANT USER
 # =========================
@@ -300,20 +316,13 @@ def get_tenant_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    row = (
-        db.query(TenantUser)
-        .filter(TenantUser.id == tenant_user_id)
-        .filter(TenantUser.owner_user_id == current_user.id)
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="Tenant user not found.")
-
+    row = _get_tenant_user_owned_by_admin(db, tenant_user_id, current_user.id)
     return _serialize_tenant_user(row)
 
 
 # =========================
 # ✅ UPDATE TENANT USER
+# ✅ Email is immutable after create
 # =========================
 @router.put("/{tenant_user_id}", response_model=TenantUserOut)
 def update_tenant_user(
@@ -322,14 +331,7 @@ def update_tenant_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    row = (
-        db.query(TenantUser)
-        .filter(TenantUser.id == tenant_user_id)
-        .filter(TenantUser.owner_user_id == current_user.id)
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="Tenant user not found.")
+    row = _get_tenant_user_owned_by_admin(db, tenant_user_id, current_user.id)
 
     full_name = _norm(body.name)
     email = _norm(body.email).lower()
@@ -344,17 +346,11 @@ def update_tenant_user(
     if not customer_name:
         raise HTTPException(status_code=400, detail="Customer is required.")
 
-    duplicate = (
-        db.query(TenantUser)
-        .filter(TenantUser.owner_user_id == current_user.id)
-        .filter(TenantUser.email.ilike(email))
-        .filter(TenantUser.id != tenant_user_id)
-        .first()
-    )
-    if duplicate:
+    # ✅ Do not allow email changes once created
+    if email != _norm(row.email).lower():
         raise HTTPException(
             status_code=400,
-            detail="Another tenant user with this email already exists under this admin user.",
+            detail="Email cannot be modified after the tenant user is created.",
         )
 
     _require_customer_owned_by_admin(db, current_user.id, customer_name)
@@ -366,7 +362,6 @@ def update_tenant_user(
     )
 
     row.full_name = full_name
-    row.email = email
     row.customer_name = customer_name
     row.access_level = access
     row.updated_at = _now_utc()
@@ -381,3 +376,24 @@ def update_tenant_user(
     db.refresh(row)
 
     return _serialize_tenant_user(row)
+
+
+# =========================
+# ✅ DELETE TENANT USER
+# =========================
+@router.delete("/{tenant_user_id}")
+def delete_tenant_user(
+    tenant_user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    row = _get_tenant_user_owned_by_admin(db, tenant_user_id, current_user.id)
+
+    db.query(TenantUserDashboardAccess).filter(
+        TenantUserDashboardAccess.tenant_user_id == row.id
+    ).delete()
+
+    db.delete(row)
+    db.commit()
+
+    return {"ok": True, "detail": "Tenant user deleted successfully."}
