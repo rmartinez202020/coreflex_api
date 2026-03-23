@@ -3,6 +3,7 @@
 import os
 from datetime import datetime, timezone
 from email.utils import format_datetime
+from html import escape
 
 import requests
 
@@ -55,17 +56,13 @@ def send_reset_code_email(
         print("❌ Missing destination email")
         return False
 
-    # ✅ Proper RFC 2822 Date header in UTC
-    # Email clients should convert this to each user's local timezone.
     now_utc = datetime.now(timezone.utc)
     formatted_date = format_datetime(now_utc)
 
     data = {
-        # ✅ use your verified domain sender
         "from": "CoreFlex IIoTs Platform <noreply@coreflexiiotsplatform.com>",
         "to": [clean_to],
         "subject": "CoreFlex IIoTs Platform Password Reset Code",
-        # ✅ Explicit Date header so mail clients can render local time correctly
         "headers": {
             "Date": formatted_date,
         },
@@ -102,7 +99,7 @@ def send_reset_code_email(
                     margin:20px 0 24px 0;
                     color:#22c55e;
                 ">
-                    {code}
+                    {escape(str(code))}
                 </div>
 
                 <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
@@ -124,30 +121,117 @@ def send_reset_code_email(
     return _send_resend_email(data)
 
 
+def _normalize_dashboard_links(dashboard_links):
+    out = []
+    if not isinstance(dashboard_links, list):
+        return out
+
+    for item in dashboard_links:
+        if isinstance(item, str):
+            url = item.strip()
+            if url:
+                out.append({"name": "Dashboard", "url": url})
+            continue
+
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("dashboard_name") or "Dashboard").strip()
+            url = str(item.get("url") or item.get("link") or "").strip()
+            if url:
+                out.append({"name": name or "Dashboard", "url": url})
+
+    return out
+
+
+def _build_dashboard_links_text(dashboard_links):
+    items = _normalize_dashboard_links(dashboard_links)
+    if not items:
+        return ""
+
+    lines = ["\nAccessible dashboard links:\n"]
+    for idx, item in enumerate(items, start=1):
+        lines.append(f"{idx}. {item['name']}: {item['url']}")
+    return "\n".join(lines)
+
+
+def _build_dashboard_links_html(dashboard_links):
+    items = _normalize_dashboard_links(dashboard_links)
+    if not items:
+        return ""
+
+    rows = []
+    for item in items:
+        name = escape(item["name"])
+        url = escape(item["url"])
+        rows.append(
+            f"""
+            <div style="margin:0 0 10px 0;padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;background:#f9fafb;">
+                <div style="margin:0 0 6px 0;color:#111827;font-size:14px;font-weight:600;line-height:1.5;">
+                    {name}
+                </div>
+                <a href="{url}" style="color:#2563eb;font-size:14px;line-height:1.6;word-break:break-all;text-decoration:none;">
+                    {url}
+                </a>
+            </div>
+            """
+        )
+
+    return f"""
+        <div style="margin:22px 0 0 0;">
+            <div style="margin:0 0 10px 0;color:#111827;font-size:15px;font-weight:700;line-height:1.6;">
+                Accessible dashboard links
+            </div>
+            {''.join(rows)}
+        </div>
+    """
+
+
 def send_tenant_credentials_email(
     to_email: str,
     temporary_password: str,
     tenant_name: str,
-    admin_email: str,
+    admin_email: str = "",
+    dashboard_links=None,
+    portal_login_url: str = "",
 ):
     clean_to = str(to_email or "").strip().lower()
     clean_name = str(tenant_name or "").strip()
-    clean_admin = str(admin_email or "").strip().lower()
+    clean_password = str(temporary_password or "").strip()
+    clean_login_url = str(portal_login_url or "").strip()
 
     if not clean_to:
         print("❌ Missing destination email")
         return False
 
-    if not temporary_password:
+    if not clean_password:
         print("❌ Missing temporary password")
         return False
 
-    # ✅ Proper RFC 2822 Date header in UTC
     now_utc = datetime.now(timezone.utc)
     formatted_date = format_datetime(now_utc)
 
+    dashboard_links_text = _build_dashboard_links_text(dashboard_links)
+    dashboard_links_html = _build_dashboard_links_html(dashboard_links)
+
+    login_url_text = (
+        f"\nPortal login: {clean_login_url}\n" if clean_login_url else ""
+    )
+
+    login_url_html = (
+        f"""
+        <div style="margin:18px 0 0 0;padding:14px 16px;border:1px solid #dbeafe;background:#f8fbff;border-radius:10px;">
+            <div style="margin:0 0 6px 0;color:#1f2937;font-size:14px;font-weight:600;line-height:1.6;">
+                Portal login
+            </div>
+            <a href="{escape(clean_login_url)}" style="color:#2563eb;font-size:14px;line-height:1.6;word-break:break-all;text-decoration:none;">
+                {escape(clean_login_url)}
+            </a>
+        </div>
+        """
+        if clean_login_url
+        else ""
+    )
+
     data = {
-        # ✅ verified sender for tenant access emails
         "from": "CoreFlex Access <access@coreflexiiotsplatform.com>",
         "to": [clean_to],
         "subject": "Your CoreFlex IIoTs Platform Access Credentials",
@@ -157,12 +241,15 @@ def send_tenant_credentials_email(
         "text": (
             f"CoreFlex IIoTs Platform Tenant Access\n\n"
             f"Hello {clean_name or clean_to},\n\n"
-            f"An administrator created your tenant access account.\n\n"
+            f"Your tenant access account has been created.\n\n"
             f"Login email: {clean_to}\n"
-            f"Temporary password: {temporary_password}\n\n"
-            f"For security, please sign in and change your password immediately.\n\n"
-            f"Created by admin: {clean_admin or 'CoreFlex Admin'}\n\n"
-            f"This password is shown only in this email and is not visible to the administrator.\n\n"
+            f"Temporary password: {clean_password}\n"
+            f"{login_url_text}"
+            f"\n"
+            f"Use this temporary password to sign in.\n"
+            f"If your account is configured for first-time password change, the system will ask you to create a new password after login.\n"
+            f"{dashboard_links_text}\n\n"
+            f"This password is shown only in this email and is not visible to other users.\n\n"
             f"This is an automated message from CoreFlex IIoTs Platform. Please do not reply."
         ),
         "html": f"""
@@ -181,11 +268,11 @@ def send_tenant_credentials_email(
                 </h2>
 
                 <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
-                    Hello <b>{clean_name or clean_to}</b>,
+                    Hello <b>{escape(clean_name or clean_to)}</b>,
                 </p>
 
                 <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
-                    An administrator created your tenant access account.
+                    Your tenant access account has been created.
                 </p>
 
                 <div style="
@@ -196,7 +283,7 @@ def send_tenant_credentials_email(
                     border-radius:10px;
                 ">
                     <div style="margin:0 0 10px 0;color:#1f2937;font-size:14px;line-height:1.6;">
-                        <b>Login email:</b> {clean_to}
+                        <b>Login email:</b> {escape(clean_to)}
                     </div>
 
                     <div style="margin:0;color:#1f2937;font-size:14px;line-height:1.6;">
@@ -211,20 +298,24 @@ def send_tenant_credentials_email(
                         color:#2563eb;
                         word-break:break-word;
                     ">
-                        {temporary_password}
+                        {escape(clean_password)}
                     </div>
                 </div>
 
-                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
-                    For security, please sign in and change your password immediately.
+                {login_url_html}
+
+                <p style="margin:18px 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    Use this temporary password to sign in.
                 </p>
 
-                <p style="margin:0 0 12px 0;color:#111827;font-size:14px;line-height:1.6;">
-                    <b>Created by admin:</b> {clean_admin or 'CoreFlex Admin'}
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    If your account is configured for first-time password change, the system will ask you to create a new password after login.
                 </p>
+
+                {dashboard_links_html}
 
                 <p style="margin:18px 0 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
-                    This password is shown only in this email and is not visible to the administrator.
+                    This password is shown only in this email and is not visible to other users.
                 </p>
 
                 <p style="margin:8px 0 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
