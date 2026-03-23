@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from sqlalchemy import func as sa_func
 from typing import Optional, List, Any, Dict
@@ -9,10 +9,13 @@ import re
 import secrets
 
 from database import get_db
-from models import User, CustomerLocation, CustomerDashboard
+from models import User, CustomerLocation, CustomerDashboard, TenantUser
 from auth_utils import get_current_user
+from passlib.context import CryptContext
 
 router = APIRouter(prefix="/customers-dashboards", tags=["Customer Dashboards"])
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # =========================
@@ -46,6 +49,28 @@ class CustomerOut(BaseModel):
 
 class CustomerDashboardSave(BaseModel):
     layout: Dict[str, Any]
+
+
+class TenantPublicLoginRequest(BaseModel):
+    dashboard_slug: str
+    public_launch_id: str
+    email: EmailStr
+    password: str
+
+
+class TenantPublicSetPasswordRequest(BaseModel):
+    dashboard_slug: str
+    public_launch_id: str
+    email: EmailStr
+    temporary_password: str
+    new_password: str
+
+
+class TenantPublicAuthOut(BaseModel):
+    ok: bool
+    tenant_name: str
+    access_level: str
+    must_change_password: bool
 
 
 # =========================
@@ -223,6 +248,82 @@ def _ensure_public_fields(row: CustomerDashboard, db: Session) -> CustomerDashbo
     return row
 
 
+def _get_public_dashboard_or_404(
+    db: Session,
+    dashboard_slug: str,
+    public_launch_id: str,
+) -> CustomerDashboard:
+    row = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.public_launch_id == public_launch_id)
+        .filter(CustomerDashboard.is_public_launch_enabled.is_(True))
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Public dashboard not found")
+
+    row = _ensure_public_fields(row, db)
+
+    if _is_main_dashboard_name(row.dashboard_name):
+        raise HTTPException(status_code=404, detail="Public dashboard not found")
+
+    actual_slug = _norm(getattr(row, "dashboard_slug", "")) or _slugify_dashboard_name(
+        row.dashboard_name
+    )
+
+    if actual_slug != _norm(dashboard_slug):
+        raise HTTPException(status_code=404, detail="Public dashboard not found")
+
+    return row
+
+
+def _get_tenant_for_public_dashboard(
+    db: Session,
+    dashboard: CustomerDashboard,
+    email: str,
+) -> TenantUser:
+    clean_email = _norm(email).lower()
+
+    tenant = (
+        db.query(TenantUser)
+        .filter(TenantUser.owner_user_id == dashboard.user_id)
+        .filter(TenantUser.customer_name.ilike(dashboard.customer_name))
+        .filter(TenantUser.email.ilike(clean_email))
+        .filter(TenantUser.is_active.is_(True))
+        .first()
+    )
+
+    if not tenant:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    has_access = (
+        db.query(CustomerDashboard.id)
+        .join(
+            TenantUserDashboardAccess,
+            TenantUserDashboardAccess.dashboard_id == CustomerDashboard.id,
+        )
+        .filter(TenantUserDashboardAccess.tenant_user_id == tenant.id)
+        .filter(CustomerDashboard.id == dashboard.id)
+        .first()
+    )
+
+    if not has_access:
+        raise HTTPException(
+            status_code=403,
+            detail="This tenant user does not have access to this dashboard.",
+        )
+
+    return tenant
+
+
+def _verify_password(plain_password: str, password_hash: str) -> bool:
+    try:
+        return pwd_context.verify(plain_password, password_hash)
+    except Exception:
+        return False
+
+
 # =========================
 # ✅ LIST CUSTOMERS (distinct names)
 # =========================
@@ -338,37 +439,108 @@ def list_all_dashboards_admin(
 # Used by public launch route:
 # /launchDashboard/{dashboard_slug}/{public_launch_id}
 # =========================
-@router.get("/public/{dashboard_slug}/{public_launch_id}", response_model=CustomerDashboardOut)
+@router.get(
+    "/public/{dashboard_slug}/{public_launch_id}",
+    response_model=CustomerDashboardOut,
+)
 def get_public_customer_dashboard(
     dashboard_slug: str,
     public_launch_id: str,
     db: Session = Depends(get_db),
 ):
-    row = (
-        db.query(CustomerDashboard)
-        .filter(CustomerDashboard.public_launch_id == public_launch_id)
-        .filter(CustomerDashboard.is_public_launch_enabled.is_(True))
-        .first()
-    )
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Public dashboard not found")
-
-    row = _ensure_public_fields(row, db)
-
-    # extra protection: main dashboard should never be public
-    if _is_main_dashboard_name(row.dashboard_name):
-        raise HTTPException(status_code=404, detail="Public dashboard not found")
-
-    actual_slug = _norm(getattr(row, "dashboard_slug", "")) or _slugify_dashboard_name(
-        row.dashboard_name
-    )
-
-    # slug mismatch -> treat as not found to keep URL strict
-    if actual_slug != _norm(dashboard_slug):
-        raise HTTPException(status_code=404, detail="Public dashboard not found")
-
+    row = _get_public_dashboard_or_404(db, dashboard_slug, public_launch_id)
     return _serialize_dashboard(row)
+
+
+# =========================
+# 🔐 TENANT LOGIN FOR PUBLIC DASHBOARD
+# =========================
+@router.post("/tenant-access/login", response_model=TenantPublicAuthOut)
+def tenant_public_dashboard_login(
+    body: TenantPublicLoginRequest,
+    db: Session = Depends(get_db),
+):
+    dashboard = _get_public_dashboard_or_404(
+        db,
+        body.dashboard_slug,
+        body.public_launch_id,
+    )
+
+    tenant = _get_tenant_for_public_dashboard(
+        db,
+        dashboard,
+        body.email,
+    )
+
+    if not _verify_password(body.password, tenant.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    access_level = _norm(getattr(tenant, "access_level", "")) or "read"
+
+    return TenantPublicAuthOut(
+        ok=True,
+        tenant_name=_norm(getattr(tenant, "full_name", "")) or _norm(body.email),
+        access_level=access_level,
+        must_change_password=bool(getattr(tenant, "must_change_password", False)),
+    )
+
+
+# =========================
+# 🔐 TENANT SET NEW PASSWORD FOR PUBLIC DASHBOARD
+# =========================
+@router.post("/tenant-access/set-password", response_model=TenantPublicAuthOut)
+def tenant_public_dashboard_set_password(
+    body: TenantPublicSetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    dashboard = _get_public_dashboard_or_404(
+        db,
+        body.dashboard_slug,
+        body.public_launch_id,
+    )
+
+    tenant = _get_tenant_for_public_dashboard(
+        db,
+        dashboard,
+        body.email,
+    )
+
+    if not _verify_password(body.temporary_password, tenant.password_hash):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid temporary password.",
+        )
+
+    new_password = _norm(body.new_password)
+
+    if len(new_password) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be at least 8 characters.",
+        )
+
+    if new_password == _norm(body.temporary_password):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from the temporary password.",
+        )
+
+    tenant.password_hash = pwd_context.hash(new_password)
+    tenant.must_change_password = False
+    tenant.updated_at = datetime.utcnow()
+
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+
+    access_level = _norm(getattr(tenant, "access_level", "")) or "read"
+
+    return TenantPublicAuthOut(
+        ok=True,
+        tenant_name=_norm(getattr(tenant, "full_name", "")) or _norm(body.email),
+        access_level=access_level,
+        must_change_password=False,
+    )
 
 
 # =========================
@@ -418,7 +590,6 @@ def save_customer_dashboard(
 
     row.layout = body.layout
 
-    # keep public launch rules consistent
     if _is_main_dashboard_name(row.dashboard_name):
         row.dashboard_slug = None
         row.public_launch_id = None
