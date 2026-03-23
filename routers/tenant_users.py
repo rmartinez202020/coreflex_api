@@ -26,13 +26,9 @@ router = APIRouter(prefix="/tenant-users", tags=["Tenant Users"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-PLATFORM_LOGIN_URL = os.getenv(
-    "PLATFORM_LOGIN_URL",
-    "https://coreflexiiotsplatform.com/app",
-)
-API_BASE_URL = os.getenv(
-    "API_BASE_URL",
-    "https://coreflex-api.onrender.com",
+PUBLIC_DASHBOARD_BASE_URL = os.getenv(
+    "PUBLIC_DASHBOARD_BASE_URL",
+    "https://www.coreflexiiotsplatform.com/launchDashboard",
 )
 
 
@@ -218,20 +214,19 @@ def _get_tenant_user_owned_by_admin(
 
 def _build_dashboard_public_links(rows: List[CustomerDashboard]) -> List[dict]:
     links = []
-    api_base = _norm(API_BASE_URL).rstrip("/")
+    public_base = _norm(PUBLIC_DASHBOARD_BASE_URL).rstrip("/")
 
     for row in rows or []:
-        dashboard_name = _norm(getattr(row, "dashboard_name", "")) or f"Dashboard {row.id}"
+        dashboard_name = (
+            _norm(getattr(row, "dashboard_name", "")) or f"Dashboard {row.id}"
+        )
         dashboard_slug = _norm(getattr(row, "dashboard_slug", ""))
         public_launch_id = _norm(getattr(row, "public_launch_id", ""))
 
         if not dashboard_slug or not public_launch_id:
             continue
 
-        url = (
-            f"{api_base}/customers-dashboards/public/"
-            f"{dashboard_slug}/{public_launch_id}"
-        )
+        url = f"{public_base}/{dashboard_slug}/{public_launch_id}"
 
         links.append(
             {
@@ -321,7 +316,6 @@ def create_tenant_user(
         temporary_password=plain_password,
         tenant_name=new_user.full_name,
         dashboard_links=dashboard_links,
-        portal_login_url=PLATFORM_LOGIN_URL,
     )
     if not email_sent:
         print("❌ Tenant credentials email failed to send")
