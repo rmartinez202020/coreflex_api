@@ -200,6 +200,14 @@ from routers.customer_locations import router as customer_locations_router  # no
 app.include_router(customer_locations_router)
 
 # ========================================
+# 👥 TENANT USERS ROUTES
+# ✅ IMPORTANT: this was missing, so /tenant-users was not being registered
+# ========================================
+from routers.tenant_users import router as tenant_users_router  # noqa: E402
+
+app.include_router(tenant_users_router)
+
+# ========================================
 # 🖼 IMAGES ROUTES (Cloudinary Image Library)
 # ========================================
 from routers.images import router as images_router  # noqa: E402
