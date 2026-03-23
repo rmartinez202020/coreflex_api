@@ -9,18 +9,9 @@ import requests
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 
-def send_reset_code_email(
-    to_email: str,
-    code: str,
-    expires_minutes: int = 10,
-):
+def _send_resend_email(payload: dict):
     if not RESEND_API_KEY:
         print("❌ RESEND_API_KEY missing")
-        return False
-
-    clean_to = str(to_email or "").strip().lower()
-    if not clean_to:
-        print("❌ Missing destination email")
         return False
 
     url = "https://api.resend.com/emails"
@@ -29,6 +20,40 @@ def send_reset_code_email(
         "Authorization": f"Bearer {RESEND_API_KEY}",
         "Content-Type": "application/json",
     }
+
+    try:
+        print("📧 RESEND SEND START")
+        print(f"📧 TO: {payload.get('to')}")
+        print(f"📧 FROM: {payload.get('from')}")
+        print(f"📧 SUBJECT: {payload.get('subject')}")
+        print(f"📧 DATE HEADER: {payload.get('headers', {}).get('Date')}")
+
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+
+        print(f"📧 RESEND STATUS: {response.status_code}")
+        print(f"📧 RESEND RESPONSE: {response.text}")
+
+        if response.status_code >= 400:
+            print("❌ RESEND ERROR:", response.text)
+            return False
+
+        print("✅ Email sent via Resend")
+        return True
+
+    except Exception as e:
+        print("🔥 EMAIL ERROR:", e)
+        return False
+
+
+def send_reset_code_email(
+    to_email: str,
+    code: str,
+    expires_minutes: int = 10,
+):
+    clean_to = str(to_email or "").strip().lower()
+    if not clean_to:
+        print("❌ Missing destination email")
+        return False
 
     # ✅ Proper RFC 2822 Date header in UTC
     # Email clients should convert this to each user's local timezone.
@@ -96,25 +121,118 @@ def send_reset_code_email(
         """,
     }
 
-    try:
-        print("📧 RESEND SEND START")
-        print(f"📧 TO: {clean_to}")
-        print(f"📧 FROM: {data['from']}")
-        print(f"📧 SUBJECT: {data['subject']}")
-        print(f"📧 DATE HEADER: {formatted_date}")
+    return _send_resend_email(data)
 
-        response = requests.post(url, headers=headers, json=data, timeout=20)
 
-        print(f"📧 RESEND STATUS: {response.status_code}")
-        print(f"📧 RESEND RESPONSE: {response.text}")
+def send_tenant_credentials_email(
+    to_email: str,
+    temporary_password: str,
+    tenant_name: str,
+    admin_email: str,
+):
+    clean_to = str(to_email or "").strip().lower()
+    clean_name = str(tenant_name or "").strip()
+    clean_admin = str(admin_email or "").strip().lower()
 
-        if response.status_code >= 400:
-            print("❌ RESEND ERROR:", response.text)
-            return False
-
-        print("✅ Email sent via Resend")
-        return True
-
-    except Exception as e:
-        print("🔥 EMAIL ERROR:", e)
+    if not clean_to:
+        print("❌ Missing destination email")
         return False
+
+    if not temporary_password:
+        print("❌ Missing temporary password")
+        return False
+
+    # ✅ Proper RFC 2822 Date header in UTC
+    now_utc = datetime.now(timezone.utc)
+    formatted_date = format_datetime(now_utc)
+
+    data = {
+        # ✅ verified sender for tenant access emails
+        "from": "CoreFlex Access <access@coreflexiiotsplatform.com>",
+        "to": [clean_to],
+        "subject": "Your CoreFlex IIoTs Platform Access Credentials",
+        "headers": {
+            "Date": formatted_date,
+        },
+        "text": (
+            f"CoreFlex IIoTs Platform Tenant Access\n\n"
+            f"Hello {clean_name or clean_to},\n\n"
+            f"An administrator created your tenant access account.\n\n"
+            f"Login email: {clean_to}\n"
+            f"Temporary password: {temporary_password}\n\n"
+            f"For security, please sign in and change your password immediately.\n\n"
+            f"Created by admin: {clean_admin or 'CoreFlex Admin'}\n\n"
+            f"This password is shown only in this email and is not visible to the administrator.\n\n"
+            f"This is an automated message from CoreFlex IIoTs Platform. Please do not reply."
+        ),
+        "html": f"""
+        <div style="font-family:Arial,Helvetica,sans-serif;padding:20px;background:#f8fafc;">
+            <div style="
+                max-width:620px;
+                margin:0 auto;
+                background:#ffffff;
+                border:1px solid #e5e7eb;
+                border-radius:12px;
+                padding:32px 28px;
+                box-shadow:0 2px 8px rgba(0,0,0,0.04);
+            ">
+                <h2 style="margin:0 0 18px 0;color:#2563eb;">
+                    CoreFlex IIoTs Platform Tenant Access
+                </h2>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    Hello <b>{clean_name or clean_to}</b>,
+                </p>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    An administrator created your tenant access account.
+                </p>
+
+                <div style="
+                    margin:18px 0;
+                    padding:16px;
+                    border:1px solid #dbeafe;
+                    background:#eff6ff;
+                    border-radius:10px;
+                ">
+                    <div style="margin:0 0 10px 0;color:#1f2937;font-size:14px;line-height:1.6;">
+                        <b>Login email:</b> {clean_to}
+                    </div>
+
+                    <div style="margin:0;color:#1f2937;font-size:14px;line-height:1.6;">
+                        <b>Temporary password:</b>
+                    </div>
+
+                    <div style="
+                        font-size:28px;
+                        font-weight:bold;
+                        letter-spacing:2px;
+                        margin:12px 0 0 0;
+                        color:#2563eb;
+                        word-break:break-word;
+                    ">
+                        {temporary_password}
+                    </div>
+                </div>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    For security, please sign in and change your password immediately.
+                </p>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:14px;line-height:1.6;">
+                    <b>Created by admin:</b> {clean_admin or 'CoreFlex Admin'}
+                </p>
+
+                <p style="margin:18px 0 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
+                    This password is shown only in this email and is not visible to the administrator.
+                </p>
+
+                <p style="margin:8px 0 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
+                    This is an automated message from CoreFlex IIoTs Platform. Please do not reply.
+                </p>
+            </div>
+        </div>
+        """,
+    }
+
+    return _send_resend_email(data)

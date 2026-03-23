@@ -2,6 +2,7 @@
 from sqlalchemy import (
     Column,
     Integer,
+    BigInteger,
     String,
     Float,
     DateTime,
@@ -80,6 +81,14 @@ class User(Base):
     customer_dashboards = relationship(
         "CustomerDashboard",
         back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    # ✅ NEW: one user/admin -> many tenant users
+    tenant_users = relationship(
+        "TenantUser",
+        back_populates="owner_user",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
@@ -559,6 +568,115 @@ class CustomerDashboard(Base):
     )
 
     user = relationship("User", back_populates="customer_dashboards")
+
+    # ✅ NEW: dashboard can be assigned to many tenant users
+    tenant_access_rows = relationship(
+        "TenantUserDashboardAccess",
+        back_populates="dashboard",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+# ===============================
+# 👥 TENANT USERS
+# Child users created by an admin/owner user
+# Password is stored HASHED ONLY
+# ===============================
+class TenantUser(Base):
+    __tablename__ = "tenant_users"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+
+    owner_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    customer_name = Column(String(160), nullable=False, index=True)
+    full_name = Column(String(160), nullable=False)
+    email = Column(String(255), nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+
+    # read | read_control
+    access_level = Column(String(32), nullable=False, server_default="read")
+
+    is_active = Column(Boolean, nullable=False, server_default=func.true())
+    must_change_password = Column(
+        Boolean, nullable=False, server_default=func.true()
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "email",
+            name="uq_tenant_users_owner_email",
+        ),
+    )
+
+    owner_user = relationship("User", back_populates="tenant_users")
+
+    dashboard_access = relationship(
+        "TenantUserDashboardAccess",
+        back_populates="tenant_user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+# ===============================
+# 🔐 TENANT USER DASHBOARD ACCESS
+# Which dashboards each tenant user can access
+# ===============================
+class TenantUserDashboardAccess(Base):
+    __tablename__ = "tenant_user_dashboard_access"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+
+    tenant_user_id = Column(
+        BigInteger,
+        ForeignKey("tenant_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    dashboard_id = Column(
+        Integer,
+        ForeignKey("customers_dashboards.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_user_id",
+            "dashboard_id",
+            name="uq_tenant_user_dashboard_access",
+        ),
+    )
+
+    tenant_user = relationship("TenantUser", back_populates="dashboard_access")
+    dashboard = relationship("CustomerDashboard", back_populates="tenant_access_rows")
 
 
 # ===============================
