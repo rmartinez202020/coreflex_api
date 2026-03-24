@@ -35,6 +35,13 @@ def _normalize_dash_id(value) -> str:
     return s if s else "main"
 
 
+def _normalize_dash_folder(value) -> str:
+    dash_id = _normalize_dash_id(value)
+    if dash_id.lower() == "main":
+        return "dash_main"
+    return f"dash_{dash_id}"
+
+
 def _post_json(url: str, payload: dict, timeout_sec: int = 20):
     return requests.post(url, json=payload, headers=_headers(), timeout=timeout_sec)
 
@@ -108,11 +115,15 @@ def start_graphic_stream(
         print("[node-red] start_graphic_stream skipped: NODE_RED_BASE_URL not set")
         return False
 
+    resolved_dash_id = _normalize_dash_id(dash_id)
+    resolved_dash_folder = _normalize_dash_folder(dash_id)
+
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/start"
 
     payload = {
         "userId": int(user_id),
-        "dashId": _normalize_dash_id(dash_id),
+        "dashId": resolved_dash_id,
+        "dashFolder": resolved_dash_folder,
         "widgetId": str(widget_id or "").strip(),
         "bindModel": str(bind_model or "").strip(),
         "deviceId": str(device_id or "").strip(),
@@ -139,6 +150,7 @@ def start_graphic_stream(
         url=url,
         user_id=user_id,
         dash_id=payload["dashId"],
+        dash_folder=payload["dashFolder"],
         widget_id=payload["widgetId"],
         device_id=payload["deviceId"],
         field=payload["field"],
@@ -181,11 +193,15 @@ def set_graphic_stream_visibility(
         print("[node-red] set_graphic_stream_visibility skipped: NODE_RED_BASE_URL not set")
         return False
 
+    resolved_dash_id = _normalize_dash_id(dash_id)
+    resolved_dash_folder = _normalize_dash_folder(dash_id)
+
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/visibility"
 
     payload = {
         "userId": int(user_id),
-        "dashId": _normalize_dash_id(dash_id),
+        "dashId": resolved_dash_id,
+        "dashFolder": resolved_dash_folder,
         "widgetId": str(widget_id or "").strip(),
         "isVisible": bool(is_visible),
     }
@@ -196,6 +212,7 @@ def set_graphic_stream_visibility(
         url=url,
         user_id=user_id,
         dash_id=payload["dashId"],
+        dash_folder=payload["dashFolder"],
         widget_id=payload["widgetId"],
         is_visible=payload["isVisible"],
     )
@@ -231,10 +248,14 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
         print("[node-red] stop_graphic_stream skipped: NODE_RED_BASE_URL not set")
         return False
 
+    resolved_dash_id = _normalize_dash_id(dash_id)
+    resolved_dash_folder = _normalize_dash_folder(dash_id)
+
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/stop"
     payload = {
         "userId": int(user_id),
-        "dashId": _normalize_dash_id(dash_id),
+        "dashId": resolved_dash_id,
+        "dashFolder": resolved_dash_folder,
         "widgetId": str(widget_id or "").strip(),
     }
 
@@ -244,6 +265,7 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
         url=url,
         user_id=user_id,
         dash_id=payload["dashId"],
+        dash_folder=payload["dashFolder"],
         widget_id=payload["widgetId"],
     )
 
@@ -274,10 +296,14 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
 # ✅ Internal helper: single history read attempt
 # =========================================================
 def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> dict:
+    resolved_dash_id = _normalize_dash_id(dash_id)
+    resolved_dash_folder = _normalize_dash_folder(dash_id)
+
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/history/read"
     payload = {
         "userId": int(user_id),
-        "dashId": _normalize_dash_id(dash_id),
+        "dashId": resolved_dash_id,
+        "dashFolder": resolved_dash_folder,
         "widgetId": str(widget_id or "").strip(),
     }
 
@@ -298,6 +324,7 @@ def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> 
             content_type=r.headers.get("content-type"),
             body_preview=r.text[:2000],
             dash_id_attempt=payload["dashId"],
+            dash_folder_attempt=payload["dashFolder"],
         )
 
         if not (200 <= r.status_code < 300):
@@ -310,6 +337,7 @@ def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> 
                 "points": [],
                 "count": 0,
                 "dashIdUsed": payload["dashId"],
+                "dashFolderUsed": payload["dashFolder"],
             }
 
         parsed = _safe_json_response(r)
@@ -318,6 +346,7 @@ def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> 
             fallback_error="Invalid JSON returned by Node-RED history endpoint",
         )
         data["dashIdUsed"] = payload["dashId"]
+        data["dashFolderUsed"] = payload["dashFolder"]
 
         _dbg(
             "GET GRAPHIC HISTORY PARSED RESPONSE",
@@ -330,6 +359,7 @@ def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> 
             points_count=len(data.get("points") or []),
             count=data.get("count"),
             dash_id_attempt=payload["dashId"],
+            dash_folder_attempt=payload["dashFolder"],
         )
 
         return data
@@ -349,25 +379,26 @@ def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> 
             "points": [],
             "count": 0,
             "dashIdUsed": payload["dashId"],
+            "dashFolderUsed": payload["dashFolder"],
         }
 
 
 # =========================================================
 # ✅ Helper: Read historian from Node-RED server
-# ✅ Fallback strategy:
-#   1) try requested dash_id
-#   2) if no data, try dash_main
-# This matches your current Node-RED write behavior where files are
-# stored in the shared dash_main folder and found by widgetId.
+# ✅ IMPORTANT:
+#   No fallback to main anymore.
+#   Each dashboard must read its own folder only.
 # =========================================================
 def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
     requested_dash = _normalize_dash_id(dash_id)
+    requested_folder = _normalize_dash_folder(dash_id)
 
     _dbg(
         "GET GRAPHIC HISTORY CALLED",
         node_red_base_url=NODE_RED_BASE_URL,
         user_id=user_id,
         dash_id=requested_dash,
+        dash_folder=requested_folder,
         widget_id=widget_id,
         node_red_key_present=bool(NODE_RED_KEY),
     )
@@ -382,66 +413,17 @@ def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
             "count": 0,
         }
 
-    # 1) first try exact dashboard requested by backend/frontend
-    first = _get_graphic_history_once(
+    result = _get_graphic_history_once(
         user_id=user_id,
         dash_id=requested_dash,
         widget_id=widget_id,
     )
 
-    # If exact dashboard lookup already returned data, use it.
-    if _history_response_has_points(first):
-        first["requestedDashId"] = requested_dash
-        first["resolvedByFallback"] = False
-        return first
+    result["requestedDashId"] = requested_dash
+    result["requestedDashFolder"] = requested_folder
+    result["resolvedByFallback"] = False
 
-    # If requested dash is already main, no fallback needed.
-    if requested_dash == "main":
-        first["requestedDashId"] = requested_dash
-        first["resolvedByFallback"] = False
-        return first
-
-    # 2) fallback to shared folder dash_main
-    _dbg(
-        "GET GRAPHIC HISTORY FALLBACK TO MAIN",
-        user_id=user_id,
-        requested_dash_id=requested_dash,
-        fallback_dash_id="main",
-        widget_id=widget_id,
-        first_ok=first.get("ok"),
-        first_error=first.get("error"),
-        first_count=first.get("count"),
-        first_files=first.get("files"),
-    )
-
-    second = _get_graphic_history_once(
-        user_id=user_id,
-        dash_id="main",
-        widget_id=widget_id,
-    )
-
-    # If fallback found data, return it and annotate.
-    if _history_response_has_points(second):
-        second["requestedDashId"] = requested_dash
-        second["resolvedByFallback"] = True
-        second["fallbackFromDashId"] = requested_dash
-        return second
-
-    # If fallback still did not find data, return the fallback result
-    # but include context so debugging is easier.
-    second["requestedDashId"] = requested_dash
-    second["resolvedByFallback"] = False
-    second["fallbackTried"] = True
-    second["fallbackFromDashId"] = requested_dash
-    second["firstAttempt"] = {
-        "ok": first.get("ok"),
-        "error": first.get("error"),
-        "count": first.get("count"),
-        "files": first.get("files", []),
-        "dashIdUsed": first.get("dashIdUsed"),
-    }
-
-    return second
+    return result
 
 
 # =========================================================
