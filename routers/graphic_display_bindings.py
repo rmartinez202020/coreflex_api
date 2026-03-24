@@ -1,12 +1,18 @@
 # routers/graphic_display_bindings.py
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
 from database import get_db
 from auth_utils import get_current_user
-from models import User, GraphicDisplayBinding
+from models import (
+    User,
+    GraphicDisplayBinding,
+    TenantUser,
+    TenantUserDashboardAccess,
+    CustomerDashboard,
+)
 
 router = APIRouter(prefix="/graphic-display-bindings", tags=["Graphic Display Bindings"])
 
@@ -23,6 +29,185 @@ def _dbg(label: str, **kwargs):
         print("==========================================\n")
     except Exception:
         pass
+
+
+# =========================
+# AUTH HELPERS
+# =========================
+def get_current_user_optional(request: Request, db: Session = Depends(get_db)):
+    try:
+        return get_current_user(request=request, db=db)
+    except Exception:
+        return None
+
+
+def _clean_text(v, default=""):
+    s = str(v or "").strip()
+    return s if s else default
+
+
+def _tenant_email_from_request(request: Request) -> str:
+    return _clean_text(request.headers.get("X-Tenant-Email")).lower()
+
+
+def _resolve_tenant_owner_user_id(
+    *,
+    db: Session,
+    request: Request,
+    dashboard_id: str,
+):
+    """
+    Resolve the OWNER user_id for a public tenant request using:
+    - X-Tenant-Email
+    - dashboard_id
+
+    Security:
+    - tenant must exist
+    - tenant must have dashboard access
+    - dashboard must exist
+    """
+    tenant_email = _tenant_email_from_request(request)
+    dash = _clean_text(dashboard_id, "main")
+
+    if not tenant_email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not dash or not str(dash).isdigit():
+        raise HTTPException(status_code=400, detail="Invalid dashboard_id")
+
+    dash_int = int(str(dash))
+
+    tenant = (
+        db.query(TenantUser)
+        .filter(func.lower(TenantUser.email) == tenant_email)
+        .first()
+    )
+    if not tenant:
+        _dbg(
+            "TENANT NOT FOUND FOR GRAPHIC DISPLAY REQUEST",
+            tenant_email=tenant_email,
+            dashboard_id=dash,
+        )
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    dashboard = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.id == dash_int)
+        .first()
+    )
+    if not dashboard:
+        _dbg(
+            "CUSTOMER DASHBOARD NOT FOUND FOR GRAPHIC DISPLAY REQUEST",
+            tenant_email=tenant_email,
+            dashboard_id=dash,
+        )
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+
+    access_row = (
+        db.query(TenantUserDashboardAccess)
+        .filter(
+            TenantUserDashboardAccess.tenant_user_id == tenant.id,
+            TenantUserDashboardAccess.dashboard_id == dashboard.id,
+        )
+        .first()
+    )
+    if not access_row:
+        _dbg(
+            "TENANT HAS NO ACCESS TO DASHBOARD",
+            tenant_email=tenant_email,
+            tenant_user_id=tenant.id,
+            dashboard_id=dash,
+        )
+        raise HTTPException(status_code=403, detail="Tenant does not have access to this dashboard")
+
+    owner_user_id = getattr(dashboard, "user_id", None)
+    if not owner_user_id:
+        _dbg(
+            "CUSTOMER DASHBOARD OWNER USER ID MISSING",
+            tenant_email=tenant_email,
+            dashboard_id=dash,
+            dashboard_obj=str(dashboard),
+        )
+        raise HTTPException(status_code=500, detail="Dashboard owner not found")
+
+    _dbg(
+        "RESOLVED TENANT OWNER USER ID",
+        tenant_email=tenant_email,
+        tenant_user_id=tenant.id,
+        dashboard_id=dash,
+        owner_user_id=owner_user_id,
+    )
+
+    return owner_user_id
+
+
+def _resolve_graphic_binding_for_request(
+    *,
+    db: Session,
+    request: Request,
+    current_user,
+    dashboard_id: str,
+    widget_id: str,
+):
+    dash = _clean_text(dashboard_id, "main")
+    wid = _clean_text(widget_id)
+
+    if not wid:
+        raise HTTPException(status_code=400, detail="widget_id is required")
+
+    # ✅ Private / owner flow
+    if current_user:
+        row = (
+            db.query(GraphicDisplayBinding)
+            .filter(
+                GraphicDisplayBinding.user_id == current_user.id,
+                GraphicDisplayBinding.dashboard_id == dash,
+                GraphicDisplayBinding.widget_id == wid,
+            )
+            .first()
+        )
+        owner_user_id = current_user.id
+
+        _dbg(
+            "RESOLVE GRAPHIC BINDING - OWNER FLOW",
+            current_user_id=current_user.id,
+            dashboard_id=dash,
+            widget_id=wid,
+            found=bool(row),
+        )
+        return row, owner_user_id
+
+    # ✅ Public tenant flow
+    tenant_email = _tenant_email_from_request(request)
+    if not tenant_email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    owner_user_id = _resolve_tenant_owner_user_id(
+        db=db,
+        request=request,
+        dashboard_id=dash,
+    )
+
+    row = (
+        db.query(GraphicDisplayBinding)
+        .filter(
+            GraphicDisplayBinding.user_id == owner_user_id,
+            GraphicDisplayBinding.dashboard_id == dash,
+            GraphicDisplayBinding.widget_id == wid,
+        )
+        .first()
+    )
+
+    _dbg(
+        "RESOLVE GRAPHIC BINDING - TENANT FLOW",
+        tenant_email=tenant_email,
+        owner_user_id=owner_user_id,
+        dashboard_id=dash,
+        widget_id=wid,
+        found=bool(row),
+    )
+
+    return row, owner_user_id
 
 
 # =========================
@@ -80,11 +265,6 @@ class GraphicVisibilityBody(BaseModel):
 class SoftDeleteBody(BaseModel):
     dashboard_id: str = "main"
     widget_id: str
-
-
-def _clean_text(v, default=""):
-    s = str(v or "").strip()
-    return s if s else default
 
 
 @router.post("/upsert")
@@ -255,32 +435,29 @@ def upsert_graphic_display_binding(
 @router.post("/visibility")
 def set_graphic_display_visibility(
     body: GraphicVisibilityBody,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_optional),
 ):
     dash = _clean_text(body.dashboard_id, "main")
     wid = _clean_text(body.widget_id)
 
-    if not wid:
-        raise HTTPException(status_code=400, detail="widget_id is required")
-
-    row = (
-        db.query(GraphicDisplayBinding)
-        .filter(
-            GraphicDisplayBinding.user_id == current_user.id,
-            GraphicDisplayBinding.dashboard_id == dash,
-            GraphicDisplayBinding.widget_id == wid,
-        )
-        .first()
+    row, owner_user_id = _resolve_graphic_binding_for_request(
+        db=db,
+        request=request,
+        current_user=current_user,
+        dashboard_id=dash,
+        widget_id=wid,
     )
 
     if not row:
         _dbg(
             "VISIBILITY ROW NOT FOUND",
-            user_id=current_user.id,
             dashboard_id=dash,
             widget_id=wid,
             is_visible=bool(body.is_visible),
+            current_user_id=getattr(current_user, "id", None),
+            tenant_email=_tenant_email_from_request(request),
         )
         raise HTTPException(status_code=404, detail="Graphic display binding not found")
 
@@ -288,7 +465,7 @@ def set_graphic_display_visibility(
         from routers.node_red_graphics import set_graphic_stream_visibility
 
         ok = set_graphic_stream_visibility(
-            user_id=current_user.id,
+            user_id=owner_user_id,
             dash_id=dash,
             widget_id=wid,
             is_visible=bool(body.is_visible),
@@ -296,11 +473,13 @@ def set_graphic_display_visibility(
 
         _dbg(
             "VISIBILITY UPDATE",
-            user_id=current_user.id,
+            owner_user_id=owner_user_id,
             dashboard_id=dash,
             widget_id=wid,
             is_visible=bool(body.is_visible),
             ok=ok,
+            current_user_id=getattr(current_user, "id", None),
+            tenant_email=_tenant_email_from_request(request),
         )
 
         return {
@@ -326,42 +505,41 @@ def set_graphic_display_visibility(
 # =========================
 @router.get("/history")
 def get_graphic_display_history(
+    request: Request,
     dashboard_id: str = Query("main"),
     widget_id: str = Query(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_optional),
 ):
     dash = _clean_text(dashboard_id, "main")
     wid = _clean_text(widget_id)
 
     _dbg(
         "HISTORY REQUEST START",
-        current_user_id=current_user.id,
+        current_user_id=getattr(current_user, "id", None),
+        tenant_email=_tenant_email_from_request(request),
         dashboard_id_raw=dashboard_id,
         dashboard_id_clean=dash,
         widget_id_raw=widget_id,
         widget_id_clean=wid,
     )
 
-    if not wid:
-        raise HTTPException(status_code=400, detail="widget_id is required")
-
-    row = (
-        db.query(GraphicDisplayBinding)
-        .filter(
-            GraphicDisplayBinding.user_id == current_user.id,
-            GraphicDisplayBinding.dashboard_id == dash,
-            GraphicDisplayBinding.widget_id == wid,
-        )
-        .first()
+    row, owner_user_id = _resolve_graphic_binding_for_request(
+        db=db,
+        request=request,
+        current_user=current_user,
+        dashboard_id=dash,
+        widget_id=wid,
     )
 
     if not row:
         _dbg(
             "HISTORY DB ROW NOT FOUND",
-            current_user_id=current_user.id,
+            owner_user_id=owner_user_id,
             dashboard_id=dash,
             widget_id=wid,
+            current_user_id=getattr(current_user, "id", None),
+            tenant_email=_tenant_email_from_request(request),
         )
         raise HTTPException(status_code=404, detail="Graphic display binding not found")
 
@@ -369,14 +547,14 @@ def get_graphic_display_history(
         from routers.node_red_graphics import get_graphic_history
 
         data = get_graphic_history(
-            user_id=current_user.id,
+            user_id=owner_user_id,
             dash_id=dash,
             widget_id=wid,
         )
 
         _dbg(
             "HISTORY NODE-RED RESPONSE",
-            current_user_id=current_user.id,
+            owner_user_id=owner_user_id,
             dashboard_id=dash,
             widget_id=wid,
             ok=data.get("ok"),
@@ -404,7 +582,7 @@ def get_graphic_display_history(
     except Exception as e:
         _dbg(
             "HISTORY NODE-RED CALL FAILED",
-            current_user_id=current_user.id,
+            owner_user_id=owner_user_id,
             dashboard_id=dash,
             widget_id=wid,
             error=str(e),
