@@ -36,6 +36,13 @@ NODE_RED_COMMAND_KEY = os.getenv(
 ).strip()
 
 
+def get_current_user_optional(request: Request, db: Session = Depends(get_db)):
+    try:
+        return get_current_user(request=request, db=db)
+    except Exception:
+        return None
+
+
 def _as_str(v) -> str:
     return (v or "").strip()
 
@@ -408,24 +415,39 @@ def write_control_do(
     req: ControlWriteRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     # 🔒 Tenant permission check
     _check_tenant_control_access(request)
 
     dash_id = req.dashboardId.strip()
     wid = req.widgetId.strip()
+    tenant_email = _as_str(request.headers.get("X-Tenant-Email"))
 
     # 1) resolve binding
-    row = (
-        db.query(ControlBinding)
-        .filter(
-            ControlBinding.user_id == user.id,
-            ControlBinding.dashboard_id == dash_id,
-            ControlBinding.widget_id == wid,
+    if tenant_email:
+        row = (
+            db.query(ControlBinding)
+            .filter(
+                ControlBinding.dashboard_id == dash_id,
+                ControlBinding.widget_id == wid,
+            )
+            .first()
         )
-        .first()
-    )
+    else:
+        if not user:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        row = (
+            db.query(ControlBinding)
+            .filter(
+                ControlBinding.user_id == user.id,
+                ControlBinding.dashboard_id == dash_id,
+                ControlBinding.widget_id == wid,
+            )
+            .first()
+        )
+
     if not row:
         raise HTTPException(status_code=404, detail="Control binding not found")
 
@@ -437,15 +459,23 @@ def write_control_do(
     if field not in ALLOWED_FIELDS:
         raise HTTPException(status_code=400, detail="Invalid bound DO field")
 
-    # 2) tenant isolation: device must still be claimed by user
-    device = (
-        db.query(ZHC1921Device)
-        .filter(
-            ZHC1921Device.device_id == device_id,
-            ZHC1921Device.claimed_by_user_id == user.id,
+    # 2) tenant isolation / owner isolation
+    if tenant_email:
+        device = (
+            db.query(ZHC1921Device)
+            .filter(ZHC1921Device.device_id == device_id)
+            .first()
         )
-        .first()
-    )
+    else:
+        device = (
+            db.query(ZHC1921Device)
+            .filter(
+                ZHC1921Device.device_id == device_id,
+                ZHC1921Device.claimed_by_user_id == user.id,
+            )
+            .first()
+        )
+
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
 
@@ -477,7 +507,7 @@ def write_control_do(
         lock_key=lk,
         device_id=device_id,
         field=field,
-        user_id=user.id,
+        user_id=user.id if user else None,
         expires_at=expires_at,
     )
 
@@ -503,7 +533,8 @@ def write_control_do(
         "value": value_bool,
         "dashboard_id": dash_id,
         "widget_id": wid,
-        "user_id": user.id,
+        "user_id": user.id if user else None,
+        "tenant_email": tenant_email or None,
     }
 
     # ✅ IMPORTANT:
