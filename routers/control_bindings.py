@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field
@@ -59,6 +59,39 @@ def _safe_json(res):
         return res.json()
     except Exception:
         return None
+
+
+def _normalize_tenant_access(value: str) -> str:
+    v = str(value or "").strip().lower()
+    if not v:
+        return ""
+
+    v = v.replace("+", "_").replace("-", "_").replace(" ", "_")
+    while "__" in v:
+        v = v.replace("__", "_")
+
+    if v in ("read_control", "readandcontrol", "read_and_control"):
+        return "read_control"
+
+    return "read_only"
+
+
+def _check_tenant_control_access(request: Request):
+    tenant_email = _as_str(request.headers.get("X-Tenant-Email"))
+    tenant_access = _normalize_tenant_access(
+        request.headers.get("X-Tenant-Access")
+    )
+
+    # ✅ Not a tenant/public request -> allow normal authenticated owner flow
+    if not tenant_email:
+        return
+
+    # ✅ Tenant/public request -> only read_control can write
+    if tenant_access != "read_control":
+        raise HTTPException(
+            status_code=403,
+            detail="This tenant has read-only access.",
+        )
 
 
 def _post_to_node_red_wait(
@@ -373,9 +406,13 @@ def delete_control_binding(
 @router.post("/write")
 def write_control_do(
     req: ControlWriteRequest,
+    request: Request,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    # 🔒 Tenant permission check
+    _check_tenant_control_access(request)
+
     dash_id = req.dashboardId.strip()
     wid = req.widgetId.strip()
 
