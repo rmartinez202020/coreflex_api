@@ -30,6 +30,54 @@ def _dbg(label: str, **kwargs):
         pass
 
 
+def _normalize_dash_id(value) -> str:
+    s = str(value or "").strip()
+    return s if s else "main"
+
+
+def _post_json(url: str, payload: dict, timeout_sec: int = 20):
+    return requests.post(url, json=payload, headers=_headers(), timeout=timeout_sec)
+
+
+def _safe_json_response(r: requests.Response):
+    try:
+        return r.json()
+    except Exception:
+        return None
+
+
+def _history_response_has_points(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+
+    points = data.get("points")
+    if isinstance(points, list) and len(points) > 0:
+        return True
+
+    count = data.get("count")
+    try:
+        return int(count or 0) > 0
+    except Exception:
+        return False
+
+
+def _normalize_history_payload(data, *, fallback_error: str = "") -> dict:
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "error": fallback_error or "Invalid Node-RED history payload",
+            "files": [],
+            "points": [],
+            "count": 0,
+        }
+
+    data.setdefault("ok", True)
+    data.setdefault("files", [])
+    data.setdefault("points", [])
+    data.setdefault("count", len(data.get("points", []) or []))
+    return data
+
+
 # =========================================================
 # ✅ Helper: Start/Update stream on Node-RED
 # =========================================================
@@ -64,7 +112,7 @@ def start_graphic_stream(
 
     payload = {
         "userId": int(user_id),
-        "dashId": str(dash_id or "main").strip() or "main",
+        "dashId": _normalize_dash_id(dash_id),
         "widgetId": str(widget_id or "").strip(),
         "bindModel": str(bind_model or "").strip(),
         "deviceId": str(device_id or "").strip(),
@@ -137,7 +185,7 @@ def set_graphic_stream_visibility(
 
     payload = {
         "userId": int(user_id),
-        "dashId": str(dash_id or "main").strip() or "main",
+        "dashId": _normalize_dash_id(dash_id),
         "widgetId": str(widget_id or "").strip(),
         "isVisible": bool(is_visible),
     }
@@ -186,7 +234,7 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/stop"
     payload = {
         "userId": int(user_id),
-        "dashId": str(dash_id or "main").strip() or "main",
+        "dashId": _normalize_dash_id(dash_id),
         "widgetId": str(widget_id or "").strip(),
     }
 
@@ -223,14 +271,103 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
 
 
 # =========================================================
+# ✅ Internal helper: single history read attempt
+# =========================================================
+def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> dict:
+    url = f"{NODE_RED_BASE_URL}/coreflex/graphics/history/read"
+    payload = {
+        "userId": int(user_id),
+        "dashId": _normalize_dash_id(dash_id),
+        "widgetId": str(widget_id or "").strip(),
+    }
+
+    _dbg(
+        "GET GRAPHIC HISTORY REQUEST",
+        url=url,
+        payload=payload,
+        headers=_headers(),
+    )
+
+    try:
+        r = _post_json(url, payload, timeout_sec=20)
+
+        _dbg(
+            "GET GRAPHIC HISTORY RAW RESPONSE",
+            status_code=r.status_code,
+            reason=getattr(r, "reason", ""),
+            content_type=r.headers.get("content-type"),
+            body_preview=r.text[:2000],
+            dash_id_attempt=payload["dashId"],
+        )
+
+        if not (200 <= r.status_code < 300):
+            return {
+                "ok": False,
+                "error": f"Node-RED bad response ({r.status_code})",
+                "status_code": r.status_code,
+                "body": r.text,
+                "files": [],
+                "points": [],
+                "count": 0,
+                "dashIdUsed": payload["dashId"],
+            }
+
+        parsed = _safe_json_response(r)
+        data = _normalize_history_payload(
+            parsed,
+            fallback_error="Invalid JSON returned by Node-RED history endpoint",
+        )
+        data["dashIdUsed"] = payload["dashId"]
+
+        _dbg(
+            "GET GRAPHIC HISTORY PARSED RESPONSE",
+            ok=data.get("ok"),
+            error=data.get("error"),
+            historyDir=data.get("historyDir"),
+            prefix=data.get("prefix"),
+            allNames_count=len(data.get("allNames") or []),
+            files_count=len(data.get("files") or []),
+            points_count=len(data.get("points") or []),
+            count=data.get("count"),
+            dash_id_attempt=payload["dashId"],
+        )
+
+        return data
+
+    except Exception as e:
+        print(f"[node-red] _get_graphic_history_once failed: {e}")
+        _dbg(
+            "GET GRAPHIC HISTORY REQUEST FAILED",
+            error=str(e),
+            url=url,
+            payload=payload,
+        )
+        return {
+            "ok": False,
+            "error": str(e),
+            "files": [],
+            "points": [],
+            "count": 0,
+            "dashIdUsed": payload["dashId"],
+        }
+
+
+# =========================================================
 # ✅ Helper: Read historian from Node-RED server
+# ✅ Fallback strategy:
+#   1) try requested dash_id
+#   2) if no data, try dash_main
+# This matches your current Node-RED write behavior where files are
+# stored in the shared dash_main folder and found by widgetId.
 # =========================================================
 def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
+    requested_dash = _normalize_dash_id(dash_id)
+
     _dbg(
         "GET GRAPHIC HISTORY CALLED",
         node_red_base_url=NODE_RED_BASE_URL,
         user_id=user_id,
-        dash_id=dash_id,
+        dash_id=requested_dash,
         widget_id=widget_id,
         node_red_key_present=bool(NODE_RED_KEY),
     )
@@ -245,114 +382,66 @@ def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
             "count": 0,
         }
 
-    url = f"{NODE_RED_BASE_URL}/coreflex/graphics/history/read"
-    payload = {
-        "userId": int(user_id),
-        "dashId": str(dash_id or "main").strip() or "main",
-        "widgetId": str(widget_id or "").strip(),
-    }
-
-    _dbg(
-        "GET GRAPHIC HISTORY REQUEST",
-        url=url,
-        payload=payload,
-        headers=_headers(),
+    # 1) first try exact dashboard requested by backend/frontend
+    first = _get_graphic_history_once(
+        user_id=user_id,
+        dash_id=requested_dash,
+        widget_id=widget_id,
     )
 
-    try:
-        r = requests.post(url, json=payload, headers=_headers(), timeout=20)
+    # If exact dashboard lookup already returned data, use it.
+    if _history_response_has_points(first):
+        first["requestedDashId"] = requested_dash
+        first["resolvedByFallback"] = False
+        return first
 
-        _dbg(
-            "GET GRAPHIC HISTORY RAW RESPONSE",
-            status_code=r.status_code,
-            reason=getattr(r, "reason", ""),
-            content_type=r.headers.get("content-type"),
-            body_preview=r.text[:2000],
-        )
+    # If requested dash is already main, no fallback needed.
+    if requested_dash == "main":
+        first["requestedDashId"] = requested_dash
+        first["resolvedByFallback"] = False
+        return first
 
-        if not (200 <= r.status_code < 300):
-            print(
-                f"[node-red] get_graphic_history bad response: "
-                f"status={r.status_code} url={url} body={r.text}"
-            )
-            return {
-                "ok": False,
-                "error": f"Node-RED bad response ({r.status_code})",
-                "status_code": r.status_code,
-                "body": r.text,
-                "files": [],
-                "points": [],
-                "count": 0,
-            }
+    # 2) fallback to shared folder dash_main
+    _dbg(
+        "GET GRAPHIC HISTORY FALLBACK TO MAIN",
+        user_id=user_id,
+        requested_dash_id=requested_dash,
+        fallback_dash_id="main",
+        widget_id=widget_id,
+        first_ok=first.get("ok"),
+        first_error=first.get("error"),
+        first_count=first.get("count"),
+        first_files=first.get("files"),
+    )
 
-        try:
-            data = r.json()
-        except Exception as e:
-            print("[node-red] get_graphic_history invalid JSON response")
-            _dbg(
-                "GET GRAPHIC HISTORY JSON PARSE ERROR",
-                error=str(e),
-                raw_text=r.text[:2000],
-            )
-            return {
-                "ok": False,
-                "error": "Invalid JSON returned by Node-RED history endpoint",
-                "status_code": r.status_code,
-                "body": r.text,
-                "files": [],
-                "points": [],
-                "count": 0,
-            }
+    second = _get_graphic_history_once(
+        user_id=user_id,
+        dash_id="main",
+        widget_id=widget_id,
+    )
 
-        if not isinstance(data, dict):
-            print("[node-red] get_graphic_history response is not an object")
-            _dbg(
-                "GET GRAPHIC HISTORY INVALID PAYLOAD TYPE",
-                payload_type=str(type(data)),
-                payload_value=data,
-            )
-            return {
-                "ok": False,
-                "error": "Invalid Node-RED history payload",
-                "files": [],
-                "points": [],
-                "count": 0,
-            }
+    # If fallback found data, return it and annotate.
+    if _history_response_has_points(second):
+        second["requestedDashId"] = requested_dash
+        second["resolvedByFallback"] = True
+        second["fallbackFromDashId"] = requested_dash
+        return second
 
-        data.setdefault("ok", True)
-        data.setdefault("files", [])
-        data.setdefault("points", [])
-        data.setdefault("count", len(data.get("points", []) or []))
+    # If fallback still did not find data, return the fallback result
+    # but include context so debugging is easier.
+    second["requestedDashId"] = requested_dash
+    second["resolvedByFallback"] = False
+    second["fallbackTried"] = True
+    second["fallbackFromDashId"] = requested_dash
+    second["firstAttempt"] = {
+        "ok": first.get("ok"),
+        "error": first.get("error"),
+        "count": first.get("count"),
+        "files": first.get("files", []),
+        "dashIdUsed": first.get("dashIdUsed"),
+    }
 
-        _dbg(
-            "GET GRAPHIC HISTORY PARSED RESPONSE",
-            ok=data.get("ok"),
-            error=data.get("error"),
-            historyDir=data.get("historyDir"),
-            prefix=data.get("prefix"),
-            allNames_count=len(data.get("allNames") or []),
-            files_count=len(data.get("files") or []),
-            points_count=len(data.get("points") or []),
-            count=data.get("count"),
-        )
-
-        return data
-
-    except Exception as e:
-        print(f"[node-red] get_graphic_history failed: {e}")
-        _dbg(
-            "GET GRAPHIC HISTORY REQUEST FAILED",
-            error=str(e),
-            url=url,
-            payload=payload,
-        )
-        return {
-            "ok": False,
-            "error": str(e),
-            "files": [],
-            "points": [],
-            "count": 0,
-        }
+    return second
 
 
 # =========================================================
