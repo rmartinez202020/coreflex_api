@@ -35,11 +35,35 @@ def _normalize_dash_id(value) -> str:
     return s if s else "main"
 
 
-def _normalize_dash_folder(value) -> str:
+def _normalize_dash_folder_from_dash_id(value) -> str:
     dash_id = _normalize_dash_id(value)
     if dash_id.lower() == "main":
         return "dash_main"
     return f"dash_{dash_id}"
+
+
+def _normalize_dash_folder(value, fallback_dash_id="main") -> str:
+    folder = str(value or "").strip()
+    if folder:
+        return folder
+    return _normalize_dash_folder_from_dash_id(fallback_dash_id)
+
+
+def _resolve_dash_identity(*, dash_id=None, dash_folder=None) -> tuple[str, str]:
+    """
+    ✅ Single source of truth for dashboard routing sent to Node-RED.
+
+    Rules:
+    - keep caller dash_id if provided
+    - keep caller dash_folder if provided
+    - otherwise derive dash_folder from dash_id
+    """
+    resolved_dash_id = _normalize_dash_id(dash_id)
+    resolved_dash_folder = _normalize_dash_folder(
+        dash_folder,
+        fallback_dash_id=resolved_dash_id,
+    )
+    return resolved_dash_id, resolved_dash_folder
 
 
 def _post_json(url: str, payload: dict, timeout_sec: int = 20):
@@ -110,13 +134,16 @@ def start_graphic_stream(
     single_units_enabled: bool = False,
     single_unit: str = "",
     retention_days: int = 35,
+    dash_folder: str = "",
 ) -> bool:
     if not NODE_RED_BASE_URL:
         print("[node-red] start_graphic_stream skipped: NODE_RED_BASE_URL not set")
         return False
 
-    resolved_dash_id = _normalize_dash_id(dash_id)
-    resolved_dash_folder = _normalize_dash_folder(dash_id)
+    resolved_dash_id, resolved_dash_folder = _resolve_dash_identity(
+        dash_id=dash_id,
+        dash_folder=dash_folder,
+    )
 
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/start"
 
@@ -149,6 +176,8 @@ def start_graphic_stream(
         node_red_base_url=NODE_RED_BASE_URL,
         url=url,
         user_id=user_id,
+        dash_id_input=dash_id,
+        dash_folder_input=dash_folder,
         dash_id=payload["dashId"],
         dash_folder=payload["dashFolder"],
         widget_id=payload["widgetId"],
@@ -188,13 +217,16 @@ def set_graphic_stream_visibility(
     dash_id: str,
     widget_id: str,
     is_visible: bool,
+    dash_folder: str = "",
 ) -> bool:
     if not NODE_RED_BASE_URL:
         print("[node-red] set_graphic_stream_visibility skipped: NODE_RED_BASE_URL not set")
         return False
 
-    resolved_dash_id = _normalize_dash_id(dash_id)
-    resolved_dash_folder = _normalize_dash_folder(dash_id)
+    resolved_dash_id, resolved_dash_folder = _resolve_dash_identity(
+        dash_id=dash_id,
+        dash_folder=dash_folder,
+    )
 
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/visibility"
 
@@ -211,6 +243,8 @@ def set_graphic_stream_visibility(
         node_red_base_url=NODE_RED_BASE_URL,
         url=url,
         user_id=user_id,
+        dash_id_input=dash_id,
+        dash_folder_input=dash_folder,
         dash_id=payload["dashId"],
         dash_folder=payload["dashFolder"],
         widget_id=payload["widgetId"],
@@ -243,13 +277,21 @@ def set_graphic_stream_visibility(
 # =========================================================
 # ✅ Helper: Stop stream
 # =========================================================
-def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
+def stop_graphic_stream(
+    *,
+    user_id: int,
+    dash_id: str,
+    widget_id: str,
+    dash_folder: str = "",
+) -> bool:
     if not NODE_RED_BASE_URL:
         print("[node-red] stop_graphic_stream skipped: NODE_RED_BASE_URL not set")
         return False
 
-    resolved_dash_id = _normalize_dash_id(dash_id)
-    resolved_dash_folder = _normalize_dash_folder(dash_id)
+    resolved_dash_id, resolved_dash_folder = _resolve_dash_identity(
+        dash_id=dash_id,
+        dash_folder=dash_folder,
+    )
 
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/stream/stop"
     payload = {
@@ -264,6 +306,8 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
         node_red_base_url=NODE_RED_BASE_URL,
         url=url,
         user_id=user_id,
+        dash_id_input=dash_id,
+        dash_folder_input=dash_folder,
         dash_id=payload["dashId"],
         dash_folder=payload["dashFolder"],
         widget_id=payload["widgetId"],
@@ -295,9 +339,17 @@ def stop_graphic_stream(*, user_id: int, dash_id: str, widget_id: str) -> bool:
 # =========================================================
 # ✅ Internal helper: single history read attempt
 # =========================================================
-def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> dict:
-    resolved_dash_id = _normalize_dash_id(dash_id)
-    resolved_dash_folder = _normalize_dash_folder(dash_id)
+def _get_graphic_history_once(
+    *,
+    user_id: int,
+    dash_id: str,
+    widget_id: str,
+    dash_folder: str = "",
+) -> dict:
+    resolved_dash_id, resolved_dash_folder = _resolve_dash_identity(
+        dash_id=dash_id,
+        dash_folder=dash_folder,
+    )
 
     url = f"{NODE_RED_BASE_URL}/coreflex/graphics/history/read"
     payload = {
@@ -389,14 +441,24 @@ def _get_graphic_history_once(*, user_id: int, dash_id: str, widget_id: str) -> 
 #   No fallback to main anymore.
 #   Each dashboard must read its own folder only.
 # =========================================================
-def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
-    requested_dash = _normalize_dash_id(dash_id)
-    requested_folder = _normalize_dash_folder(dash_id)
+def get_graphic_history(
+    *,
+    user_id: int,
+    dash_id: str,
+    widget_id: str,
+    dash_folder: str = "",
+) -> dict:
+    requested_dash, requested_folder = _resolve_dash_identity(
+        dash_id=dash_id,
+        dash_folder=dash_folder,
+    )
 
     _dbg(
         "GET GRAPHIC HISTORY CALLED",
         node_red_base_url=NODE_RED_BASE_URL,
         user_id=user_id,
+        dash_id_input=dash_id,
+        dash_folder_input=dash_folder,
         dash_id=requested_dash,
         dash_folder=requested_folder,
         widget_id=widget_id,
@@ -416,6 +478,7 @@ def get_graphic_history(*, user_id: int, dash_id: str, widget_id: str) -> dict:
     result = _get_graphic_history_once(
         user_id=user_id,
         dash_id=requested_dash,
+        dash_folder=requested_folder,
         widget_id=widget_id,
     )
 
