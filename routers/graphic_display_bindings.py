@@ -50,6 +50,10 @@ def _tenant_email_from_request(request: Request) -> str:
     return _clean_text(request.headers.get("X-Tenant-Email")).lower()
 
 
+def _is_public_tenant_request(request: Request, current_user) -> bool:
+    return current_user is None and bool(_tenant_email_from_request(request))
+
+
 def _resolve_tenant_owner_user_id(
     *,
     db: Session,
@@ -65,17 +69,18 @@ def _resolve_tenant_owner_user_id(
     - tenant must exist
     - tenant must have dashboard access
     - dashboard must exist
+
+    ✅ IMPORTANT:
+    Public Graphic Display history/visibility may still use dashboard_id="main"
+    because historian files and bindings are stored under dash_main.
+    In that case, we cannot validate access from "main" directly, so we resolve
+    the tenant's accessible dashboard row first and use its owner user_id.
     """
     tenant_email = _tenant_email_from_request(request)
     dash = _clean_text(dashboard_id, "main")
 
     if not tenant_email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-    if not dash or not str(dash).isdigit():
-        raise HTTPException(status_code=400, detail="Invalid dashboard_id")
-
-    dash_int = int(str(dash))
 
     tenant = (
         db.query(TenantUser)
@@ -90,35 +95,83 @@ def _resolve_tenant_owner_user_id(
         )
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    dashboard = (
-        db.query(CustomerDashboard)
-        .filter(CustomerDashboard.id == dash_int)
-        .first()
-    )
-    if not dashboard:
-        _dbg(
-            "CUSTOMER DASHBOARD NOT FOUND FOR GRAPHIC DISPLAY REQUEST",
-            tenant_email=tenant_email,
-            dashboard_id=dash,
-        )
-        raise HTTPException(status_code=404, detail="Dashboard not found")
+    dashboard = None
+    access_row = None
 
-    access_row = (
-        db.query(TenantUserDashboardAccess)
-        .filter(
-            TenantUserDashboardAccess.tenant_user_id == tenant.id,
-            TenantUserDashboardAccess.dashboard_id == dashboard.id,
+    # ✅ Normal case: numeric launched dashboard id
+    if dash and str(dash).isdigit():
+        dash_int = int(str(dash))
+
+        dashboard = (
+            db.query(CustomerDashboard)
+            .filter(CustomerDashboard.id == dash_int)
+            .first()
         )
-        .first()
-    )
-    if not access_row:
-        _dbg(
-            "TENANT HAS NO ACCESS TO DASHBOARD",
-            tenant_email=tenant_email,
-            tenant_user_id=tenant.id,
-            dashboard_id=dash,
+        if not dashboard:
+            _dbg(
+                "CUSTOMER DASHBOARD NOT FOUND FOR GRAPHIC DISPLAY REQUEST",
+                tenant_email=tenant_email,
+                dashboard_id=dash,
+            )
+            raise HTTPException(status_code=404, detail="Dashboard not found")
+
+        access_row = (
+            db.query(TenantUserDashboardAccess)
+            .filter(
+                TenantUserDashboardAccess.tenant_user_id == tenant.id,
+                TenantUserDashboardAccess.dashboard_id == dashboard.id,
+            )
+            .first()
         )
-        raise HTTPException(status_code=403, detail="Tenant does not have access to this dashboard")
+        if not access_row:
+            _dbg(
+                "TENANT HAS NO ACCESS TO DASHBOARD",
+                tenant_email=tenant_email,
+                tenant_user_id=tenant.id,
+                dashboard_id=dash,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Tenant does not have access to this dashboard",
+            )
+
+    else:
+        # ✅ Special case:
+        # public launch is requesting dashboard_id="main" because historian files
+        # are stored in dash_main. We still need to verify tenant access securely.
+        # We do that by requiring the tenant to have at least one dashboard access row.
+        access_row = (
+            db.query(TenantUserDashboardAccess)
+            .filter(TenantUserDashboardAccess.tenant_user_id == tenant.id)
+            .order_by(TenantUserDashboardAccess.id.asc())
+            .first()
+        )
+        if not access_row:
+            _dbg(
+                "TENANT HAS NO DASHBOARD ACCESS ROWS FOR MAIN GRAPHIC REQUEST",
+                tenant_email=tenant_email,
+                tenant_user_id=tenant.id,
+                dashboard_id=dash,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Tenant does not have access to this dashboard",
+            )
+
+        dashboard = (
+            db.query(CustomerDashboard)
+            .filter(CustomerDashboard.id == access_row.dashboard_id)
+            .first()
+        )
+        if not dashboard:
+            _dbg(
+                "CUSTOMER DASHBOARD NOT FOUND FROM TENANT ACCESS ROW",
+                tenant_email=tenant_email,
+                tenant_user_id=tenant.id,
+                dashboard_id=dash,
+                access_dashboard_id=access_row.dashboard_id,
+            )
+            raise HTTPException(status_code=404, detail="Dashboard not found")
 
     owner_user_id = getattr(dashboard, "user_id", None)
     if not owner_user_id:
@@ -135,10 +188,58 @@ def _resolve_tenant_owner_user_id(
         tenant_email=tenant_email,
         tenant_user_id=tenant.id,
         dashboard_id=dash,
+        resolved_customer_dashboard_id=getattr(dashboard, "id", None),
         owner_user_id=owner_user_id,
     )
 
     return owner_user_id
+
+
+def _resolve_public_binding_dashboard_id(
+    *,
+    db: Session,
+    owner_user_id: int,
+    requested_dashboard_id: str,
+    widget_id: str,
+) -> str:
+    """
+    ✅ For public tenant flow, bindings/historian may be stored under "main"
+    even when the launched customer dashboard id is numeric.
+
+    Priority:
+    1) exact requested dashboard_id
+    2) "main"
+    """
+    requested = _clean_text(requested_dashboard_id, "main")
+    wid = _clean_text(widget_id)
+
+    if requested:
+        exact = (
+            db.query(GraphicDisplayBinding)
+            .filter(
+                GraphicDisplayBinding.user_id == owner_user_id,
+                GraphicDisplayBinding.dashboard_id == requested,
+                GraphicDisplayBinding.widget_id == wid,
+            )
+            .first()
+        )
+        if exact:
+            return requested
+
+    fallback = "main"
+    main_row = (
+        db.query(GraphicDisplayBinding)
+        .filter(
+            GraphicDisplayBinding.user_id == owner_user_id,
+            GraphicDisplayBinding.dashboard_id == fallback,
+            GraphicDisplayBinding.widget_id == wid,
+        )
+        .first()
+    )
+    if main_row:
+        return fallback
+
+    return requested
 
 
 def _resolve_graphic_binding_for_request(
@@ -175,7 +276,7 @@ def _resolve_graphic_binding_for_request(
             widget_id=wid,
             found=bool(row),
         )
-        return row, owner_user_id
+        return row, owner_user_id, dash
 
     # ✅ Public tenant flow
     tenant_email = _tenant_email_from_request(request)
@@ -188,11 +289,18 @@ def _resolve_graphic_binding_for_request(
         dashboard_id=dash,
     )
 
+    binding_dash = _resolve_public_binding_dashboard_id(
+        db=db,
+        owner_user_id=owner_user_id,
+        requested_dashboard_id=dash,
+        widget_id=wid,
+    )
+
     row = (
         db.query(GraphicDisplayBinding)
         .filter(
             GraphicDisplayBinding.user_id == owner_user_id,
-            GraphicDisplayBinding.dashboard_id == dash,
+            GraphicDisplayBinding.dashboard_id == binding_dash,
             GraphicDisplayBinding.widget_id == wid,
         )
         .first()
@@ -202,12 +310,13 @@ def _resolve_graphic_binding_for_request(
         "RESOLVE GRAPHIC BINDING - TENANT FLOW",
         tenant_email=tenant_email,
         owner_user_id=owner_user_id,
-        dashboard_id=dash,
+        requested_dashboard_id=dash,
+        binding_dashboard_id=binding_dash,
         widget_id=wid,
         found=bool(row),
     )
 
-    return row, owner_user_id
+    return row, owner_user_id, binding_dash
 
 
 # =========================
@@ -442,7 +551,7 @@ def set_graphic_display_visibility(
     dash = _clean_text(body.dashboard_id, "main")
     wid = _clean_text(body.widget_id)
 
-    row, owner_user_id = _resolve_graphic_binding_for_request(
+    row, owner_user_id, binding_dash = _resolve_graphic_binding_for_request(
         db=db,
         request=request,
         current_user=current_user,
@@ -453,7 +562,8 @@ def set_graphic_display_visibility(
     if not row:
         _dbg(
             "VISIBILITY ROW NOT FOUND",
-            dashboard_id=dash,
+            requested_dashboard_id=dash,
+            binding_dashboard_id=binding_dash,
             widget_id=wid,
             is_visible=bool(body.is_visible),
             current_user_id=getattr(current_user, "id", None),
@@ -466,7 +576,7 @@ def set_graphic_display_visibility(
 
         ok = set_graphic_stream_visibility(
             user_id=owner_user_id,
-            dash_id=dash,
+            dash_id=binding_dash,
             widget_id=wid,
             is_visible=bool(body.is_visible),
         )
@@ -474,7 +584,8 @@ def set_graphic_display_visibility(
         _dbg(
             "VISIBILITY UPDATE",
             owner_user_id=owner_user_id,
-            dashboard_id=dash,
+            requested_dashboard_id=dash,
+            binding_dashboard_id=binding_dash,
             widget_id=wid,
             is_visible=bool(body.is_visible),
             ok=ok,
@@ -484,7 +595,8 @@ def set_graphic_display_visibility(
 
         return {
             "ok": ok,
-            "dashboard_id": dash,
+            "dashboard_id": binding_dash,
+            "requested_dashboard_id": dash,
             "widget_id": wid,
             "is_visible": bool(body.is_visible),
         }
@@ -492,7 +604,8 @@ def set_graphic_display_visibility(
         print(f"[graphic-display-bindings] set visibility failed: {e}")
         return {
             "ok": False,
-            "dashboard_id": dash,
+            "dashboard_id": binding_dash,
+            "requested_dashboard_id": dash,
             "widget_id": wid,
             "is_visible": bool(body.is_visible),
             "error": str(e),
@@ -524,7 +637,7 @@ def get_graphic_display_history(
         widget_id_clean=wid,
     )
 
-    row, owner_user_id = _resolve_graphic_binding_for_request(
+    row, owner_user_id, binding_dash = _resolve_graphic_binding_for_request(
         db=db,
         request=request,
         current_user=current_user,
@@ -536,7 +649,8 @@ def get_graphic_display_history(
         _dbg(
             "HISTORY DB ROW NOT FOUND",
             owner_user_id=owner_user_id,
-            dashboard_id=dash,
+            requested_dashboard_id=dash,
+            binding_dashboard_id=binding_dash,
             widget_id=wid,
             current_user_id=getattr(current_user, "id", None),
             tenant_email=_tenant_email_from_request(request),
@@ -548,14 +662,15 @@ def get_graphic_display_history(
 
         data = get_graphic_history(
             user_id=owner_user_id,
-            dash_id=dash,
+            dash_id=binding_dash,
             widget_id=wid,
         )
 
         _dbg(
             "HISTORY NODE-RED RESPONSE",
             owner_user_id=owner_user_id,
-            dashboard_id=dash,
+            requested_dashboard_id=dash,
+            binding_dashboard_id=binding_dash,
             widget_id=wid,
             ok=data.get("ok"),
             error=data.get("error"),
@@ -568,7 +683,8 @@ def get_graphic_display_history(
 
         return {
             "ok": bool(data.get("ok", True)),
-            "dashboard_id": dash,
+            "dashboard_id": binding_dash,
+            "requested_dashboard_id": dash,
             "widget_id": wid,
             "history_dir": data.get("historyDir"),
             "prefix": data.get("prefix"),
@@ -583,13 +699,15 @@ def get_graphic_display_history(
         _dbg(
             "HISTORY NODE-RED CALL FAILED",
             owner_user_id=owner_user_id,
-            dashboard_id=dash,
+            requested_dashboard_id=dash,
+            binding_dashboard_id=binding_dash,
             widget_id=wid,
             error=str(e),
         )
         return {
             "ok": False,
-            "dashboard_id": dash,
+            "dashboard_id": binding_dash,
+            "requested_dashboard_id": dash,
             "widget_id": wid,
             "files": [],
             "points": [],
