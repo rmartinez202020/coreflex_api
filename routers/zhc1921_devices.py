@@ -128,6 +128,7 @@ def to_row_for_table(r: ZHC1921Device):
     ls = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
 
     status = _compute_online_status(ls)
+    online = status == "online"
 
     def bit(name: str, fallback: int = 0) -> int:
         v = cached.get(name, getattr(r, name, fallback))
@@ -138,33 +139,36 @@ def to_row_for_table(r: ZHC1921Device):
         return v if v is not None else ""
 
     return {
-        "deviceId": r.device_id,
+    "deviceId": r.device_id,
 
-        # ✅ show date user claimed it (what you want)
-        "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+    # ✅ ADD THIS (CRITICAL FIX)
+    "online": online,
+    "is_online": online,
+    "status": status,
 
-        "ownedBy": r.claimed_by_email or "—",
-        "status": status,
-        "lastSeen": ls.isoformat() if ls else "—",
+    "lastSeen": ls.isoformat() if ls else "—",
 
-        # ✅ 6 DIs
-        "in1": bit("di1"),
-        "in2": bit("di2"),
-        "in3": bit("di3"),
-        "in4": bit("di4"),
-        "in5": bit("di5"),
-        "in6": bit("di6"),
+    # existing fields
+    "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+    "ownedBy": r.claimed_by_email or "—",
 
-        "do1": bit("do1"),
-        "do2": bit("do2"),
-        "do3": bit("do3"),
-        "do4": bit("do4"),
+    "in1": bit("di1"),
+    "in2": bit("di2"),
+    "in3": bit("di3"),
+    "in4": bit("di4"),
+    "in5": bit("di5"),
+    "in6": bit("di6"),
 
-        "ai1": ai("ai1"),
-        "ai2": ai("ai2"),
-        "ai3": ai("ai3"),
-        "ai4": ai("ai4"),
-    }
+    "do1": bit("do1"),
+    "do2": bit("do2"),
+    "do3": bit("do3"),
+    "do4": bit("do4"),
+
+    "ai1": ai("ai1"),
+    "ai2": ai("ai2"),
+    "ai3": ai("ai3"),
+    "ai4": ai("ai4"),
+}
 
 
 # =========================================================
