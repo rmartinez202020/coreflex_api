@@ -139,36 +139,41 @@ def to_row_for_table(r: ZHC1921Device):
         return v if v is not None else ""
 
     return {
-    "deviceId": r.device_id,
+        "deviceId": r.device_id,
 
-    # ✅ ADD THIS (CRITICAL FIX)
-    "online": online,
-    "is_online": online,
-    "status": status,
+        # ✅ CRITICAL: all frontend layers can rely on these
+        "online": online,
+        "is_online": online,
+        "status": status,
+        "lastSeen": ls.isoformat() if ls else "—",
 
-    "lastSeen": ls.isoformat() if ls else "—",
+        # existing fields
+        "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
+        "ownedBy": r.claimed_by_email or "—",
 
-    # existing fields
-    "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
-    "ownedBy": r.claimed_by_email or "—",
+        "in1": bit("di1"),
+        "in2": bit("di2"),
+        "in3": bit("di3"),
+        "in4": bit("di4"),
+        "in5": bit("di5"),
+        "in6": bit("di6"),
 
-    "in1": bit("di1"),
-    "in2": bit("di2"),
-    "in3": bit("di3"),
-    "in4": bit("di4"),
-    "in5": bit("di5"),
-    "in6": bit("di6"),
+        "do1": bit("do1"),
+        "do2": bit("do2"),
+        "do3": bit("do3"),
+        "do4": bit("do4"),
 
-    "do1": bit("do1"),
-    "do2": bit("do2"),
-    "do3": bit("do3"),
-    "do4": bit("do4"),
+        "ai1": ai("ai1"),
+        "ai2": ai("ai2"),
+        "ai3": ai("ai3"),
+        "ai4": ai("ai4"),
+    }
 
-    "ai1": ai("ai1"),
-    "ai2": ai("ai2"),
-    "ai3": ai("ai3"),
-    "ai4": ai("ai4"),
-}
+
+# ✅ Reusable serializer for public/tenant routes
+# Import this in the route that serves /tenant-access/devices
+def serialize_zhc1921_device_row(r: ZHC1921Device):
+    return to_row_for_table(r)
 
 
 # =========================================================
@@ -220,8 +225,6 @@ def ingest_zhc1921_telemetry(
     row.di2 = _coerce_bit(body.di2)
     row.di3 = _coerce_bit(body.di3)
     row.di4 = _coerce_bit(body.di4)
-
-    # These columns exist after your ALTER TABLE (di5/di6)
     row.di5 = _coerce_bit(body.di5)
     row.di6 = _coerce_bit(body.di6)
 
@@ -237,8 +240,6 @@ def ingest_zhc1921_telemetry(
     row.ai4 = body.ai4
 
     # ✅ NEW: update in-memory cache (fast read path)
-    # We use parsed last_seen when available; if missing, cache last_seen stays None
-    # (status on UI still works because DB last_seen exists; next telemetry will populate cache timestamp too).
     set_latest(
         device_id,
         {
