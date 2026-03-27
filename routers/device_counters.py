@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import Optional
+from typing import Optional, Tuple
 import uuid
 
 from database import get_db
@@ -37,6 +37,13 @@ class CreatePlaceholderBody(BaseModel):
 # ----------------------------
 # ✅ Helpers
 # ----------------------------
+def _dt_iso(v):
+    try:
+        return v.isoformat() if v else None
+    except Exception:
+        return None
+
+
 def _row_to_dict(r):
     return {
         "id": str(r["id"]),
@@ -47,12 +54,12 @@ def _row_to_dict(r):
         "field": r["field"],
         "count": r["count"],
         "prev01": r["prev01"],
-        # ✅ NEW: running time fields (seconds)
+        # ✅ running time fields (seconds)
         "run_seconds": int(r.get("run_seconds") or 0),
-        "last_tick_at": r["last_tick_at"].isoformat() if r.get("last_tick_at") else None,
+        "last_tick_at": _dt_iso(r.get("last_tick_at")),
         "enabled": r["enabled"],
-        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        "created_at": _dt_iso(r.get("created_at")),
+        "updated_at": _dt_iso(r.get("updated_at")),
     }
 
 
@@ -109,6 +116,65 @@ def _normalize_dashboard_id_text(dashboard_id: Optional[str]) -> Optional[str]:
     return s
 
 
+def _normalize_status(raw) -> str:
+    if isinstance(raw, bool):
+        return "online" if raw else "offline"
+    if isinstance(raw, (int, float)):
+        return "online" if raw > 0 else "offline"
+
+    s = str(raw or "").strip().lower()
+    if s in {"online", "true", "1", "up", "running", "connected"}:
+        return "online"
+    if s in {"offline", "false", "0", "down", "disconnected", "not_running", "not running"}:
+        return "offline"
+
+    # safest default for runtime signaling
+    return "offline"
+
+
+def _get_claimed_device_row(
+    db: Session,
+    user: User,
+    device_id: str,
+) -> Tuple[Optional[str], Optional[object]]:
+    """
+    Returns: (model_name, orm_row)
+    model_name: zhc1921 | zhc1661 | tp4000 | None
+    """
+    device_id = (device_id or "").strip()
+    if not device_id:
+        return None, None
+
+    r1921 = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.device_id == device_id)
+        .filter(ZHC1921Device.claimed_by_user_id == user.id)
+        .first()
+    )
+    if r1921:
+        return "zhc1921", r1921
+
+    r1661 = (
+        db.query(ZHC1661Device)
+        .filter(ZHC1661Device.device_id == device_id)
+        .filter(ZHC1661Device.claimed_by_user_id == user.id)
+        .first()
+    )
+    if r1661:
+        return "zhc1661", r1661
+
+    rtp = (
+        db.query(TP4000Device)
+        .filter(TP4000Device.device_id == device_id)
+        .filter(TP4000Device.claimed_by_user_id == user.id)
+        .first()
+    )
+    if rtp:
+        return "tp4000", rtp
+
+    return None, None
+
+
 def _get_current_field_value(db: Session, user: User, device_id: str, field: str) -> Optional[int]:
     """
     Reads the CURRENT value of the counter's selected field from the user's claimed devices.
@@ -119,34 +185,76 @@ def _get_current_field_value(db: Session, user: User, device_id: str, field: str
     if not device_id or not field:
         return None
 
-    r1921 = (
-        db.query(ZHC1921Device)
-        .filter(ZHC1921Device.device_id == device_id)
-        .filter(ZHC1921Device.claimed_by_user_id == user.id)
-        .first()
-    )
-    if r1921:
-        return _to01(getattr(r1921, field, None))
+    model_name, dev = _get_claimed_device_row(db, user, device_id)
+    if not dev:
+        return None
 
-    r1661 = (
-        db.query(ZHC1661Device)
-        .filter(ZHC1661Device.device_id == device_id)
-        .filter(ZHC1661Device.claimed_by_user_id == user.id)
-        .first()
-    )
-    if r1661:
-        return _to01(getattr(r1661, field, None))
+    return _to01(getattr(dev, field, None))
 
-    rtp = (
-        db.query(TP4000Device)
-        .filter(TP4000Device.device_id == device_id)
-        .filter(TP4000Device.claimed_by_user_id == user.id)
-        .first()
-    )
-    if rtp:
-        return _to01(getattr(rtp, field, None))
 
-    return None
+def _get_device_runtime_meta(
+    db: Session,
+    user: User,
+    device_id: str,
+    field: str,
+):
+    """
+    ✅ Enrich counter rows with device runtime status for frontend.
+    """
+    field = _normalize_field(field)
+    model_name, dev = _get_claimed_device_row(db, user, device_id)
+
+    if not dev:
+        return {
+            "device_model": None,
+            "device_status": "offline",
+            "device_online": False,
+            "current_value": None,
+            "last_seen_at": None,
+        }
+
+    raw_status = (
+        getattr(dev, "status", None)
+        if hasattr(dev, "status")
+        else getattr(dev, "online", None)
+    )
+    status = _normalize_status(raw_status)
+    online = status == "online"
+
+    current_value = None
+    if field:
+        current_value = _to01(getattr(dev, field, None))
+
+    last_seen_at = (
+        getattr(dev, "last_seen_at", None)
+        or getattr(dev, "last_seen", None)
+        or getattr(dev, "updated_at", None)
+    )
+
+    return {
+        "device_model": model_name,
+        "device_status": status,
+        "device_online": online,
+        "current_value": current_value,
+        "last_seen_at": _dt_iso(last_seen_at),
+    }
+
+
+def _enrich_counter_row(db: Session, user: User, row):
+    base = _row_to_dict(row)
+
+    device_id = (base.get("device_id") or "").strip()
+    field = (base.get("field") or "").strip()
+
+    runtime = _get_device_runtime_meta(db, user, device_id, field)
+
+    base.update(runtime)
+
+    # ✅ convenience flags for frontend
+    base["offline"] = not bool(runtime.get("device_online"))
+    base["online"] = bool(runtime.get("device_online"))
+
+    return base
 
 
 # ----------------------------
@@ -194,7 +302,7 @@ def create_placeholder_counter(
         ).mappings().first()
 
     if existing:
-        return _row_to_dict(existing)
+        return _enrich_counter_row(db, user, existing)
 
     new_id = str(uuid.uuid4())
 
@@ -224,7 +332,7 @@ def create_placeholder_counter(
         },
     ).mappings().first()
     db.commit()
-    return _row_to_dict(row)
+    return _enrich_counter_row(db, user, row)
 
 
 # ✅ accept BOTH:
@@ -264,7 +372,7 @@ def list_counters(
         """)
         rows = db.execute(q, {"user_id": user.id}).mappings().all()
 
-    return [_row_to_dict(r) for r in rows]
+    return [_enrich_counter_row(db, user, r) for r in rows]
 
 
 @router.get("/by-dashboard/{dashboard_id}")
@@ -296,7 +404,7 @@ def list_counters_by_dashboard(
         """)
         rows = db.execute(q, {"user_id": user.id, "dashboard_id": dash}).mappings().all()
 
-    return [_row_to_dict(r) for r in rows]
+    return [_enrich_counter_row(db, user, r) for r in rows]
 
 
 @router.get("/by-widget/{widget_id}")
@@ -343,7 +451,7 @@ def get_counter_by_widget(
     if not row:
         raise HTTPException(status_code=404, detail="Counter not found")
 
-    return _row_to_dict(row)
+    return _enrich_counter_row(db, user, row)
 
 
 @router.post("/upsert")
@@ -447,7 +555,7 @@ def upsert_counter(
         ).mappings().first()
 
         db.commit()
-        return _row_to_dict(row)
+        return _enrich_counter_row(db, user, row)
 
     # create new row
     new_id = str(uuid.uuid4())
@@ -477,7 +585,7 @@ def upsert_counter(
         },
     ).mappings().first()
     db.commit()
-    return _row_to_dict(row)
+    return _enrich_counter_row(db, user, row)
 
 
 @router.post("/reset")
@@ -585,7 +693,7 @@ def reset_counter(
         ).mappings().first()
 
     db.commit()
-    return _row_to_dict(updated)
+    return _enrich_counter_row(db, user, updated)
 
 
 @router.delete("/")
