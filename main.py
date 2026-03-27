@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+import os
 import threading
 
 # ========================================
@@ -334,13 +335,9 @@ from models import (  # noqa: E402
     TenantUserDashboardAccess,
     CustomerDashboard,
 )
-
-# ✅ Reuse live-cache + timeout logic
 from utils.zhc1921_live_cache import get_latest as get_latest_zhc1921  # noqa: E402
-from utils.zhc1661_live_cache import get_latest as get_latest_zhc1661  # noqa: E402
-from utils.tp4000_live_cache import get_latest as get_latest_tp4000  # noqa: E402
 
-OFFLINE_AFTER_SECONDS = 10
+OFFLINE_AFTER_SECONDS = int(os.getenv("COREFLEX_OFFLINE_AFTER_SECONDS") or "10")
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -418,9 +415,7 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
         .all()
     )
     for r in rows_1661:
-        cached = get_latest_zhc1661(r.device_id) or {}
-        cache_ls = cached.get("last_seen")
-        last_seen = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+        last_seen = r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
 
@@ -434,12 +429,12 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
                 "online": online,
                 "is_online": online,
                 "lastSeen": _last_seen_iso(last_seen),
-                "ai1": cached.get("ai1", r.ai1 if r.ai1 is not None else ""),
-                "ai2": cached.get("ai2", r.ai2 if r.ai2 is not None else ""),
-                "ai3": cached.get("ai3", r.ai3 if r.ai3 is not None else ""),
-                "ai4": cached.get("ai4", r.ai4 if r.ai4 is not None else ""),
-                "ao1": cached.get("ao1", r.ao1 if r.ao1 is not None else ""),
-                "ao2": cached.get("ao2", r.ao2 if r.ao2 is not None else ""),
+                "ai1": r.ai1 if r.ai1 is not None else "",
+                "ai2": r.ai2 if r.ai2 is not None else "",
+                "ai3": r.ai3 if r.ai3 is not None else "",
+                "ai4": r.ai4 if r.ai4 is not None else "",
+                "ao1": r.ao1 if r.ao1 is not None else "",
+                "ao2": r.ao2 if r.ao2 is not None else "",
             }
         )
 
@@ -451,9 +446,7 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
         .all()
     )
     for r in rows_tp4000:
-        cached = get_latest_tp4000(r.device_id) or {}
-        cache_ls = cached.get("last_seen")
-        last_seen = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+        last_seen = r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
 
@@ -467,14 +460,14 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
                 "online": online,
                 "is_online": online,
                 "lastSeen": _last_seen_iso(last_seen),
-                "te101": cached.get("te101", r.te101 if r.te101 is not None else ""),
-                "te102": cached.get("te102", r.te102 if r.te102 is not None else ""),
-                "te103": cached.get("te103", r.te103 if r.te103 is not None else ""),
-                "te104": cached.get("te104", r.te104 if r.te104 is not None else ""),
-                "te105": cached.get("te105", r.te105 if r.te105 is not None else ""),
-                "te106": cached.get("te106", r.te106 if r.te106 is not None else ""),
-                "te107": cached.get("te107", r.te107 if r.te107 is not None else ""),
-                "te108": cached.get("te108", r.te108 if r.te108 is not None else ""),
+                "te101": r.te101 if r.te101 is not None else "",
+                "te102": r.te102 if r.te102 is not None else "",
+                "te103": r.te103 if r.te103 is not None else "",
+                "te104": r.te104 if r.te104 is not None else "",
+                "te105": r.te105 if r.te105 is not None else "",
+                "te106": r.te106 if r.te106 is not None else "",
+                "te107": r.te107 if r.te107 is not None else "",
+                "te108": r.te108 if r.te108 is not None else "",
             }
         )
 
