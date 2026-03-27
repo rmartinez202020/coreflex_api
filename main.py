@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 from sqlalchemy.orm import Session
+from datetime import datetime, timezone
 import threading
 
 # ========================================
@@ -44,13 +45,11 @@ ALLOWED_ORIGINS = [
     "https://coreflexiiotsplatform.com",
     "http://www.coreflexiiotsplatform.com",
     "http://coreflexiiotsplatform.com",
-
     # ✅ optional older/alternate spelling support
     "https://www.coreflexiotsplatform.com",
     "https://coreflexiotsplatform.com",
     "http://www.coreflexiotsplatform.com",
     "http://coreflexiotsplatform.com",
-
     # ✅ local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -336,6 +335,36 @@ from models import (  # noqa: E402
     CustomerDashboard,
 )
 
+# ✅ Reuse live-cache + timeout logic
+from utils.zhc1921_live_cache import get_latest as get_latest_zhc1921  # noqa: E402
+from utils.zhc1661_live_cache import get_latest as get_latest_zhc1661  # noqa: E402
+from utils.tp4000_live_cache import get_latest as get_latest_tp4000  # noqa: E402
+
+OFFLINE_AFTER_SECONDS = 10
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _compute_online_status(last_seen: datetime | None) -> str:
+    ls = _as_utc(last_seen)
+    if not ls:
+        return "offline"
+
+    now = datetime.now(timezone.utc)
+    age = (now - ls).total_seconds()
+    return "online" if age <= OFFLINE_AFTER_SECONDS else "offline"
+
+
+def _last_seen_iso(last_seen: datetime | None) -> str:
+    ls = _as_utc(last_seen)
+    return ls.isoformat() if ls else "—"
+
 
 def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
     out = []
@@ -348,26 +377,36 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
         .all()
     )
     for r in rows_1921:
+        cached = get_latest_zhc1921(r.device_id) or {}
+        cache_ls = cached.get("last_seen")
+        last_seen = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+        status = _compute_online_status(last_seen)
+        online = status == "online"
+
         out.append(
             {
                 "model": "ZHC1921",
                 "deviceId": r.device_id,
                 "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
                 "ownedBy": r.claimed_by_email or "—",
-                "status": r.status or "offline",
-                "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
-                "in1": int(r.di1 or 0),
-                "in2": int(r.di2 or 0),
-                "in3": int(r.di3 or 0),
-                "in4": int(r.di4 or 0),
-                "do1": int(r.do1 or 0),
-                "do2": int(r.do2 or 0),
-                "do3": int(r.do3 or 0),
-                "do4": int(r.do4 or 0),
-                "ai1": r.ai1 if r.ai1 is not None else "",
-                "ai2": r.ai2 if r.ai2 is not None else "",
-                "ai3": r.ai3 if r.ai3 is not None else "",
-                "ai4": r.ai4 if r.ai4 is not None else "",
+                "status": status,
+                "online": online,
+                "is_online": online,
+                "lastSeen": _last_seen_iso(last_seen),
+                "in1": int(cached.get("di1", r.di1 or 0) or 0),
+                "in2": int(cached.get("di2", r.di2 or 0) or 0),
+                "in3": int(cached.get("di3", r.di3 or 0) or 0),
+                "in4": int(cached.get("di4", r.di4 or 0) or 0),
+                "in5": int(cached.get("di5", getattr(r, "di5", 0) or 0) or 0),
+                "in6": int(cached.get("di6", getattr(r, "di6", 0) or 0) or 0),
+                "do1": int(cached.get("do1", r.do1 or 0) or 0),
+                "do2": int(cached.get("do2", r.do2 or 0) or 0),
+                "do3": int(cached.get("do3", r.do3 or 0) or 0),
+                "do4": int(cached.get("do4", r.do4 or 0) or 0),
+                "ai1": cached.get("ai1", r.ai1 if r.ai1 is not None else ""),
+                "ai2": cached.get("ai2", r.ai2 if r.ai2 is not None else ""),
+                "ai3": cached.get("ai3", r.ai3 if r.ai3 is not None else ""),
+                "ai4": cached.get("ai4", r.ai4 if r.ai4 is not None else ""),
             }
         )
 
@@ -379,20 +418,28 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
         .all()
     )
     for r in rows_1661:
+        cached = get_latest_zhc1661(r.device_id) or {}
+        cache_ls = cached.get("last_seen")
+        last_seen = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+        status = _compute_online_status(last_seen)
+        online = status == "online"
+
         out.append(
             {
                 "model": "ZHC1661",
                 "deviceId": r.device_id,
                 "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
                 "ownedBy": r.claimed_by_email or "—",
-                "status": r.status or "offline",
-                "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
-                "ai1": r.ai1 if r.ai1 is not None else "",
-                "ai2": r.ai2 if r.ai2 is not None else "",
-                "ai3": r.ai3 if r.ai3 is not None else "",
-                "ai4": r.ai4 if r.ai4 is not None else "",
-                "ao1": r.ao1 if r.ao1 is not None else "",
-                "ao2": r.ao2 if r.ao2 is not None else "",
+                "status": status,
+                "online": online,
+                "is_online": online,
+                "lastSeen": _last_seen_iso(last_seen),
+                "ai1": cached.get("ai1", r.ai1 if r.ai1 is not None else ""),
+                "ai2": cached.get("ai2", r.ai2 if r.ai2 is not None else ""),
+                "ai3": cached.get("ai3", r.ai3 if r.ai3 is not None else ""),
+                "ai4": cached.get("ai4", r.ai4 if r.ai4 is not None else ""),
+                "ao1": cached.get("ao1", r.ao1 if r.ao1 is not None else ""),
+                "ao2": cached.get("ao2", r.ao2 if r.ao2 is not None else ""),
             }
         )
 
@@ -404,22 +451,30 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
         .all()
     )
     for r in rows_tp4000:
+        cached = get_latest_tp4000(r.device_id) or {}
+        cache_ls = cached.get("last_seen")
+        last_seen = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+        status = _compute_online_status(last_seen)
+        online = status == "online"
+
         out.append(
             {
                 "model": "TP4000",
                 "deviceId": r.device_id,
                 "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
                 "ownedBy": r.claimed_by_email or "—",
-                "status": r.status or "offline",
-                "lastSeen": r.last_seen.isoformat() if r.last_seen else "—",
-                "te101": r.te101 if r.te101 is not None else "",
-                "te102": r.te102 if r.te102 is not None else "",
-                "te103": r.te103 if r.te103 is not None else "",
-                "te104": r.te104 if r.te104 is not None else "",
-                "te105": r.te105 if r.te105 is not None else "",
-                "te106": r.te106 if r.te106 is not None else "",
-                "te107": r.te107 if r.te107 is not None else "",
-                "te108": r.te108 if r.te108 is not None else "",
+                "status": status,
+                "online": online,
+                "is_online": online,
+                "lastSeen": _last_seen_iso(last_seen),
+                "te101": cached.get("te101", r.te101 if r.te101 is not None else ""),
+                "te102": cached.get("te102", r.te102 if r.te102 is not None else ""),
+                "te103": cached.get("te103", r.te103 if r.te103 is not None else ""),
+                "te104": cached.get("te104", r.te104 if r.te104 is not None else ""),
+                "te105": cached.get("te105", r.te105 if r.te105 is not None else ""),
+                "te106": cached.get("te106", r.te106 if r.te106 is not None else ""),
+                "te107": cached.get("te107", r.te107 if r.te107 is not None else ""),
+                "te108": cached.get("te108", r.te108 if r.te108 is not None else ""),
             }
         )
 
