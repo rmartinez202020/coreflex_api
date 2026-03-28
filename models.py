@@ -314,6 +314,49 @@ class Device(Base):
     battery = Column(Float)
     last_update = Column(DateTime, default=datetime.datetime.utcnow)
 
+# ===============================
+# 🗂 DEVICE REGISTRY
+# Central source of truth for:
+# - device_id (serial number)
+# - device_model
+# - device_mac (stored lowercase)
+# ===============================
+class DeviceRegistry(Base):
+    __tablename__ = "device_registry"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # serial number / logical device identity
+    device_id = Column(String(64), nullable=False, unique=True, index=True)
+
+    # zhc1921 / zhc1661 / tp4000
+    device_model = Column(String(64), nullable=False, index=True)
+
+    # IMPORTANT: backend should always normalize/store lowercase
+    device_mac = Column(String(32), nullable=False, unique=True, index=True)
+
+    claimed_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    is_claimed = Column(Boolean, nullable=False, server_default=func.false())
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    claimed_by_user = relationship("User")
+
 
 # ===============================
 # 🧾 ZHC1921 DEVICES TABLE (CF-2000)

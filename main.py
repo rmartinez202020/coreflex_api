@@ -215,6 +215,17 @@ from routers.images import router as images_router  # noqa: E402
 app.include_router(images_router)
 
 # ========================================
+# ✅ DEVICE REGISTRY ROUTES
+# Central table for:
+# - device_id
+# - device_model
+# - device_mac
+# ========================================
+from routers.device_registry import router as device_registry_router  # noqa: E402
+
+app.include_router(device_registry_router)
+
+# ========================================
 # ✅ ZHC1921 DEVICES ROUTES (CF-2000)
 # ========================================
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
