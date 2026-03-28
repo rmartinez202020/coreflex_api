@@ -289,6 +289,52 @@ def update_device_registry_row(
     return row
 
 
+@router.delete("/by-device-id/{device_id}")
+def delete_device_registry_by_device_id(
+    device_id: str,
+    device_model: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Delete device registry row by device_id.
+    Optional device_model filter is recommended when deleting from a model page
+    like zhc1921 / zhc1661 / tp4000.
+    """
+    ensure_owner(current_user)
+
+    clean_device_id = str(device_id or "").strip()
+    clean_device_model = (
+        str(device_model or "").strip().lower() if device_model else None
+    )
+
+    if not clean_device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+
+    q = db.query(DeviceRegistry).filter(DeviceRegistry.device_id == clean_device_id)
+
+    if clean_device_model:
+        q = q.filter(DeviceRegistry.device_model == clean_device_model)
+
+    row = q.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Registry row not found")
+
+    deleted_id = row.id
+    deleted_device_id = row.device_id
+    deleted_device_model = row.device_model
+
+    db.delete(row)
+    db.commit()
+
+    return {
+        "ok": True,
+        "deleted_id": deleted_id,
+        "deleted_device_id": deleted_device_id,
+        "deleted_device_model": deleted_device_model,
+    }
+
+
 @router.delete("/{registry_id}")
 def delete_device_registry_row(
     registry_id: int,
