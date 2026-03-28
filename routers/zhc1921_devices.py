@@ -1,11 +1,10 @@
 # routers/zhc1921_devices.py
-from datetime import datetime, timezone
-import os
-
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
+from datetime import datetime, timezone
+import os
 
 from database import get_db
 from models import ZHC1921Device, User
@@ -175,36 +174,6 @@ def to_row_for_table(r: ZHC1921Device):
 # Import this in the route that serves /tenant-access/devices
 def serialize_zhc1921_device_row(r: ZHC1921Device):
     return to_row_for_table(r)
-
-
-# ✅ NEW: optional current-user resolver for routes that must support
-# BOTH normal JWT auth and tenant-header launch access.
-def get_current_user_optional(
-    db: Session = Depends(get_db),
-    authorization: str | None = Header(default=None, alias="Authorization"),
-):
-    auth = str(authorization or "").strip()
-    if not auth:
-        return None
-
-    if not auth.lower().startswith("bearer "):
-        return None
-
-    token = auth[7:].strip()
-    if not token:
-        return None
-
-    try:
-        # ✅ Most likely signature in auth_utils: get_current_user(token=..., db=...)
-        return get_current_user(token=token, db=db)
-    except TypeError:
-        try:
-            # ✅ Fallback in case the function expects db first or positional handling differs
-            return get_current_user(db=db, token=token)
-        except Exception:
-            return None
-    except Exception:
-        return None
 
 
 # =========================================================
@@ -483,47 +452,17 @@ def unclaim_zhc1921_device(
 
 
 # =========================================================
-# USER / TENANT: list devices for secure read path
-#
-# ✅ Private flow:
-#    - Authorization: Bearer <token>
-#    - returns devices claimed by that user
-#
-# ✅ Launch / tenant flow:
-#    - X-Tenant-Email / X-Tenant-Access
-#    - returns devices for that tenant branch
-#
-# NOTE:
-# This version assumes the tenant email can resolve to claimed_by_email.
-# If your tenant user email is different from the owner's claimed_by_email,
-# replace the tenant branch query with your tenant-to-owner mapping.
+# USER: list MY claimed devices (for the user's "Registered Devices" page)
 # =========================================================
 @router.get("/my-devices")
 def list_my_zhc1921_devices(
     db: Session = Depends(get_db),
-    current_user: User | None = Depends(get_current_user_optional),
-    x_tenant_email: str | None = Header(default=None, alias="X-Tenant-Email"),
-    x_tenant_access: str | None = Header(default=None, alias="X-Tenant-Access"),
+    current_user: User = Depends(get_current_user),
 ):
-    # ✅ normal logged-in private user
-    if current_user is not None:
-        rows = (
-            db.query(ZHC1921Device)
-            .filter(ZHC1921Device.claimed_by_user_id == current_user.id)
-            .order_by(ZHC1921Device.id.asc())
-            .all()
-        )
-        return [to_row_for_table(r) for r in rows]
-
-    # ✅ tenant/public launch flow
-    tenant_email_safe = str(x_tenant_email or "").strip().lower()
-    if tenant_email_safe:
-        rows = (
-            db.query(ZHC1921Device)
-            .filter(ZHC1921Device.claimed_by_email == tenant_email_safe)
-            .order_by(ZHC1921Device.id.asc())
-            .all()
-        )
-        return [to_row_for_table(r) for r in rows]
-
-    raise HTTPException(status_code=401, detail="Unauthorized")
+    rows = (
+        db.query(ZHC1921Device)
+        .filter(ZHC1921Device.claimed_by_user_id == current_user.id)
+        .order_by(ZHC1921Device.id.asc())
+        .all()
+    )
+    return [to_row_for_table(r) for r in rows]
