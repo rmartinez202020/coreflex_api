@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Boolean,
     UniqueConstraint,
+    Index,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
@@ -359,6 +360,83 @@ class DeviceRegistry(Base):
 
 
 # ===============================
+# 🌐 GATEWAY DEVICE SEEN
+# Stores gateway heartbeat / discovery data
+# ONLY for devices whose MAC matches device_registry
+# One row per (device_registry_id + gateway_id)
+# ===============================
+class GatewayDeviceSeen(Base):
+    __tablename__ = "gateway_device_seen"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    device_registry_id = Column(
+        Integer,
+        ForeignKey("device_registry.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # copied from device_registry for fast reads / snapshots
+    device_id = Column(String(64), nullable=False, index=True)
+    device_model = Column(String(64), nullable=False, index=True)
+    device_mac = Column(String(32), nullable=False, index=True)
+
+    # gateway info
+    gateway_id = Column(String(120), nullable=False, index=True)
+    gateway_hostname = Column(String(120), nullable=True)
+    gateway_tailscale_ip = Column(String(64), nullable=False)
+    gateway_interface = Column(String(50), nullable=True)
+
+    # device on local gateway LAN
+    device_local_ip = Column(String(64), nullable=True)
+    neighbor_state = Column(String(32), nullable=True)
+
+    # heartbeat / status
+    first_seen = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    last_seen = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    status = Column(String(32), nullable=False, server_default="online")
+
+    # raw JSON sent by gateway
+    raw_payload = Column(JSONB, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "device_registry_id",
+            "gateway_id",
+            name="uq_gateway_device_seen_registry_gateway",
+        ),
+        Index("ix_gateway_device_seen_mac", "device_mac"),
+        Index("ix_gateway_device_seen_gateway_id", "gateway_id"),
+        Index("ix_gateway_device_seen_last_seen", "last_seen"),
+    )
+
+    device_registry = relationship("DeviceRegistry")
+
+
+
+# ===============================
 # 🧾 ZHC1921 DEVICES TABLE (CF-2000)
 # Authorized by OWNER, then claimed by a USER
 # Live DI/DO/AI/status updated by Node-RED later
@@ -418,6 +496,13 @@ class ZHC1921Device(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    claimed_by_user = relationship("User")
+
+    gateway_seen_rows = relationship(
+        "GatewayDeviceSeen",
+        passive_deletes=True,
     )
 
     claimed_by_user = relationship("User", back_populates="zhc1921_devices")
