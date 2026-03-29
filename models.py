@@ -499,12 +499,6 @@ class ZHC1921Device(Base):
     )
 
     claimed_by_user = relationship("User")
-
-    gateway_seen_rows = relationship(
-        "GatewayDeviceSeen",
-        passive_deletes=True,
-    )
-
     claimed_by_user = relationship("User", back_populates="zhc1921_devices")
 
 
