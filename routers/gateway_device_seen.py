@@ -98,7 +98,7 @@ def gateway_device_seen(
             first_seen=incoming_first_seen,
             last_seen=incoming_last_seen,
             status=incoming_status,
-            raw_payload=payload.model_dump(),
+            raw_payload=payload.model_dump(mode="json"),
         )
         db.add(row)
     else:
@@ -113,7 +113,7 @@ def gateway_device_seen(
         row.neighbor_state = str(payload.neighbor_state or "").strip() or None
         row.last_seen = incoming_last_seen
         row.status = incoming_status
-        row.raw_payload = payload.model_dump()
+        row.raw_payload = payload.model_dump(mode="json")
 
         # keep earliest first_seen
         if not row.first_seen:
