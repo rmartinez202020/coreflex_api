@@ -226,6 +226,17 @@ from routers.device_registry import router as device_registry_router  # noqa: E4
 app.include_router(device_registry_router)
 
 # ========================================
+# ✅ GATEWAY DEVICE SEEN ROUTES
+# Receives gateway heartbeat / device-seen JSON
+# Only stores rows when MAC exists in device_registry
+# ========================================
+from routers.gateway_device_seen import (  # noqa: E402
+    router as gateway_device_seen_router,
+)
+
+app.include_router(gateway_device_seen_router)
+
+# ========================================
 # ✅ ZHC1921 DEVICES ROUTES (CF-2000)
 # ========================================
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
