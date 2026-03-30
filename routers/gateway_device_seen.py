@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 import os
 import re
 
-import requests
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -16,12 +15,8 @@ router = APIRouter(prefix="/gateway", tags=["Gateway Device Seen"])
 
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
-# Optional fallback only. Primary target is dynamic gateway_tailscale_ip.
-NODE_RED_BASE_URL = (os.getenv("NODE_RED_BASE_URL") or "").rstrip("/")
-NODE_RED_COMMAND_KEY = (os.getenv("NODE_RED_COMMAND_KEY") or "").strip()
 DEFAULT_DEVICE_PORT = int(os.getenv("CORELFEX_DEVICE_PORT", "502"))
 DEFAULT_UNIT_ID = int(os.getenv("CORELFEX_DEVICE_UNIT_ID", "1"))
-NODE_RED_PORT = int(os.getenv("CORELFEX_GATEWAY_NODERED_PORT", "1880"))
 
 
 def normalize_mac(mac: str) -> str:
@@ -37,66 +32,6 @@ def as_utc(dt):
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-def build_gateway_nodered_url(seen_row) -> str | None:
-    gateway_ip = str(seen_row.gateway_tailscale_ip or "").strip()
-    if gateway_ip:
-        return f"http://{gateway_ip}:{NODE_RED_PORT}/coreflex/register-device"
-
-    # Fallback only if dynamic gateway IP is missing
-    if NODE_RED_BASE_URL:
-        return f"{NODE_RED_BASE_URL}/coreflex/register-device"
-
-    return None
-
-
-def notify_nodered_register_device(registry_row, seen_row):
-    url = build_gateway_nodered_url(seen_row)
-    if not url:
-        print("⚠️ No Node-RED target available. Skipping Node-RED notify.")
-        return
-
-    device_ip = str(seen_row.device_local_ip or "").strip()
-    if not device_ip:
-        print("⚠️ device_local_ip is missing. Skipping Node-RED notify.")
-        return
-
-    payload = {
-        "action": "register_or_update_poller",
-        "device_registry_id": registry_row.id,
-        "device_id": registry_row.device_id,
-        "device_model": registry_row.device_model,
-        "device_mac": registry_row.device_mac,
-        "device_ip": device_ip,
-        "device_port": DEFAULT_DEVICE_PORT,
-        "unit_id": DEFAULT_UNIT_ID,
-        "gateway_id": seen_row.gateway_id,
-        "gateway_hostname": seen_row.gateway_hostname,
-        "gateway_tailscale_ip": seen_row.gateway_tailscale_ip,
-        "gateway_interface": seen_row.gateway_interface,
-        "neighbor_state": seen_row.neighbor_state,
-        "status": seen_row.status,
-        "poll_enabled": True,
-    }
-
-    headers = {"Content-Type": "application/json"}
-    if NODE_RED_COMMAND_KEY:
-        headers["x-coreflex-key"] = NODE_RED_COMMAND_KEY
-
-    print("\n========== NODE-RED REGISTER DEVICE ==========")
-    print("URL =", url)
-    print("PAYLOAD =", payload)
-    print("=============================================\n")
-
-    resp = requests.post(url, json=payload, headers=headers, timeout=5)
-
-    print("\n========== NODE-RED RESPONSE ==========")
-    print("status_code =", resp.status_code)
-    print("response =", resp.text)
-    print("======================================\n")
-
-    resp.raise_for_status()
 
 
 class GatewayDeviceSeenIn(BaseModel):
@@ -133,12 +68,27 @@ def gateway_device_seen(
         .first()
     )
 
-    # ✅ only accept/save if MAC exists in device_registry
+    # Only accept/save if MAC exists in device_registry
     if not registry_row:
         return {
             "ok": False,
             "status": "unregistered_device",
             "detail": "MAC not found in device_registry",
+            "poll_enabled": False,
+            "device_registry_id": None,
+            "device_id": None,
+            "device_model": None,
+            "device_mac": clean_mac,
+            "device_ip": str(payload.device_local_ip or "").strip() or None,
+            "device_port": DEFAULT_DEVICE_PORT,
+            "unit_id": DEFAULT_UNIT_ID,
+            "gateway_id": str(payload.gateway_id).strip(),
+            "gateway_hostname": str(payload.gateway_hostname or "").strip() or None,
+            "gateway_tailscale_ip": str(payload.gateway_tailscale_ip).strip(),
+            "gateway_interface": str(payload.gateway_interface or "").strip() or None,
+            "neighbor_state": str(payload.neighbor_state or "").strip() or None,
+            "status_value": str(payload.status or "online").strip().lower(),
+            "last_seen": None,
         }
 
     incoming_first_seen = as_utc(payload.first_seen) or datetime.now(timezone.utc)
@@ -153,12 +103,6 @@ def gateway_device_seen(
         .filter(GatewayDeviceSeen.gateway_id == payload.gateway_id)
         .first()
     )
-
-    is_new_row = row is None
-    old_device_local_ip = row.device_local_ip if row else None
-    old_status = str(row.status or "").strip().lower() if row else None
-    old_neighbor_state = str(row.neighbor_state or "").strip() if row else None
-    old_gateway_tailscale_ip = row.gateway_tailscale_ip if row else None
 
     if not row:
         row = GatewayDeviceSeen(
@@ -199,36 +143,37 @@ def gateway_device_seen(
         if hasattr(row, "updated_at"):
             row.updated_at = datetime.now(timezone.utc)
 
-    new_device_local_ip = str(row.device_local_ip or "").strip() or None
-    new_status = str(row.status or "").strip().lower()
-    new_neighbor_state = str(row.neighbor_state or "").strip() or None
-    new_gateway_tailscale_ip = str(row.gateway_tailscale_ip or "").strip() or None
-
-    should_notify_nodered = (
-        is_new_row
-        or old_device_local_ip != new_device_local_ip
-        or old_status != new_status
-        or old_neighbor_state != new_neighbor_state
-        or old_gateway_tailscale_ip != new_gateway_tailscale_ip
-    )
-
     db.commit()
     db.refresh(row)
 
-    if should_notify_nodered:
-        try:
-            notify_nodered_register_device(registry_row, row)
-        except Exception as e:
-            print(f"❌ Failed to notify Node-RED: {e}")
+    # Backend decision:
+    # If device is registered in device_registry, gateway should poll it.
+    poll_enabled = True
 
     return {
         "ok": True,
         "status": "accepted",
+        "poll_enabled": poll_enabled,
+
+        # Device identity / registry
         "device_registry_id": registry_row.id,
         "device_id": registry_row.device_id,
         "device_model": registry_row.device_model,
         "device_mac": registry_row.device_mac,
+
+        # Device comms info for gateway/local Node-RED
+        "device_ip": str(row.device_local_ip or "").strip() or None,
+        "device_port": DEFAULT_DEVICE_PORT,
+        "unit_id": DEFAULT_UNIT_ID,
+
+        # Gateway context
         "gateway_id": row.gateway_id,
+        "gateway_hostname": row.gateway_hostname,
+        "gateway_tailscale_ip": row.gateway_tailscale_ip,
+        "gateway_interface": row.gateway_interface,
+
+        # Discovery/network state
+        "neighbor_state": str(row.neighbor_state or "").strip() or None,
+        "status_value": str(row.status or "").strip().lower(),
         "last_seen": row.last_seen.isoformat() if row.last_seen else None,
-        "nodered_notified": should_notify_nodered,
     }
