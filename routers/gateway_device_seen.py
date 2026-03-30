@@ -16,10 +16,12 @@ router = APIRouter(prefix="/gateway", tags=["Gateway Device Seen"])
 
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
+# Optional fallback only. Primary target is dynamic gateway_tailscale_ip.
 NODE_RED_BASE_URL = (os.getenv("NODE_RED_BASE_URL") or "").rstrip("/")
 NODE_RED_COMMAND_KEY = (os.getenv("NODE_RED_COMMAND_KEY") or "").strip()
 DEFAULT_DEVICE_PORT = int(os.getenv("CORELFEX_DEVICE_PORT", "502"))
 DEFAULT_UNIT_ID = int(os.getenv("CORELFEX_DEVICE_UNIT_ID", "1"))
+NODE_RED_PORT = int(os.getenv("CORELFEX_GATEWAY_NODERED_PORT", "1880"))
 
 
 def normalize_mac(mac: str) -> str:
@@ -37,17 +39,28 @@ def as_utc(dt):
     return dt.astimezone(timezone.utc)
 
 
+def build_gateway_nodered_url(seen_row) -> str | None:
+    gateway_ip = str(seen_row.gateway_tailscale_ip or "").strip()
+    if gateway_ip:
+        return f"http://{gateway_ip}:{NODE_RED_PORT}/coreflex/register-device"
+
+    # Fallback only if dynamic gateway IP is missing
+    if NODE_RED_BASE_URL:
+        return f"{NODE_RED_BASE_URL}/coreflex/register-device"
+
+    return None
+
+
 def notify_nodered_register_device(registry_row, seen_row):
-    if not NODE_RED_BASE_URL:
-        print("⚠️ NODE_RED_BASE_URL is not configured. Skipping Node-RED notify.")
+    url = build_gateway_nodered_url(seen_row)
+    if not url:
+        print("⚠️ No Node-RED target available. Skipping Node-RED notify.")
         return
 
     device_ip = str(seen_row.device_local_ip or "").strip()
     if not device_ip:
         print("⚠️ device_local_ip is missing. Skipping Node-RED notify.")
         return
-
-    url = f"{NODE_RED_BASE_URL}/coreflex/register-device"
 
     payload = {
         "action": "register_or_update_poller",
