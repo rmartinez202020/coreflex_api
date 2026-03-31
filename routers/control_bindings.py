@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from auth_utils import get_current_user  # ✅ FIX (was auth_routes)
-from models import ControlBinding, ZHC1921Device, ControlActionLock
+from models import (
+    ControlBinding,
+    ZHC1921Device,
+    ControlActionLock,
+    GatewayDeviceSeen,  # ✅ NEW
+)
 
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
@@ -24,6 +29,7 @@ ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
 
 # ✅ Node-RED endpoint that will perform the actual DO write
+# This is your MAIN Node-RED bridge endpoint
 NODE_RED_DO_WRITE_URL = os.getenv(
     "NODE_RED_DO_WRITE_URL",
     "http://98.90.225.131:1880/coreflex/command",
@@ -181,6 +187,62 @@ def _cleanup_expired_locks(db: Session) -> None:
         db.commit()
     except Exception:
         db.rollback()
+
+
+# ===============================
+# 🌐 Gateway-device-seen helpers
+# ===============================
+def _pick_gateway_seen_row(
+    db: Session,
+    device_id: str,
+) -> Optional[GatewayDeviceSeen]:
+    """
+    Pick the best current GatewayDeviceSeen row for a device:
+    1) Prefer latest ONLINE row
+    2) Otherwise latest row of any status
+    """
+    rows = (
+        db.query(GatewayDeviceSeen)
+        .filter(GatewayDeviceSeen.device_id == device_id)
+        .order_by(GatewayDeviceSeen.last_seen.desc())
+        .all()
+    )
+
+    if not rows:
+        return None
+
+    for row in rows:
+        status = _as_str(getattr(row, "status", "")).lower()
+        if status == "online":
+            return row
+
+    return rows[0]
+
+
+def _serialize_gateway_seen_row(row: Optional[GatewayDeviceSeen]) -> dict:
+    if not row:
+        return {
+            "gateway_id": None,
+            "gateway_hostname": None,
+            "gateway_tailscale_ip": None,
+            "gateway_interface": None,
+            "device_local_ip": None,
+            "device_model": None,
+            "gateway_status": None,
+            "gateway_last_seen": None,
+        }
+
+    last_seen = getattr(row, "last_seen", None)
+    return {
+        "gateway_id": _as_str(getattr(row, "gateway_id", None)) or None,
+        "gateway_hostname": _as_str(getattr(row, "gateway_hostname", None)) or None,
+        "gateway_tailscale_ip": _as_str(getattr(row, "gateway_tailscale_ip", None)) or None,
+        "gateway_interface": _as_str(getattr(row, "gateway_interface", None)) or None,
+        "device_local_ip": _as_str(getattr(row, "device_local_ip", None)) or None,
+        "device_model": _as_str(getattr(row, "device_model", None)) or None,
+        "gateway_status": _as_str(getattr(row, "status", None)).lower() or None,
+        "gateway_last_seen": last_seen.isoformat() if last_seen else None,
+    }
 
 
 # ===============================
@@ -479,6 +541,41 @@ def write_control_do(
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
 
+    # 2.5) ✅ NEW: find latest gateway/device-seen route info by serial/device_id
+    gw_seen = _pick_gateway_seen_row(db, device_id)
+    if not gw_seen:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Device route not found",
+                "deviceId": device_id,
+                "message": "Device has not been seen by any gateway yet.",
+            },
+        )
+
+    gw_info = _serialize_gateway_seen_row(gw_seen)
+
+    # Strong safety checks for bridge forwarding
+    if not gw_info["gateway_tailscale_ip"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Missing gateway Tailscale IP",
+                "deviceId": device_id,
+                "message": "Gateway route exists but gateway_tailscale_ip is empty.",
+            },
+        )
+
+    if not gw_info["device_local_ip"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Missing device local IP",
+                "deviceId": device_id,
+                "message": "Gateway route exists but device_local_ip is empty.",
+            },
+        )
+
     # 3) do1..do4 -> 1..4
     try:
         do_num = int(field.replace("do", ""))
@@ -491,7 +588,7 @@ def write_control_do(
     # 4) value01 -> boolean (matches your Node-RED inject true/false)
     value_bool = True if int(req.value01) == 1 else False
 
-    # 5) forward to node-red (WAIT for response, short)
+    # 5) forward to node-red bridge (WAIT for response, short)
     if not NODE_RED_DO_WRITE_URL:
         _raise_node_red_not_configured()
 
@@ -526,9 +623,20 @@ def write_control_do(
             },
         )
 
+    # ✅ NEW:
+    # Backend already knows the route from gateway_device_seen,
+    # so include the remaining bridge-forwarding information here.
     payload = {
         "request_id": request_id,
         "device_id": device_id,
+        "device_model": gw_info["device_model"] or _as_str(getattr(device, "device_model", None)) or "zhc1921",
+        "gateway_id": gw_info["gateway_id"],
+        "gateway_hostname": gw_info["gateway_hostname"],
+        "gateway_tailscale_ip": gw_info["gateway_tailscale_ip"],
+        "gateway_interface": gw_info["gateway_interface"],
+        "device_local_ip": gw_info["device_local_ip"],
+        "gateway_status": gw_info["gateway_status"],
+        "gateway_last_seen": gw_info["gateway_last_seen"],
         "do": do_num,
         "value": value_bool,
         "dashboard_id": dash_id,
@@ -554,5 +662,13 @@ def write_control_do(
         "field": field,
         "value01": int(req.value01),
         "actuationHoldMs": ACTUATION_HOLD_MS,
+        "gatewayId": gw_info["gateway_id"],
+        "gatewayHostname": gw_info["gateway_hostname"],
+        "gatewayTailscaleIp": gw_info["gateway_tailscale_ip"],
+        "gatewayInterface": gw_info["gateway_interface"],
+        "deviceLocalIp": gw_info["device_local_ip"],
+        "deviceModel": gw_info["device_model"] or _as_str(getattr(device, "device_model", None)) or "zhc1921",
+        "gatewayStatus": gw_info["gateway_status"],
+        "gatewayLastSeen": gw_info["gateway_last_seen"],
         **result,
     }
