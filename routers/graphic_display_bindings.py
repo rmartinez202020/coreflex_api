@@ -12,6 +12,7 @@ from models import (
     TenantUser,
     TenantUserDashboardAccess,
     CustomerDashboard,
+    GatewayDeviceSeen,
 )
 
 router = APIRouter(prefix="/graphic-display-bindings", tags=["Graphic Display Bindings"])
@@ -481,6 +482,47 @@ def upsert_graphic_display_binding(
         try:
             from routers.node_red_graphics import start_graphic_stream
 
+            seen = (
+                db.query(GatewayDeviceSeen)
+                .filter(GatewayDeviceSeen.device_id == row.bind_device_id)
+                .order_by(
+                    GatewayDeviceSeen.last_seen.desc(),
+                    GatewayDeviceSeen.id.desc(),
+                )
+                .first()
+            )
+
+            gateway_id = str(getattr(seen, "gateway_id", "") or "").strip()
+            gateway_tailscale_ip = str(
+                getattr(seen, "gateway_tailscale_ip", "") or ""
+            ).strip()
+            device_local_ip = str(
+                getattr(seen, "device_local_ip", "") or ""
+            ).strip()
+            gateway_status = str(getattr(seen, "status", "") or "").strip().lower()
+            device_mac = str(getattr(seen, "device_mac", "") or "").strip()
+
+            source_mode = (
+                "gateway"
+                if gateway_tailscale_ip and device_local_ip
+                else "local"
+            )
+
+            _dbg(
+                "GRAPHIC STREAM ROUTE LOOKUP",
+                user_id=current_user.id,
+                dashboard_id=row.dashboard_id,
+                widget_id=row.widget_id,
+                bind_device_id=row.bind_device_id,
+                gateway_found=bool(seen),
+                gateway_id=gateway_id,
+                gateway_tailscale_ip=gateway_tailscale_ip,
+                device_local_ip=device_local_ip,
+                gateway_status=gateway_status,
+                device_mac=device_mac,
+                source_mode=source_mode,
+            )
+
             start_graphic_stream(
                 user_id=current_user.id,
                 dash_id=row.dashboard_id,
@@ -488,6 +530,12 @@ def upsert_graphic_display_binding(
                 bind_model=row.bind_model,
                 device_id=row.bind_device_id,
                 field=row.bind_field,
+                source_mode=source_mode,
+                gateway_id=gateway_id,
+                gateway_tailscale_ip=gateway_tailscale_ip,
+                gateway_local_device_ip=device_local_ip,
+                gateway_status=gateway_status,
+                mac_address=device_mac,
                 title=row.title,
                 time_unit=row.time_unit,
                 window_size=row.window_size,
