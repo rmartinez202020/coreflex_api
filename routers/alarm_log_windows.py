@@ -4,9 +4,19 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from auth_utils import get_current_user
-from models import User, AlarmLogWindow
+from models import (
+    User,
+    AlarmLogWindow,
+    CustomerDashboard,
+    TenantUser,
+    TenantUserDashboardAccess,
+)
 
 router = APIRouter(prefix="/alarm-log-windows", tags=["Alarm Log Windows"])
+
+
+def _norm(value) -> str:
+    return str(value or "").strip()
 
 
 class UpsertAlarmLogWindowBody(BaseModel):
@@ -35,9 +45,9 @@ def upsert_alarm_log_window(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    dashboard_id = str(body.dashboard_id or "main").strip() or "main"
-    dashboard_name = str(body.dashboard_name or "").strip() or "Main Dashboard"
-    window_key = str(body.window_key or "alarmLog").strip() or "alarmLog"
+    dashboard_id = _norm(body.dashboard_id) or "main"
+    dashboard_name = _norm(body.dashboard_name) or "Main Dashboard"
+    window_key = _norm(body.window_key) or "alarmLog"
 
     print("🚨 ALARM LOG UPSERT HIT")
     print(
@@ -147,8 +157,8 @@ def delete_alarm_log_window(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    dashboard_id = str(body.dashboard_id or "main").strip() or "main"
-    window_key = str(body.window_key or "alarmLog").strip() or "alarmLog"
+    dashboard_id = _norm(body.dashboard_id) or "main"
+    window_key = _norm(body.window_key) or "alarmLog"
 
     print("🗑️ ALARM LOG DELETE HIT")
     print("🗑️ current_user.id =", current_user.id)
@@ -210,8 +220,8 @@ def get_alarm_log_window(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    dashboard_id = str(dashboard_id or "main").strip() or "main"
-    window_key = str(window_key or "alarmLog").strip() or "alarmLog"
+    dashboard_id = _norm(dashboard_id) or "main"
+    window_key = _norm(window_key) or "alarmLog"
 
     print("🔎 ALARM LOG GET BY DASHBOARD HIT")
     print("🔎 current_user.id =", current_user.id)
@@ -260,4 +270,143 @@ def get_alarm_log_window(
         raise HTTPException(
             status_code=500,
             detail=f"Alarm log fetch failed: {repr(e)}",
+        )
+
+
+# ✅ NEW: public/tenant-aware alarm log availability check
+@router.get("/public/by-dashboard")
+def get_public_alarm_log_window(
+    dashboard_slug: str,
+    public_launch_id: str,
+    tenant_email: str,
+    window_key: str = "alarmLog",
+    db: Session = Depends(get_db),
+):
+    dashboard_slug = _norm(dashboard_slug)
+    public_launch_id = _norm(public_launch_id)
+    tenant_email = _norm(tenant_email).lower()
+    window_key = _norm(window_key) or "alarmLog"
+
+    print("🌐 ALARM LOG PUBLIC GET HIT")
+    print("🌐 dashboard_slug =", dashboard_slug)
+    print("🌐 public_launch_id =", public_launch_id)
+    print("🌐 tenant_email =", tenant_email)
+    print("🌐 window_key =", window_key)
+
+    if not dashboard_slug or not public_launch_id or not tenant_email:
+        raise HTTPException(
+            status_code=400,
+            detail="dashboard_slug, public_launch_id, and tenant_email are required.",
+        )
+
+    try:
+        dashboard = (
+            db.query(CustomerDashboard)
+            .filter(CustomerDashboard.dashboard_slug == dashboard_slug)
+            .filter(CustomerDashboard.public_launch_id == public_launch_id)
+            .first()
+        )
+
+        print("🌐 dashboard found =", bool(dashboard))
+
+        if not dashboard:
+            raise HTTPException(
+                status_code=404,
+                detail="Public dashboard not found or no longer available.",
+            )
+
+        owner_user_id = getattr(dashboard, "user_id", None)
+        dashboard_id = getattr(dashboard, "id", None)
+
+        if owner_user_id is None or dashboard_id is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Dashboard configuration is invalid.",
+            )
+
+        tenant = (
+            db.query(TenantUser)
+            .filter(TenantUser.owner_user_id == owner_user_id)
+            .filter(TenantUser.email.ilike(tenant_email))
+            .first()
+        )
+
+        print("🌐 tenant found =", bool(tenant))
+
+        if not tenant:
+            raise HTTPException(
+                status_code=403,
+                detail="Tenant user is not authorized for this dashboard.",
+            )
+
+        if not bool(getattr(tenant, "is_active", True)):
+            raise HTTPException(
+                status_code=403,
+                detail="Tenant user is inactive.",
+            )
+
+        access_row = (
+            db.query(TenantUserDashboardAccess)
+            .filter(TenantUserDashboardAccess.tenant_user_id == tenant.id)
+            .filter(TenantUserDashboardAccess.dashboard_id == dashboard_id)
+            .first()
+        )
+
+        print("🌐 tenant dashboard access found =", bool(access_row))
+
+        if not access_row:
+            raise HTTPException(
+                status_code=403,
+                detail="Tenant user does not have access to this dashboard.",
+            )
+
+        row = (
+            db.query(AlarmLogWindow)
+            .filter(
+                AlarmLogWindow.user_id == owner_user_id,
+                AlarmLogWindow.dashboard_id == str(dashboard_id),
+                AlarmLogWindow.window_key == window_key,
+            )
+            .first()
+        )
+
+        print("🌐 public alarm row found =", bool(row))
+
+        if not row:
+            return {
+                "ok": True,
+                "found": False,
+                "dashboard_id": str(dashboard_id),
+                "dashboard_name": _norm(getattr(dashboard, "dashboard_name", "")),
+                "window_key": window_key,
+            }
+
+        result = {
+            "ok": True,
+            "found": True,
+            "id": row.id,
+            "user_id": row.user_id,
+            "dashboard_id": row.dashboard_id,
+            "dashboard_name": row.dashboard_name,
+            "window_key": row.window_key,
+            "title": row.title,
+            "pos_x": row.pos_x,
+            "pos_y": row.pos_y,
+            "width": row.width,
+            "height": row.height,
+            "is_open": row.is_open,
+            "is_minimized": row.is_minimized,
+            "is_launched": row.is_launched,
+        }
+
+        print("🌐 returning public row =", result)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ alarm_log_windows public by-dashboard failed:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Public alarm log fetch failed: {repr(e)}",
         )
