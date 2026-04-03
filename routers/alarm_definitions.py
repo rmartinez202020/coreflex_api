@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from sqlalchemy.orm import Session
 from database import get_db
 from auth_utils import get_current_user
@@ -9,11 +9,93 @@ router = APIRouter(prefix="/alarm-definitions", tags=["Alarm Definitions"])
 
 
 # ==========================================
-# SMALL HELPER
+# SMALL HELPERS
 # ==========================================
 def StringOrNone(value):
     s = str(value).strip() if value is not None else ""
     return s or None
+
+
+def _resolve_request_user_id(
+    db: Session,
+    current_user,
+    tenant_email: str = "",
+    dashboard_slug: str = "",
+    public_launch_id: str = "",
+):
+    # ✅ Owner-auth mode
+    if current_user is not None:
+        return current_user.id
+
+    # ✅ Public tenant mode
+    email = StringOrNone(tenant_email)
+    slug = StringOrNone(dashboard_slug)
+    launch_id = StringOrNone(public_launch_id)
+
+    if email:
+        email = email.lower()
+
+    if not email or not slug or not launch_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated and missing public tenant headers.",
+        )
+
+    dashboard = (
+        db.query(models.CustomerDashboard)
+        .filter(models.CustomerDashboard.dashboard_slug == slug)
+        .filter(models.CustomerDashboard.public_launch_id == launch_id)
+        .first()
+    )
+
+    if not dashboard:
+        raise HTTPException(
+            status_code=404,
+            detail="Public dashboard not found or no longer available.",
+        )
+
+    owner_user_id = getattr(dashboard, "user_id", None)
+    dashboard_id = getattr(dashboard, "id", None)
+
+    if owner_user_id is None or dashboard_id is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Dashboard configuration is invalid.",
+        )
+
+    tenant = (
+        db.query(models.TenantUser)
+        .filter(models.TenantUser.owner_user_id == owner_user_id)
+        .filter(models.TenantUser.email.ilike(email))
+        .first()
+    )
+
+    if not tenant:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user is not authorized for this dashboard.",
+        )
+
+    if not bool(getattr(tenant, "is_active", True)):
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user is inactive.",
+        )
+
+    access_row = (
+        db.query(models.TenantUserDashboardAccess)
+        .filter(models.TenantUserDashboardAccess.tenant_user_id == tenant.id)
+        .filter(models.TenantUserDashboardAccess.dashboard_id == dashboard_id)
+        .first()
+    )
+
+    if not access_row:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user does not have access to this dashboard.",
+        )
+
+    return owner_user_id
 
 
 # ==========================================
@@ -83,18 +165,29 @@ def create_alarm_definition(
 
 
 # ==========================================
-# GET USER ALARMS (FIXED 🔥)
+# GET USER ALARMS (OWNER + PUBLIC TENANT SUPPORT)
 # ==========================================
 @router.get("/")
 def get_user_alarm_definitions(
     alarm_log_key: str = Query("alarmLog"),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    x_tenant_email: str | None = Header(default=None, alias="x-tenant-email"),
+    x_dashboard_slug: str | None = Header(default=None, alias="x-dashboard-slug"),
+    x_public_launch_id: str | None = Header(default=None, alias="x-public-launch-id"),
+    current_user: models.User | None = Depends(get_current_user),
 ):
+    request_user_id = _resolve_request_user_id(
+        db=db,
+        current_user=current_user,
+        tenant_email=x_tenant_email or "",
+        dashboard_slug=x_dashboard_slug or "",
+        public_launch_id=x_public_launch_id or "",
+    )
+
     alarms = (
         db.query(models.AlarmDefinition)
-        .filter(models.AlarmDefinition.user_id == current_user.id)
-        .filter(models.AlarmDefinition.alarm_log_key == alarm_log_key)  # 🔥 FIX
+        .filter(models.AlarmDefinition.user_id == request_user_id)
+        .filter(models.AlarmDefinition.alarm_log_key == alarm_log_key)
         .order_by(models.AlarmDefinition.id.asc())
         .all()
     )

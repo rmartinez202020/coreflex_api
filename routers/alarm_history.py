@@ -1,11 +1,13 @@
 # routers/alarm_history.py
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 import requests
+from sqlalchemy.orm import Session
 
 from auth_utils import get_current_user
-from models import User
+from database import get_db
+from models import User, CustomerDashboard, TenantUser, TenantUserDashboardAccess
 
 router = APIRouter(prefix="/alarm-history", tags=["Alarm History"])
 
@@ -17,21 +19,116 @@ class AlarmHistoryReadBody(BaseModel):
     alarm_log_key: str
 
 
+def _norm(v):
+    return str(v or "").strip()
+
+
+def _resolve_request_user_id(
+    db: Session,
+    current_user: User | None,
+    tenant_email: str = "",
+    dashboard_slug: str = "",
+    public_launch_id: str = "",
+):
+    # ✅ Owner-auth mode
+    if current_user is not None:
+      return current_user.id
+
+    # ✅ Public tenant mode
+    email = _norm(tenant_email).lower()
+    slug = _norm(dashboard_slug)
+    launch_id = _norm(public_launch_id)
+
+    if not email or not slug or not launch_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated and missing public tenant headers.",
+        )
+
+    dashboard = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.dashboard_slug == slug)
+        .filter(CustomerDashboard.public_launch_id == launch_id)
+        .first()
+    )
+
+    if not dashboard:
+        raise HTTPException(
+            status_code=404,
+            detail="Public dashboard not found or no longer available.",
+        )
+
+    owner_user_id = getattr(dashboard, "user_id", None)
+    dashboard_id = getattr(dashboard, "id", None)
+
+    if owner_user_id is None or dashboard_id is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Dashboard configuration is invalid.",
+        )
+
+    tenant = (
+        db.query(TenantUser)
+        .filter(TenantUser.owner_user_id == owner_user_id)
+        .filter(TenantUser.email.ilike(email))
+        .first()
+    )
+
+    if not tenant:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user is not authorized for this dashboard.",
+        )
+
+    if not bool(getattr(tenant, "is_active", True)):
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user is inactive.",
+        )
+
+    access_row = (
+        db.query(TenantUserDashboardAccess)
+        .filter(TenantUserDashboardAccess.tenant_user_id == tenant.id)
+        .filter(TenantUserDashboardAccess.dashboard_id == dashboard_id)
+        .first()
+    )
+
+    if not access_row:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant user does not have access to this dashboard.",
+        )
+
+    return owner_user_id
+
+
 @router.post("/read")
 def read_alarm_history(
     body: AlarmHistoryReadBody,
-    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_tenant_email: str | None = Header(default=None, alias="x-tenant-email"),
+    x_dashboard_slug: str | None = Header(default=None, alias="x-dashboard-slug"),
+    x_public_launch_id: str | None = Header(default=None, alias="x-public-launch-id"),
+    current_user: User | None = Depends(get_current_user),
 ):
     alarm_log_key = str(body.alarm_log_key or "").strip()
 
     if not alarm_log_key:
         raise HTTPException(status_code=400, detail="alarm_log_key is required")
 
+    request_user_id = _resolve_request_user_id(
+        db=db,
+        current_user=current_user,
+        tenant_email=x_tenant_email or "",
+        dashboard_slug=x_dashboard_slug or "",
+        public_launch_id=x_public_launch_id or "",
+    )
+
     try:
         res = requests.post(
             NODE_RED_READ_URL,
             json={
-                "user_id": current_user.id,
+                "user_id": request_user_id,
                 "alarm_log_key": alarm_log_key,
             },
             headers={
@@ -41,9 +138,7 @@ def read_alarm_history(
             timeout=5,
         )
 
-        # ✅ NEW:
-        # If Node-RED/file is not ready yet, treat it as "no history yet"
-        # instead of surfacing a hard error to the UI.
+        # ✅ If Node-RED/file is not ready yet, treat it as empty history
         if not res.ok:
             status = int(res.status_code or 0)
             text = str(res.text or "").strip().lower()
@@ -71,8 +166,6 @@ def read_alarm_history(
         try:
             data = res.json()
         except Exception:
-            # ✅ NEW:
-            # Empty/non-json response from a new log should behave like empty history.
             raw_text = str(getattr(res, "text", "") or "").strip()
             if raw_text == "":
                 return []
@@ -82,13 +175,11 @@ def read_alarm_history(
                 detail="Node-RED returned non-JSON response",
             )
 
-        # ✅ NEW:
-        # Allow a few safe shapes and normalize all of them to a list.
+        # ✅ Normalize safe payloads to a list
         if isinstance(data, list):
             return data
 
         if isinstance(data, dict):
-            # common payload shapes
             if isinstance(data.get("items"), list):
                 return data.get("items") or []
 
@@ -98,7 +189,6 @@ def read_alarm_history(
             if isinstance(data.get("rows"), list):
                 return data.get("rows") or []
 
-            # explicit empty / no-file style payloads
             if data.get("success") is True and (
                 data.get("items") is None
                 or data.get("history") is None
@@ -133,9 +223,6 @@ def read_alarm_history(
     except HTTPException:
         raise
     except requests.Timeout:
-        # ✅ NEW:
-        # For a brand-new alarm log with no history file yet, timeout should not
-        # scream red error in the UI. Treat it as empty history for now.
         return []
     except requests.RequestException as e:
         raise HTTPException(
