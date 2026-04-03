@@ -104,6 +104,22 @@ def _parse_bearer_token(request: Request) -> str:
     return token
 
 
+def _parse_bearer_token_optional(request: Request) -> str | None:
+    auth = (request.headers.get("Authorization") or "").strip()
+    if not auth:
+        return None
+
+    parts = auth.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+
+    token = parts[1].strip()
+    if not token or token.lower() in {"null", "undefined"}:
+        return None
+
+    return token
+
+
 def _cache_get(token: str):
     now = time.time()
     with _CACHE_LOCK:
@@ -135,35 +151,41 @@ def _cache_set(token: str, user_id: int, email: str, ttl_sec: float):
         _TOKEN_USER_CACHE[token] = (int(user_id), str(email), exp)
 
 
-def get_current_user(
-    request: Request,
-    db: Session = Depends(get_db),
+def _build_user_like_from_token(
+    token: str,
+    db: Session,
+    *,
+    strict: bool,
 ):
     """
-    ✅ Fast path:
-      - Validate JWT signature every request
-      - Avoid DB lookup when token is already cached
-    Returns a lightweight "user-like" object with .id and .email at minimum.
-    (This is enough for your routers: claimed_by_user_id checks, is_owner(email), etc.)
+    Shared JWT -> lightweight user resolver.
+    strict=True  => raise 401 on invalid/missing user
+    strict=False => return None on invalid/missing user
     """
-    token = _parse_bearer_token(request)
+    if not token:
+        if strict:
+            raise _credentials_exception()
+        return None
 
-    # 1) Always decode/verify JWT signature (security stays intact)
+    # 1) Always decode/verify JWT signature
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
-        raise _credentials_exception()
+        if strict:
+            raise _credentials_exception()
+        return None
 
     email: str = normalize_email(payload.get("sub"))
     if not email:
-        raise _credentials_exception()
+        if strict:
+            raise _credentials_exception()
+        return None
 
-    # If token has "uid", we can skip DB entirely (optional optimization)
+    # Optional optimization: uid embedded in JWT
     uid = payload.get("uid") or payload.get("user_id")
     if uid is not None:
         try:
             uid_int = int(uid)
-            # cache based on JWT exp if present
             exp_claim = payload.get("exp")
             ttl = DEFAULT_CACHE_TTL_SEC
             if exp_claim:
@@ -171,23 +193,22 @@ def get_current_user(
             _cache_set(token, uid_int, email, ttl)
             return SimpleNamespace(id=uid_int, email=email)
         except Exception:
-            # fall back to normal lookup below
             pass
 
-    # 2) Cache hit (no DB)
+    # 2) Cache hit
     cached = _cache_get(token)
     if cached:
         user_id, cached_email = cached
-        # if email mismatch somehow, do not trust cache
         if cached_email == email:
             return SimpleNamespace(id=user_id, email=email)
 
-    # 3) Cache miss → one DB lookup, then cache it
+    # 3) Cache miss -> DB lookup
     user = db.query(User).filter(User.email == email).first()
     if user is None:
-        raise _credentials_exception()
+        if strict:
+            raise _credentials_exception()
+        return None
 
-    # TTL: prefer JWT exp if present, else DEFAULT_CACHE_TTL_SEC
     ttl = DEFAULT_CACHE_TTL_SEC
     exp_claim = payload.get("exp")
     if exp_claim:
@@ -197,6 +218,37 @@ def get_current_user(
             ttl = DEFAULT_CACHE_TTL_SEC
 
     _cache_set(token, int(user.id), normalize_email(user.email), ttl)
-
-    # return lightweight user-like object (avoid returning ORM object tied to session)
     return SimpleNamespace(id=int(user.id), email=normalize_email(user.email))
+
+
+def get_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    ✅ Strict auth:
+      - Requires bearer token
+      - Validates JWT signature every request
+      - Avoids DB lookup when token is already cached
+    Returns a lightweight "user-like" object with .id and .email at minimum.
+    """
+    token = _parse_bearer_token(request)
+    return _build_user_like_from_token(token, db, strict=True)
+
+
+def get_current_user_optional(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    ✅ Optional auth:
+      - Returns None if no bearer token is present
+      - Returns None if token is invalid
+      - Returns lightweight user-like object on success
+
+    Use this on mixed routes that support:
+      1) owner JWT auth
+      2) public tenant/header-based access
+    """
+    token = _parse_bearer_token_optional(request)
+    return _build_user_like_from_token(token, db, strict=False)
