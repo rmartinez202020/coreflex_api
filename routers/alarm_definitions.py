@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from sqlalchemy.orm import Session
 from database import get_db
-from auth_utils import get_current_user
+from auth_utils import get_current_user, get_current_user_optional
 import models
 from datetime import datetime
 
@@ -145,10 +145,7 @@ def create_alarm_definition(
         severity=payload.get("severity"),
         message=payload["message"],
         enabled=payload.get("enabled", True),
-
-        # 🔥 IMPORTANT
         alarm_log_key=alarm_log_key,
-
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -174,7 +171,7 @@ def get_user_alarm_definitions(
     x_tenant_email: str | None = Header(default=None, alias="x-tenant-email"),
     x_dashboard_slug: str | None = Header(default=None, alias="x-dashboard-slug"),
     x_public_launch_id: str | None = Header(default=None, alias="x-public-launch-id"),
-    current_user: models.User | None = Depends(get_current_user),
+    current_user: models.User | None = Depends(get_current_user_optional),
 ):
     request_user_id = _resolve_request_user_id(
         db=db,

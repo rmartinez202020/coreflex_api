@@ -5,7 +5,7 @@ from pydantic import BaseModel
 import requests
 from sqlalchemy.orm import Session
 
-from auth_utils import get_current_user
+from auth_utils import get_current_user_optional
 from database import get_db
 from models import User, CustomerDashboard, TenantUser, TenantUserDashboardAccess
 
@@ -32,7 +32,7 @@ def _resolve_request_user_id(
 ):
     # ✅ Owner-auth mode
     if current_user is not None:
-      return current_user.id
+        return current_user.id
 
     # ✅ Public tenant mode
     email = _norm(tenant_email).lower()
@@ -109,7 +109,7 @@ def read_alarm_history(
     x_tenant_email: str | None = Header(default=None, alias="x-tenant-email"),
     x_dashboard_slug: str | None = Header(default=None, alias="x-dashboard-slug"),
     x_public_launch_id: str | None = Header(default=None, alias="x-public-launch-id"),
-    current_user: User | None = Depends(get_current_user),
+    current_user: User | None = Depends(get_current_user_optional),
 ):
     alarm_log_key = str(body.alarm_log_key or "").strip()
 
