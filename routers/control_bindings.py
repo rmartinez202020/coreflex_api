@@ -22,13 +22,14 @@ from models import (
 
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
-ALLOWED_FIELDS = {"do1", "do2", "do3", "do4"}
-ALLOWED_TYPES = {"toggle", "push_no", "push_nc"}
+# ✅ now supports DO + AO
+ALLOWED_FIELDS = {"do1", "do2", "do3", "do4", "ao1", "ao2"}
+ALLOWED_TYPES = {"toggle", "push_no", "push_nc", "display_output"}
 
 # ✅ Frontend uses this to hold "Control Action in Progress" locally
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
 
-# ✅ Node-RED endpoint that will perform the actual DO write
+# ✅ Node-RED endpoint that will perform the actual DO/AO write
 # This is your MAIN Node-RED bridge endpoint
 NODE_RED_DO_WRITE_URL = os.getenv(
     "NODE_RED_DO_WRITE_URL",
@@ -114,9 +115,9 @@ def _post_to_node_red_wait(
     timeout_sec: float = 3.5,
 ):
     """
-    Send DO write to Node-RED and WAIT briefly for an ACK response.
+    Send control write to Node-RED and WAIT briefly for an ACK response.
     - Never blocks forever (separate connect/read timeouts)
-    - If Node-RED is slow, returns pending=True (frontend can confirm via DO polling)
+    - If Node-RED is slow, returns pending=True
     """
     try:
         connect_t = min(1.5, max(0.5, timeout_sec / 2))
@@ -165,6 +166,14 @@ def _post_to_node_red_wait(
             "status": 502,
             "error": f"Node-RED unreachable: {repr(e)}",
         }
+
+
+def _is_do_field(field: str) -> bool:
+    return _as_str(field).lower() in {"do1", "do2", "do3", "do4"}
+
+
+def _is_ao_field(field: str) -> bool:
+    return _as_str(field).lower() in {"ao1", "ao2"}
 
 
 # ===============================
@@ -252,21 +261,23 @@ class ControlBindRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
     dashboardName: str | None = None  # ✅ NEW: human-readable dashboard name
     widgetId: str = Field(..., min_length=1)
-    widgetType: str = Field(..., min_length=1)  # toggle | push_no | push_nc
+    widgetType: str = Field(..., min_length=1)  # toggle | push_no | push_nc | display_output
     title: str | None = None
 
     deviceId: str = Field(..., min_length=1)
-    field: str = Field(..., min_length=2)  # do1..do4
+    field: str = Field(..., min_length=2)  # do1..do4 | ao1..ao2
 
 
 class ControlWriteRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
     widgetId: str = Field(..., min_length=1)
-    value01: int = Field(..., ge=0, le=1)  # 0 or 1
+    field: Optional[str] = None  # optional frontend hint; binding row is source of truth
+    value01: Optional[int] = Field(None, ge=0, le=1)  # ✅ DO
+    value: Optional[float] = None  # ✅ AO
 
 
 # ===============================
-# 🔒 Bind Control to DO
+# 🔒 Bind Control to DO/AO
 # ===============================
 @router.post("/bind")
 def bind_control(
@@ -291,7 +302,7 @@ def bind_control(
         raise HTTPException(status_code=400, detail="Invalid widgetType")
 
     if field not in ALLOWED_FIELDS:
-        raise HTTPException(status_code=400, detail="Invalid DO field")
+        raise HTTPException(status_code=400, detail="Invalid control field")
 
     # ✅ Ensure user has this device CLAIMED (tenant isolation)
     device = (
@@ -306,7 +317,7 @@ def bind_control(
         raise HTTPException(status_code=403, detail="Device not authorized")
 
     # ✅ GLOBAL uniqueness check across ALL dashboards
-    # Same user + same device + same DO cannot be used by another widget,
+    # Same user + same device + same field cannot be used by another widget,
     # no matter which dashboard it is on.
     used = (
         db.query(ControlBinding)
@@ -388,11 +399,13 @@ def bind_control(
         "ok": True,
         "dashboardId": row.dashboard_id,
         "dashboardName": row.dashboard_name,
+        "field": row.bind_field,
+        "widgetType": row.widget_type,
     }
 
 
 # ===============================
-# 📡 Get Used DOs for Device (ALL dashboards)
+# 📡 Get Used Control Fields for Device (ALL dashboards)
 # ===============================
 @router.get("/used")
 def get_used_dos(
@@ -470,7 +483,7 @@ def delete_control_binding(
 
 
 # ===============================
-# 🕹️ Write DO (PLAY MODE)
+# 🕹️ Write DO / AO (PLAY MODE)
 # ===============================
 @router.post("/write")
 def write_control_do(
@@ -515,11 +528,23 @@ def write_control_do(
 
     device_id = _as_str(row.bind_device_id)
     field = _as_str(row.bind_field).lower()
+    req_field = _as_str(req.field).lower()
 
     if not device_id:
         raise HTTPException(status_code=400, detail="Binding missing deviceId")
     if field not in ALLOWED_FIELDS:
-        raise HTTPException(status_code=400, detail="Invalid bound DO field")
+        raise HTTPException(status_code=400, detail="Invalid bound control field")
+
+    # ✅ optional frontend field check for consistency
+    if req_field and req_field != field:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Write field mismatch",
+                "boundField": field,
+                "requestedField": req_field,
+            },
+        )
 
     # 2) tenant isolation / owner isolation
     if tenant_email:
@@ -576,19 +601,47 @@ def write_control_do(
             },
         )
 
-    # 3) do1..do4 -> 1..4
-    try:
-        do_num = int(field.replace("do", ""))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid DO field format")
+    # 3) parse field + value by control type
+    do_num = None
+    ao_num = None
+    value_bool = None
+    value_num = None
 
-    if do_num not in (1, 2, 3, 4):
-        raise HTTPException(status_code=400, detail="DO must be 1..4")
+    if _is_do_field(field):
+        try:
+            do_num = int(field.replace("do", ""))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid DO field format")
 
-    # 4) value01 -> boolean (matches your Node-RED inject true/false)
-    value_bool = True if int(req.value01) == 1 else False
+        if do_num not in (1, 2, 3, 4):
+            raise HTTPException(status_code=400, detail="DO must be 1..4")
 
-    # 5) forward to node-red bridge (WAIT for response, short)
+        if req.value01 is None:
+            raise HTTPException(status_code=400, detail="value01 is required for DO writes")
+
+        value_bool = True if int(req.value01) == 1 else False
+
+    elif _is_ao_field(field):
+        try:
+            ao_num = int(field.replace("ao", ""))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid AO field format")
+
+        if ao_num not in (1, 2):
+            raise HTTPException(status_code=400, detail="AO must be 1..2")
+
+        if req.value is None:
+            raise HTTPException(status_code=400, detail="value is required for AO writes")
+
+        try:
+            value_num = float(req.value)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid AO numeric value")
+
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported control field")
+
+    # 4) forward to node-red bridge (WAIT for response, short)
     if not NODE_RED_DO_WRITE_URL:
         _raise_node_red_not_configured()
 
@@ -623,8 +676,7 @@ def write_control_do(
             },
         )
 
-    # ✅ NEW:
-    # Backend already knows the route from gateway_device_seen,
+    # ✅ Backend already knows the route from gateway_device_seen,
     # so include the remaining bridge-forwarding information here.
     payload = {
         "request_id": request_id,
@@ -637,13 +689,31 @@ def write_control_do(
         "device_local_ip": gw_info["device_local_ip"],
         "gateway_status": gw_info["gateway_status"],
         "gateway_last_seen": gw_info["gateway_last_seen"],
-        "do": do_num,
-        "value": value_bool,
+        "field": field,
         "dashboard_id": dash_id,
         "widget_id": wid,
         "user_id": user.id if user else None,
         "tenant_email": tenant_email or None,
     }
+
+    # ✅ branch by type for Node-RED
+    if do_num is not None:
+        payload.update(
+            {
+                "command_type": "do_write",
+                "do": do_num,
+                "value": value_bool,
+                "value01": 1 if value_bool else 0,
+            }
+        )
+    elif ao_num is not None:
+        payload.update(
+            {
+                "command_type": "ao_write",
+                "ao": ao_num,
+                "value": value_num,
+            }
+        )
 
     # ✅ IMPORTANT:
     # We do NOT delete the lock here anymore.
@@ -656,11 +726,10 @@ def write_control_do(
         timeout_sec=3.5,
     )
 
-    return {
+    response = {
         "requestId": request_id,
         "deviceId": device_id,
         "field": field,
-        "value01": int(req.value01),
         "actuationHoldMs": ACTUATION_HOLD_MS,
         "gatewayId": gw_info["gateway_id"],
         "gatewayHostname": gw_info["gateway_hostname"],
@@ -672,3 +741,20 @@ def write_control_do(
         "gatewayLastSeen": gw_info["gateway_last_seen"],
         **result,
     }
+
+    if do_num is not None:
+        response.update(
+            {
+                "do": do_num,
+                "value01": int(req.value01) if req.value01 is not None else None,
+            }
+        )
+    elif ao_num is not None:
+        response.update(
+            {
+                "ao": ao_num,
+                "value": value_num,
+            }
+        )
+
+    return response
