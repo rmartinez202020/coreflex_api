@@ -442,11 +442,6 @@ def get_used_dos(
 # ===============================
 # 🗑️ Delete Control Binding Row
 # ===============================
-# ✅ IMPORTANT CHANGE:
-# - route is now "/" (explicit) instead of ""
-# - dashboardId is OPTIONAL
-#   - If dashboardId provided: delete that exact (user + dashboard + widget) row
-#   - If dashboardId omitted: delete ANY binding rows for that widgetId for this user
 @router.delete("/")
 def delete_control_binding(
     widgetId: str = Query(..., min_length=1),
@@ -566,7 +561,7 @@ def write_control_do(
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
 
-    # 2.5) ✅ NEW: find latest gateway/device-seen route info by serial/device_id
+    # 2.5) ✅ find latest gateway/device-seen route info by serial/device_id
     gw_seen = _pick_gateway_seen_row(db, device_id)
     if not gw_seen:
         raise HTTPException(
@@ -700,7 +695,8 @@ def write_control_do(
     if do_num is not None:
         payload.update(
             {
-                "command_type": "do_write",
+                "command": "WRITE_DO",        # ✅ NEW (for Node-RED router)
+                "command_type": "do_write",   # ✅ keep this too
                 "do": do_num,
                 "value": value_bool,
                 "value01": 1 if value_bool else 0,
@@ -709,16 +705,13 @@ def write_control_do(
     elif ao_num is not None:
         payload.update(
             {
-                "command_type": "ao_write",
+                "command": "WRITE_AO",        # ✅ NEW (for Node-RED router)
+                "command_type": "ao_write",   # ✅ keep this too
                 "ao": ao_num,
                 "value": value_num,
             }
         )
 
-    # ✅ IMPORTANT:
-    # We do NOT delete the lock here anymore.
-    # The lock remains until expires_at, so backend truly blocks rapid double writes for ACTUATION_HOLD_MS.
-    # Expired locks are cleaned up on the next request by _cleanup_expired_locks().
     result = _post_to_node_red_wait(
         NODE_RED_DO_WRITE_URL,
         payload,
