@@ -712,6 +712,11 @@ def write_control_do(
             }
         )
 
+    # 🔍 DEBUG — print exact outbound payload sent to Node-RED
+    print("🟡 NODE_RED_WRITE_URL =", NODE_RED_DO_WRITE_URL)
+    print("🟡 NODE_RED_HEADERS =", _node_red_headers())
+    print("🟡 NODE_RED_PAYLOAD =", payload)
+
     result = _post_to_node_red_wait(
         NODE_RED_DO_WRITE_URL,
         payload,
