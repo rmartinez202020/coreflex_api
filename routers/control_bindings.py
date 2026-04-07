@@ -29,12 +29,11 @@ ALLOWED_TYPES = {"toggle", "push_no", "push_nc", "display_output"}
 # ✅ Frontend uses this to hold "Control Action in Progress" locally
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
 
-# ✅ Dynamic gateway Node-RED command path
-# Backend will build:
-# http://{gateway_tailscale_ip}:1880{NODE_RED_COMMAND_PATH}
-NODE_RED_COMMAND_PATH = os.getenv(
-    "NODE_RED_COMMAND_PATH",
-    "/gateway/device-command",
+# ✅ Node-RED endpoint that will perform the actual DO/AO write
+# This is your MAIN Node-RED bridge endpoint
+NODE_RED_DO_WRITE_URL = os.getenv(
+    "NODE_RED_DO_WRITE_URL",
+    "http://98.90.225.131:1880/coreflex/command",
 ).strip()
 
 # ✅ Optional shared-key protection for backend -> Node-RED commands
@@ -52,31 +51,14 @@ def get_current_user_optional(request: Request, db: Session = Depends(get_db)):
 
 
 def _as_str(v) -> str:
-    return str(v or "").strip()
+    return (v or "").strip()
 
 
-def _normalize_command_path(path: str) -> str:
-    p = _as_str(path)
-    if not p:
-        p = "/gateway/device-command"
-    if not p.startswith("/"):
-        p = "/" + p
-    return p
-
-
-def _build_gateway_node_red_url(gateway_tailscale_ip: str) -> str:
-    ip = _as_str(gateway_tailscale_ip)
-    if not ip:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "Missing gateway Tailscale IP",
-                "message": "Cannot build dynamic Node-RED URL without gateway_tailscale_ip.",
-            },
-        )
-
-    path = _normalize_command_path(NODE_RED_COMMAND_PATH)
-    return f"http://{ip}:1880{path}"
+def _raise_node_red_not_configured():
+    raise HTTPException(
+        status_code=500,
+        detail="NODE_RED_DO_WRITE_URL not configured on server",
+    )
 
 
 def _node_red_headers() -> dict:
@@ -614,9 +596,6 @@ def write_control_do(
             },
         )
 
-    # ✅ Build dynamic gateway Node-RED URL from last-seen route
-    node_red_url = _build_gateway_node_red_url(gw_info["gateway_tailscale_ip"])
-
     # 3) parse field + value by control type
     do_num = None
     ao_num = None
@@ -656,6 +635,10 @@ def write_control_do(
 
     else:
         raise HTTPException(status_code=400, detail="Unsupported control field")
+
+    # 4) forward to node-red bridge (WAIT for response, short)
+    if not NODE_RED_DO_WRITE_URL:
+        _raise_node_red_not_configured()
 
     request_id = str(uuid.uuid4())
     lk = _lock_key(device_id, field)
@@ -712,8 +695,8 @@ def write_control_do(
     if do_num is not None:
         payload.update(
             {
-                "command": "WRITE_DO",
-                "command_type": "do_write",
+                "command": "WRITE_DO",        # ✅ NEW (for Node-RED router)
+                "command_type": "do_write",   # ✅ keep this too
                 "do": do_num,
                 "value": value_bool,
                 "value01": 1 if value_bool else 0,
@@ -722,20 +705,15 @@ def write_control_do(
     elif ao_num is not None:
         payload.update(
             {
-                "command": "WRITE_AO",
-                "command_type": "ao_write",
+                "command": "WRITE_AO",        # ✅ NEW (for Node-RED router)
+                "command_type": "ao_write",   # ✅ keep this too
                 "ao": ao_num,
                 "value": value_num,
             }
         )
 
-    # 🔍 DEBUG — print exact outbound payload sent to Node-RED
-    print("🟡 NODE_RED_WRITE_URL =", node_red_url)
-    print("🟡 NODE_RED_HEADERS =", _node_red_headers())
-    print("🟡 NODE_RED_PAYLOAD =", payload)
-
     result = _post_to_node_red_wait(
-        node_red_url,
+        NODE_RED_DO_WRITE_URL,
         payload,
         _node_red_headers(),
         timeout_sec=3.5,
@@ -754,7 +732,6 @@ def write_control_do(
         "deviceModel": gw_info["device_model"] or _as_str(getattr(device, "device_model", None)) or "zhc1921",
         "gatewayStatus": gw_info["gateway_status"],
         "gatewayLastSeen": gw_info["gateway_last_seen"],
-        "nodeRedUrl": node_red_url,
         **result,
     }
 
