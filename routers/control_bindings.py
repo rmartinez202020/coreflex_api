@@ -20,6 +20,13 @@ from models import (
     GatewayDeviceSeen,  # ✅ NEW
 )
 
+# ✅ CF-1600 model import (safe optional import)
+try:
+    from models import ZHC1661Device  # type: ignore
+except Exception:
+    ZHC1661Device = None
+
+
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
 # ✅ now supports DO + AO
@@ -177,6 +184,65 @@ def _is_ao_field(field: str) -> bool:
 
 
 # ===============================
+# ✅ Device authorization helpers
+# ===============================
+def _query_authorized_device(
+    db: Session,
+    model_cls,
+    device_id: str,
+    user_id: Optional[int] = None,
+    tenant_email: str = "",
+):
+    if not model_cls:
+        return None
+
+    q = db.query(model_cls).filter(model_cls.device_id == device_id)
+
+    # ✅ owner flow -> must be claimed by owner
+    if not tenant_email and user_id is not None:
+        q = q.filter(model_cls.claimed_by_user_id == user_id)
+
+    return q.first()
+
+
+def _find_authorized_device(
+    db: Session,
+    device_id: str,
+    user_id: Optional[int] = None,
+    tenant_email: str = "",
+):
+    """
+    ✅ Support both CF-2000 (ZHC1921Device) and CF-1600 (ZHC1661Device)
+    """
+    device_id = _as_str(device_id)
+    tenant_email = _as_str(tenant_email).lower()
+
+    # ✅ first try CF-2000
+    device = _query_authorized_device(
+        db=db,
+        model_cls=ZHC1921Device,
+        device_id=device_id,
+        user_id=user_id,
+        tenant_email=tenant_email,
+    )
+    if device:
+        return device
+
+    # ✅ then try CF-1600
+    device = _query_authorized_device(
+        db=db,
+        model_cls=ZHC1661Device,
+        device_id=device_id,
+        user_id=user_id,
+        tenant_email=tenant_email,
+    )
+    if device:
+        return device
+
+    return None
+
+
+# ===============================
 # 🔒 Lock-table helpers
 # ===============================
 def _utc_now():
@@ -305,13 +371,11 @@ def bind_control(
         raise HTTPException(status_code=400, detail="Invalid control field")
 
     # ✅ Ensure user has this device CLAIMED (tenant isolation)
-    device = (
-        db.query(ZHC1921Device)
-        .filter(
-            ZHC1921Device.device_id == device_id,
-            ZHC1921Device.claimed_by_user_id == user.id,
-        )
-        .first()
+    device = _find_authorized_device(
+        db=db,
+        device_id=device_id,
+        user_id=user.id,
+        tenant_email="",
     )
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
@@ -542,21 +606,12 @@ def write_control_do(
         )
 
     # 2) tenant isolation / owner isolation
-    if tenant_email:
-        device = (
-            db.query(ZHC1921Device)
-            .filter(ZHC1921Device.device_id == device_id)
-            .first()
-        )
-    else:
-        device = (
-            db.query(ZHC1921Device)
-            .filter(
-                ZHC1921Device.device_id == device_id,
-                ZHC1921Device.claimed_by_user_id == user.id,
-            )
-            .first()
-        )
+    device = _find_authorized_device(
+        db=db,
+        device_id=device_id,
+        user_id=user.id if user else None,
+        tenant_email=tenant_email,
+    )
 
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
