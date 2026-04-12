@@ -58,7 +58,16 @@ def get_current_user_optional(request: Request, db: Session = Depends(get_db)):
 
 
 def _as_str(v) -> str:
-    return (v or "").strip()
+    return str(v or "").strip()
+
+
+def _as_optional_float(v):
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid numeric scaling value")
 
 
 def _raise_node_red_not_configured():
@@ -333,6 +342,12 @@ class ControlBindRequest(BaseModel):
     deviceId: str = Field(..., min_length=1)
     field: str = Field(..., min_length=2)  # do1..do4 | ao1..ao2
 
+    # ✅ NEW: display_output scaling config
+    scaleMin: Optional[float] = None
+    scaleMax: Optional[float] = None
+    aoScaleMin: Optional[float] = None
+    aoScaleMax: Optional[float] = None
+
 
 class ControlWriteRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
@@ -358,6 +373,12 @@ def bind_control(
     device_id = req.deviceId.strip()
     field = req.field.strip().lower()
 
+    # ✅ NEW scaling values
+    scale_min = _as_optional_float(req.scaleMin)
+    scale_max = _as_optional_float(req.scaleMax)
+    ao_scale_min = _as_optional_float(req.aoScaleMin)
+    ao_scale_max = _as_optional_float(req.aoScaleMax)
+
     # ✅ Normalize frontend widget names to backend canonical types
     if widget_type == "pushbuttonno":
         widget_type = "push_no"
@@ -369,6 +390,26 @@ def bind_control(
 
     if field not in ALLOWED_FIELDS:
         raise HTTPException(status_code=400, detail="Invalid control field")
+
+    # ✅ Only display_output should store scaling fields
+    if widget_type != "display_output":
+        scale_min = None
+        scale_max = None
+        ao_scale_min = None
+        ao_scale_max = None
+
+    # ✅ Optional validation when partially filled
+    if (scale_min is None) != (scale_max is None):
+        raise HTTPException(
+            status_code=400,
+            detail="scaleMin and scaleMax must both be provided together",
+        )
+
+    if (ao_scale_min is None) != (ao_scale_max is None):
+        raise HTTPException(
+            status_code=400,
+            detail="aoScaleMin and aoScaleMax must both be provided together",
+        )
 
     # ✅ Ensure user has this device CLAIMED (tenant isolation)
     device = _find_authorized_device(
@@ -431,8 +472,15 @@ def bind_control(
     row.bind_device_id = device_id
     row.bind_field = field
 
+    # ✅ NEW persist scaling fields
+    row.scale_min = scale_min
+    row.scale_max = scale_max
+    row.ao_scale_min = ao_scale_min
+    row.ao_scale_max = ao_scale_max
+
     try:
         db.commit()
+        db.refresh(row)
     except IntegrityError:
         db.rollback()
 
@@ -465,6 +513,10 @@ def bind_control(
         "dashboardName": row.dashboard_name,
         "field": row.bind_field,
         "widgetType": row.widget_type,
+        "scaleMin": row.scale_min,
+        "scaleMax": row.scale_max,
+        "aoScaleMin": row.ao_scale_min,
+        "aoScaleMax": row.ao_scale_max,
     }
 
 
@@ -497,6 +549,10 @@ def get_used_dos(
             "widgetType": r.widget_type,
             "dashboardId": r.dashboard_id,
             "dashboardName": r.dashboard_name,
+            "scaleMin": getattr(r, "scale_min", None),
+            "scaleMax": getattr(r, "scale_max", None),
+            "aoScaleMin": getattr(r, "ao_scale_min", None),
+            "aoScaleMax": getattr(r, "ao_scale_max", None),
         }
         for r in rows
         if r.bind_field
@@ -744,6 +800,11 @@ def write_control_do(
         "widget_id": wid,
         "user_id": user.id if user else None,
         "tenant_email": tenant_email or None,
+        # ✅ NEW: include binding scaling info for downstream use if needed
+        "scale_min": getattr(row, "scale_min", None),
+        "scale_max": getattr(row, "scale_max", None),
+        "ao_scale_min": getattr(row, "ao_scale_min", None),
+        "ao_scale_max": getattr(row, "ao_scale_max", None),
     }
 
     # ✅ branch by type for Node-RED
@@ -787,6 +848,10 @@ def write_control_do(
         "deviceModel": gw_info["device_model"] or _as_str(getattr(device, "device_model", None)) or "zhc1921",
         "gatewayStatus": gw_info["gateway_status"],
         "gatewayLastSeen": gw_info["gateway_last_seen"],
+        "scaleMin": getattr(row, "scale_min", None),
+        "scaleMax": getattr(row, "scale_max", None),
+        "aoScaleMin": getattr(row, "ao_scale_min", None),
+        "aoScaleMax": getattr(row, "ao_scale_max", None),
         **result,
     }
 
