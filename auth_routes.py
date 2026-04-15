@@ -7,7 +7,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User, PasswordResetCode, UserSubscription
+from models import User, PasswordResetCode
 from auth_utils import (
     hash_password,
     verify_password,
@@ -62,11 +62,6 @@ class ResetPasswordRequest(BaseModel):
 # -------------------------------
 RESET_CODE_TTL_MINUTES = 10
 RESET_CODE_MAX_ATTEMPTS = 5
-
-# ✅ default starter subscription for every new account
-DEFAULT_PLAN_KEY = "free"
-DEFAULT_DEVICE_LIMIT = 1
-DEFAULT_TENANT_USERS_LIMIT = 1
 
 
 def is_platform_owner(user) -> bool:
@@ -147,35 +142,12 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(new_user)
 
-        # ✅ Every newly registered user starts with the FREE plan
-        existing_subscription = (
-            db.query(UserSubscription)
-            .filter(UserSubscription.user_id == new_user.id)
-            .first()
-        )
-
-        if not existing_subscription:
-            new_subscription = UserSubscription(
-                user_id=new_user.id,
-                plan_key=DEFAULT_PLAN_KEY,
-                device_limit=DEFAULT_DEVICE_LIMIT,
-                tenants_users_limit=DEFAULT_TENANT_USERS_LIMIT,
-                active_date=func.now(),
-                renewal_date=None,
-                is_active=True,
-                created_at=func.now(),
-                updated_at=func.now(),
-            )
-            db.add(new_subscription)
-            db.commit()
-
         return {"message": "User created successfully"}
 
     except HTTPException:
         raise
 
     except Exception as e:
-        db.rollback()
         print("🔥 REGISTER ERROR:", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
