@@ -49,7 +49,7 @@ def get_my_subscription(
 
         devices_used = (
             db.query(func.count(DeviceRegistry.id))
-            .filter(DeviceRegistry.user_id == current_user.id)
+            .filter(DeviceRegistry.claimed_by_user_id == current_user.id)
             .scalar()
             or 0
         )

@@ -1114,3 +1114,39 @@ class AlarmDefinition(Base):
             name="uq_alarm_per_tag_per_log",
         ),
     )
+
+    class UserSubscription(Base):
+    __tablename__ = "user_subscriptions"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        unique=True,  # one subscription row per user for now
+    )
+
+    plan_key = Column(String(50), nullable=False, server_default="free")
+    device_limit = Column(Integer, nullable=False, server_default="1")
+    tenants_users_limit = Column(Integer, nullable=False, server_default="1")
+
+    active_date = Column(DateTime(timezone=True), nullable=True)
+    renewal_date = Column(DateTime(timezone=True), nullable=True)
+
+    is_active = Column(Boolean, nullable=False, server_default=func.true())
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User")
