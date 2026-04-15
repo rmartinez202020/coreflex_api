@@ -208,6 +208,13 @@ from routers.tenant_users import router as tenant_users_router  # noqa: E402
 app.include_router(tenant_users_router)
 
 # ========================================
+# 💳 USER SUBSCRIPTIONS ROUTES
+# ========================================
+from routers.user_subscriptions import router as user_subscriptions_router  # noqa: E402
+
+app.include_router(user_subscriptions_router)
+
+# ========================================
 # 🖼 IMAGES ROUTES (Cloudinary Image Library)
 # ========================================
 from routers.images import router as images_router  # noqa: E402
