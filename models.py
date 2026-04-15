@@ -19,7 +19,6 @@ import datetime
 # ✅ Import the SAME Base object from database.py
 from database import Base
 
-
 # ===============================
 # 👤 USER MODEL (Authentication)
 # ===============================
@@ -1115,7 +1114,6 @@ class AlarmDefinition(Base):
         ),
     )
 
-
 # ===============================
 # 💳 USER SUBSCRIPTIONS
 # ===============================
@@ -1154,3 +1152,52 @@ class UserSubscription(Base):
     )
 
     user = relationship("User")
+
+# ===============================
+# 🔐 USER ACTIVE SESSIONS
+# Enforces one active browser/device per user
+# Same browser_device_key = allowed
+# Different browser_device_key = blocked while session is alive
+# ===============================
+class UserActiveSession(Base):
+    __tablename__ = "user_active_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    browser_device_key = Column(String(255), nullable=False, index=True)
+    session_token = Column(String(255), nullable=False, unique=True, index=True)
+
+    is_active = Column(Boolean, nullable=False, server_default=func.true())
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    last_seen_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    closed_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    ip_address = Column(String(100), nullable=True)
+    user_agent = Column(String, nullable=True)
+
+    user = relationship("User")
+
+    __table_args__ = (
+        Index("ix_user_active_sessions_user_active", "user_id", "is_active"),
+        Index("ix_user_active_sessions_user_last_seen", "user_id", "last_seen_at"),
+    )

@@ -1,5 +1,4 @@
 # routers/tenant_users.py
-
 import os
 from datetime import datetime, timezone
 import secrets
@@ -31,7 +30,6 @@ PUBLIC_DASHBOARD_BASE_URL = os.getenv(
     "https://www.coreflexiiotsplatform.com/launchDashboard",
 )
 
-
 # =========================
 # 📦 SCHEMAS
 # =========================
@@ -41,7 +39,6 @@ class TenantUserCreate(BaseModel):
     access: str
     customer_name: str
     dashboard_ids: List[int]
-
 
 class TenantUserUpdate(BaseModel):
     name: str
@@ -72,13 +69,11 @@ class TenantUserOut(BaseModel):
     class Config:
         from_attributes = True
 
-
 # =========================
 # 🔧 HELPERS
 # =========================
 def _norm(value: Optional[str]) -> str:
     return str(value or "").strip()
-
 
 def _now_utc():
     return datetime.now(timezone.utc)
@@ -93,15 +88,12 @@ def _validate_access(access: str) -> str:
         )
     return v
 
-
 def _generate_password(length: int = 12) -> str:
     chars = string.ascii_letters + string.digits
     return "".join(secrets.choice(chars) for _ in range(length))
 
-
 def _hash_password(password: str) -> str:
     return pwd_context.hash(password)
-
 
 def _serialize_tenant_user(row: TenantUser) -> TenantUserOut:
     dashboards = []
@@ -143,7 +135,6 @@ def _require_customer_owned_by_admin(
             status_code=400,
             detail="Customer not found for this admin user.",
         )
-
 
 def _validate_dashboards_owned_by_admin_and_customer(
     db: Session,
@@ -237,7 +228,6 @@ def _build_dashboard_public_links(rows: List[CustomerDashboard]) -> List[dict]:
 
     return links
 
-
 # =========================
 # ✅ CREATE TENANT USER
 # =========================
@@ -322,7 +312,6 @@ def create_tenant_user(
 
     return _serialize_tenant_user(new_user)
 
-
 # =========================
 # ✅ LIST TENANT USERS
 # =========================
@@ -340,7 +329,6 @@ def list_tenant_users(
     )
     return [_serialize_tenant_user(row) for row in rows]
 
-
 # =========================
 # ✅ GET ONE TENANT USER
 # =========================
@@ -352,7 +340,6 @@ def get_tenant_user(
 ):
     row = _get_tenant_user_owned_by_admin(db, tenant_user_id, current_user.id)
     return _serialize_tenant_user(row)
-
 
 # =========================
 # ✅ UPDATE TENANT USER
@@ -409,7 +396,6 @@ def update_tenant_user(
     db.refresh(row)
 
     return _serialize_tenant_user(row)
-
 
 # =========================
 # ✅ DELETE TENANT USER

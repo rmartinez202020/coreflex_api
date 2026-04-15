@@ -1,13 +1,19 @@
 # auth_routes.py
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import secrets
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User, PasswordResetCode, UserSubscription
+from models import (
+    User,
+    PasswordResetCode,
+    UserSubscription,
+    UserActiveSession,
+)
 from auth_utils import (
     hash_password,
     verify_password,
@@ -24,6 +30,20 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ✅ owner allowlist
 PLATFORM_OWNER_EMAIL = "roquemartinez_8@hotmail.com"
+
+# -------------------------------
+# INTERNAL CONFIG
+# -------------------------------
+RESET_CODE_TTL_MINUTES = 10
+RESET_CODE_MAX_ATTEMPTS = 5
+
+# ✅ default starter subscription for every new account
+DEFAULT_PLAN_KEY = "free"
+DEFAULT_DEVICE_LIMIT = 1
+DEFAULT_TENANT_USERS_LIMIT = 1
+
+# ✅ session is considered alive if pinged recently
+SESSION_TTL_SECONDS = 90
 
 
 # -------------------------------
@@ -43,6 +63,17 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+    browser_device_key: str
+
+
+class SessionPingRequest(BaseModel):
+    session_token: str
+    browser_device_key: str
+
+
+class LogoutRequest(BaseModel):
+    session_token: str
+    browser_device_key: str
 
 
 # ✅ NEW: forgot-password step 1
@@ -60,13 +91,20 @@ class ResetPasswordRequest(BaseModel):
 # -------------------------------
 # INTERNAL HELPERS
 # -------------------------------
-RESET_CODE_TTL_MINUTES = 10
-RESET_CODE_MAX_ATTEMPTS = 5
+def _now_utc():
+    return datetime.now(timezone.utc)
 
-# ✅ default starter subscription for every new account
-DEFAULT_PLAN_KEY = "free"
-DEFAULT_DEVICE_LIMIT = 1
-DEFAULT_TENANT_USERS_LIMIT = 1
+
+def _session_cutoff():
+    return _now_utc() - timedelta(seconds=SESSION_TTL_SECONDS)
+
+
+def _clean_browser_device_key(value: str) -> str:
+    return str(value or "").strip()
+
+
+def _generate_session_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def is_platform_owner(user) -> bool:
@@ -107,6 +145,49 @@ def invalidate_existing_reset_codes(
     )
 
 
+def _close_stale_sessions_for_user(db: Session, user_id: int):
+    stale_rows = (
+        db.query(UserActiveSession)
+        .filter(UserActiveSession.user_id == user_id)
+        .filter(UserActiveSession.is_active.is_(True))
+        .filter(UserActiveSession.last_seen_at < _session_cutoff())
+        .all()
+    )
+
+    now = _now_utc()
+    for row in stale_rows:
+        row.is_active = False
+        row.closed_at = now
+
+
+def _get_live_active_sessions_for_user(db: Session, user_id: int):
+    _close_stale_sessions_for_user(db, user_id)
+    db.flush()
+
+    return (
+        db.query(UserActiveSession)
+        .filter(UserActiveSession.user_id == user_id)
+        .filter(UserActiveSession.is_active.is_(True))
+        .filter(UserActiveSession.last_seen_at >= _session_cutoff())
+        .order_by(UserActiveSession.last_seen_at.desc(), UserActiveSession.id.desc())
+        .all()
+    )
+
+
+def _get_request_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client and request.client.host:
+        return str(request.client.host).strip()
+    return None
+
+
+def _get_request_user_agent(request: Request) -> str | None:
+    value = request.headers.get("user-agent")
+    return str(value).strip() if value else None
+
+
 # -------------------------------
 # REGISTER USER
 # -------------------------------
@@ -132,13 +213,11 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
             company=request.company,
             email=clean_email,
             hashed_password=hash_password(request.password),
-            # 🔐 Store acceptance fields
             accepted_control_terms=True,
             control_terms_version=request.control_terms_version,
-            control_terms_accepted_at=None,  # will set below using DB time
+            control_terms_accepted_at=None,
         )
 
-        # ✅ Use DB timestamp (safer than app server time)
         from sqlalchemy.sql import func
 
         new_user.control_terms_accepted_at = func.now()
@@ -182,17 +261,80 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
 
 # -------------------------------
 # LOGIN USER (UPDATED)
+# ✅ same browser_device_key = allowed
+# ✅ different browser_device_key with live session = blocked
 # -------------------------------
 @router.post("/login")
-def login(request: LoginRequest, db: Session = Depends(get_db)):
+def login(
+    body: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     try:
-        clean_email = normalize_email(request.email)
+        clean_email = normalize_email(body.email)
+        browser_device_key = _clean_browser_device_key(body.browser_device_key)
+
+        if not browser_device_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Browser device key is required.",
+            )
+
         print(">>> Login attempt:", clean_email)
 
         user = db.query(User).filter(User.email == clean_email).first()
 
-        if not user or not verify_password(request.password, user.hashed_password):
+        if not user or not verify_password(body.password, user.hashed_password):
             raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        live_sessions = _get_live_active_sessions_for_user(db, user.id)
+
+        same_browser_session = None
+        conflicting_session = None
+
+        for sess in live_sessions:
+            if _clean_browser_device_key(sess.browser_device_key) == browser_device_key:
+                same_browser_session = sess
+            else:
+                conflicting_session = sess
+                break
+
+        if conflicting_session:
+            db.commit()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Account already active. This account is currently signed in "
+                    "from another browser or device. Please sign out from that "
+                    "session and try again."
+                ),
+            )
+
+        now = _now_utc()
+        ip_address = _get_request_ip(request)
+        user_agent = _get_request_user_agent(request)
+
+        if same_browser_session:
+            same_browser_session.last_seen_at = now
+            same_browser_session.is_active = True
+            same_browser_session.closed_at = None
+            same_browser_session.ip_address = ip_address
+            same_browser_session.user_agent = user_agent
+            session_token = same_browser_session.session_token
+        else:
+            session_token = _generate_session_token()
+            new_session = UserActiveSession(
+                user_id=user.id,
+                browser_device_key=browser_device_key,
+                session_token=session_token,
+                is_active=True,
+                created_at=now,
+                last_seen_at=now,
+                closed_at=None,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            db.add(new_session)
 
         token = create_access_token(
             {
@@ -201,16 +343,122 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
             }
         )
 
+        db.commit()
+
         return {
             "access_token": token,
             "token_type": "bearer",
+            "session_token": session_token,
+            "browser_device_key": browser_device_key,
         }
 
     except HTTPException:
         raise
 
     except Exception as e:
+        db.rollback()
         print("🔥 LOGIN ERROR:", e)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# -------------------------------
+# SESSION PING
+# ✅ keeps same-browser session alive
+# -------------------------------
+@router.post("/session/ping")
+def session_ping(
+    body: SessionPingRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    try:
+        session_token = str(body.session_token or "").strip()
+        browser_device_key = _clean_browser_device_key(body.browser_device_key)
+
+        if not session_token:
+            raise HTTPException(status_code=400, detail="Session token is required.")
+
+        if not browser_device_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Browser device key is required.",
+            )
+
+        row = (
+            db.query(UserActiveSession)
+            .filter(UserActiveSession.user_id == current_user.id)
+            .filter(UserActiveSession.session_token == session_token)
+            .filter(UserActiveSession.browser_device_key == browser_device_key)
+            .filter(UserActiveSession.is_active.is_(True))
+            .first()
+        )
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Active session not found.")
+
+        row.last_seen_at = _now_utc()
+        row.closed_at = None
+        db.commit()
+
+        return {"ok": True, "detail": "Session refreshed."}
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        db.rollback()
+        print("🔥 SESSION PING ERROR:", e)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# -------------------------------
+# LOGOUT
+# ✅ closes only this current browser session
+# -------------------------------
+@router.post("/logout")
+def logout(
+    body: LogoutRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    try:
+        session_token = str(body.session_token or "").strip()
+        browser_device_key = _clean_browser_device_key(body.browser_device_key)
+
+        if not session_token:
+            raise HTTPException(status_code=400, detail="Session token is required.")
+
+        if not browser_device_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Browser device key is required.",
+            )
+
+        row = (
+            db.query(UserActiveSession)
+            .filter(UserActiveSession.user_id == current_user.id)
+            .filter(UserActiveSession.session_token == session_token)
+            .filter(UserActiveSession.browser_device_key == browser_device_key)
+            .filter(UserActiveSession.is_active.is_(True))
+            .first()
+        )
+
+        if row:
+            row.is_active = False
+            row.closed_at = _now_utc()
+            row.last_seen_at = _now_utc()
+            db.commit()
+        else:
+            db.commit()
+
+        return {"ok": True, "detail": "Logged out successfully."}
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        db.rollback()
+        print("🔥 LOGOUT ERROR:", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -227,11 +475,7 @@ def get_business_users(
         if not is_platform_owner(current_user):
             raise HTTPException(status_code=403, detail="Owner access required")
 
-        users = (
-            db.query(User)
-            .order_by(User.id.asc())
-            .all()
-        )
+        users = db.query(User).order_by(User.id.asc()).all()
 
         return {
             "users": [
