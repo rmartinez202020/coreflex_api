@@ -1115,7 +1115,11 @@ class AlarmDefinition(Base):
         ),
     )
 
-    class UserSubscription(Base):
+
+# ===============================
+# 💳 USER SUBSCRIPTIONS
+# ===============================
+class UserSubscription(Base):
     __tablename__ = "user_subscriptions"
 
     id = Column(BigInteger, primary_key=True, index=True)
