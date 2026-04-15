@@ -1125,7 +1125,7 @@ class AlarmDefinition(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
-        unique=True,  # one subscription row per user for now
+        unique=True,
     )
 
     plan_key = Column(String(50), nullable=False, server_default="free")
