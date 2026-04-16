@@ -1201,3 +1201,84 @@ class UserActiveSession(Base):
         Index("ix_user_active_sessions_user_active", "user_id", "is_active"),
         Index("ix_user_active_sessions_user_last_seen", "user_id", "last_seen_at"),
     )
+
+
+# ===============================
+# 💳 BILLING PLANS
+# ===============================
+class BillingPlan(Base):
+    __tablename__ = "billing_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    plan_key = Column(String(50), nullable=False, index=True)
+    plan_name = Column(String(100), nullable=False)
+
+    billing_type = Column(String(20), nullable=False, index=True)
+
+    price_usd = Column(Float, nullable=False)
+    currency = Column(String(10), nullable=False, server_default="usd")
+
+    stripe_product_id = Column(String(100), nullable=True)
+    stripe_price_id = Column(String(100), nullable=True)
+
+    device_limit = Column(Integer, nullable=True)
+    tenant_user_limit = Column(Integer, nullable=True)
+    data_history_days = Column(Integer, nullable=True)
+
+    sort_order = Column(Integer, nullable=False, server_default="0")
+
+    is_active = Column(Boolean, nullable=False, server_default=func.true())
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("plan_key", "billing_type", name="unique_plan_billing"),
+        Index("idx_billing_plans_lookup", "plan_key", "billing_type", "is_active"),
+    )
+
+
+# ===============================
+# 💳 BILLING ADDONS
+# ===============================
+class BillingAddon(Base):
+    __tablename__ = "billing_addons"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    addon_key = Column(String(50), nullable=False, index=True)
+    billing_type = Column(String(20), nullable=False, index=True)
+
+    price_usd = Column(Float, nullable=False)
+    currency = Column(String(10), nullable=False, server_default="usd")
+
+    stripe_product_id = Column(String(100), nullable=True)
+    stripe_price_id = Column(String(100), nullable=True)
+
+    is_active = Column(Boolean, nullable=False, server_default=func.true())
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("addon_key", "billing_type", name="unique_addon_billing"),
+    )

@@ -215,6 +215,14 @@ from routers.user_subscriptions import router as user_subscriptions_router  # no
 app.include_router(user_subscriptions_router)
 
 # ========================================
+# 💳 ADMIN BILLING ROUTES
+# Stripe billing plans / addons sync
+# ========================================
+from routers.billing_admin import router as billing_admin_router  # noqa: E402
+
+app.include_router(billing_admin_router)
+
+# ========================================
 # 🖼 IMAGES ROUTES (Cloudinary Image Library)
 # ========================================
 from routers.images import router as images_router  # noqa: E402
