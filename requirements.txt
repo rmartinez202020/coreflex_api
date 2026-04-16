@@ -12,3 +12,4 @@ cloudinary
 python-multipart
 requests
 email-validator
+stripe
