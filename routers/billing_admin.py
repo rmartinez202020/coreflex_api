@@ -92,7 +92,8 @@ def amount_to_cents(value) -> int:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid price amount.")
 
-    if dec <= 0:
+    # ✅ Allow zero-dollar Stripe prices (needed for Free plan)
+    if dec < 0:
         raise HTTPException(status_code=400, detail="Price must be zero or greater.")
 
     return int(dec * 100)
