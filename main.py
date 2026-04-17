@@ -215,6 +215,14 @@ from routers.user_subscriptions import router as user_subscriptions_router  # no
 app.include_router(user_subscriptions_router)
 
 # ========================================
+# 💳 USER BILLING ROUTES
+# Stripe payment-intent route for Proceed to Payment modal
+# ========================================
+from routers.billing import router as billing_router  # noqa: E402
+
+app.include_router(billing_router)
+
+# ========================================
 # 💳 ADMIN BILLING ROUTES
 # Stripe billing plans / addons sync
 # ========================================
