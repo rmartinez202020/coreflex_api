@@ -73,13 +73,6 @@ def create_payment_intent(
             detail="Selected plan is not synced to Stripe yet.",
         )
 
-    line_items = [
-        {
-            "price": plan_price_id,
-            "quantity": 1,
-        }
-    ]
-
     if extra_tenant_users > 0:
         addon = (
             db.query(BillingAddon)
@@ -103,17 +96,7 @@ def create_payment_intent(
                 detail="Tenant-user addon is not synced to Stripe yet.",
             )
 
-        line_items.append(
-            {
-                "price": addon_price_id,
-                "quantity": extra_tenant_users,
-            }
-        )
-
     try:
-        # Temporary PaymentIntent for Stripe Elements flow.
-        # Amount must come from Stripe prices or your own trusted DB math.
-        # For now, calculate from DB values.
         amount_usd = float(plan.price_usd or 0)
 
         if extra_tenant_users > 0:
@@ -140,7 +123,7 @@ def create_payment_intent(
         intent = stripe.PaymentIntent.create(
             amount=amount_cents,
             currency="usd",
-            automatic_payment_methods={"enabled": True},
+            payment_method_types=["card"],
             receipt_email=str(getattr(current_user, "email", "") or "").strip() or None,
             metadata={
                 "user_id": str(current_user.id),
