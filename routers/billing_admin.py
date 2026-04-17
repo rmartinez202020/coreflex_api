@@ -48,6 +48,14 @@ class SyncOneResponse(BaseModel):
     message: str
 
 
+class UpdatePlanPriceRequest(BaseModel):
+    price_usd: float
+
+
+class UpdateAddonPriceRequest(BaseModel):
+    price_usd: float
+
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -97,6 +105,18 @@ def amount_to_cents(value) -> int:
         raise HTTPException(status_code=400, detail="Price must be zero or greater.")
 
     return int(dec * 100)
+
+
+def normalize_price_decimal(value) -> Decimal:
+    try:
+        dec = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid price amount.")
+
+    if dec < 0:
+        raise HTTPException(status_code=400, detail="Price must be zero or greater.")
+
+    return dec
 
 
 def plan_display_name(plan: BillingPlan) -> str:
@@ -252,6 +272,78 @@ def list_billing_addons(
         }
         for r in rows
     ]
+
+
+@router.patch("/plans/{plan_id}")
+def update_billing_plan_price(
+    plan_id: int,
+    payload: UpdatePlanPriceRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_owner_user(current_user)
+
+    plan = db.query(BillingPlan).filter(BillingPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Billing plan not found.")
+
+    try:
+        new_price = normalize_price_decimal(payload.price_usd)
+
+        plan.price_usd = new_price
+        db.add(plan)
+        db.commit()
+        db.refresh(plan)
+
+        return {
+            "ok": True,
+            "item_type": "plan",
+            "item_id": plan.id,
+            "price_usd": float(plan.price_usd),
+            "message": "Plan price updated successfully.",
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
+
+
+@router.patch("/addons/{addon_id}")
+def update_billing_addon_price(
+    addon_id: int,
+    payload: UpdateAddonPriceRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_owner_user(current_user)
+
+    addon = db.query(BillingAddon).filter(BillingAddon.id == addon_id).first()
+    if not addon:
+        raise HTTPException(status_code=404, detail="Billing addon not found.")
+
+    try:
+        new_price = normalize_price_decimal(payload.price_usd)
+
+        addon.price_usd = new_price
+        db.add(addon)
+        db.commit()
+        db.refresh(addon)
+
+        return {
+            "ok": True,
+            "item_type": "addon",
+            "item_id": addon.id,
+            "price_usd": float(addon.price_usd),
+            "message": "Add-on price updated successfully.",
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
 
 @router.post("/plans/{plan_id}/sync-to-stripe", response_model=SyncOneResponse)
