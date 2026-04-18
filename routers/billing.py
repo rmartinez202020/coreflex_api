@@ -42,6 +42,60 @@ def normalize_billing_type(value: str) -> str:
     return v
 
 
+@router.get("/catalog")
+def get_billing_catalog(
+    db: Session = Depends(get_db),
+):
+    plans = (
+        db.query(BillingPlan)
+        .filter(BillingPlan.is_active.is_(True))
+        .order_by(BillingPlan.sort_order.asc(), BillingPlan.id.asc())
+        .all()
+    )
+
+    addons = (
+        db.query(BillingAddon)
+        .filter(BillingAddon.is_active.is_(True))
+        .order_by(BillingAddon.id.asc())
+        .all()
+    )
+
+    return {
+        "ok": True,
+        "plans": [
+            {
+                "id": p.id,
+                "plan_key": p.plan_key,
+                "plan_name": p.plan_name,
+                "billing_type": p.billing_type,
+                "price_usd": float(p.price_usd) if p.price_usd is not None else None,
+                "currency": getattr(p, "currency", "usd"),
+                "device_limit": p.device_limit,
+                "tenant_user_limit": p.tenant_user_limit,
+                "data_history_days": p.data_history_days,
+                "sort_order": p.sort_order,
+                "is_active": p.is_active,
+                "stripe_product_id": p.stripe_product_id,
+                "stripe_price_id": p.stripe_price_id,
+            }
+            for p in plans
+        ],
+        "addons": [
+            {
+                "id": a.id,
+                "addon_key": a.addon_key,
+                "billing_type": a.billing_type,
+                "price_usd": float(a.price_usd) if a.price_usd is not None else None,
+                "currency": getattr(a, "currency", "usd"),
+                "is_active": a.is_active,
+                "stripe_product_id": getattr(a, "stripe_product_id", None),
+                "stripe_price_id": a.stripe_price_id,
+            }
+            for a in addons
+        ],
+    }
+
+
 @router.post("/create-payment-intent")
 def create_payment_intent(
     payload: CreatePaymentIntentRequest,
@@ -73,6 +127,7 @@ def create_payment_intent(
             detail="Selected plan is not synced to Stripe yet.",
         )
 
+    addon = None
     if extra_tenant_users > 0:
         addon = (
             db.query(BillingAddon)
@@ -99,18 +154,8 @@ def create_payment_intent(
     try:
         amount_usd = float(plan.price_usd or 0)
 
-        if extra_tenant_users > 0:
-            addon = (
-                db.query(BillingAddon)
-                .filter(
-                    BillingAddon.addon_key == "tenant_user",
-                    BillingAddon.billing_type == billing_type,
-                    BillingAddon.is_active.is_(True),
-                )
-                .first()
-            )
-            if addon:
-                amount_usd += float(addon.price_usd or 0) * extra_tenant_users
+        if extra_tenant_users > 0 and addon:
+            amount_usd += float(addon.price_usd or 0) * extra_tenant_users
 
         amount_cents = int(round(amount_usd * 100))
 
