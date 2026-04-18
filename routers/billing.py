@@ -188,6 +188,10 @@ def create_payment_intent(
     billing_type = normalize_billing_type(payload.billingType)
     extra_tenant_users = max(0, int(payload.extraTenantUsers or 0))
 
+    subscription = _get_or_create_user_subscription(db, current_user.id)
+    current_plan_key = str(subscription.plan_key or "free").strip().lower()
+    is_current_plan = current_plan_key == plan_key
+
     plan = (
         db.query(BillingPlan)
         .filter(
@@ -232,7 +236,11 @@ def create_payment_intent(
             )
 
     try:
-        plan_amount_usd = to_money_decimal(plan.price_usd)
+        # ✅ NEVER charge the current plan
+        if is_current_plan:
+            plan_amount_usd = Decimal("0.00")
+        else:
+            plan_amount_usd = to_money_decimal(plan.price_usd)
 
         addon_unit_price_usd = Decimal("0.00")
         addon_amount_usd = Decimal("0.00")
@@ -279,6 +287,8 @@ def create_payment_intent(
                 "user_id": str(current_user.id),
                 "user_email": str(getattr(current_user, "email", "") or ""),
                 "plan_key": plan_key,
+                "current_plan_key": current_plan_key,
+                "is_current_plan": "true" if is_current_plan else "false",
                 "billing_type": billing_type,
                 "extra_tenant_users": str(extra_tenant_users),
                 "tax_state": "NJ",
@@ -352,11 +362,6 @@ def apply_payment(
 
     if already_applied:
         subscription = _get_or_create_user_subscription(db, current_user.id)
-        tenant_users_used = (
-            db.query(User)
-            .filter(User.id == current_user.id)
-            .first()
-        )
         return {
             "ok": True,
             "alreadyApplied": True,
