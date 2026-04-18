@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from auth_utils import get_current_user
 from database import get_db
-from models import User, BillingPlan, BillingAddon
+from models import User, BillingPlan, BillingAddon, UserSubscription
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
 
@@ -24,6 +24,10 @@ class CreatePaymentIntentRequest(BaseModel):
     planKey: str
     billingType: str
     extraTenantUsers: int = 0
+
+
+class ApplyPaymentRequest(BaseModel):
+    paymentIntentId: str
 
 
 def ensure_stripe_ready() -> None:
@@ -60,9 +64,7 @@ def quantize_decimal(value: Decimal, places: str = "0.01") -> Decimal:
 
 
 def money_to_cents(value: Decimal) -> int:
-    return int(
-        quantize_decimal(value, "0.01") * Decimal("100")
-    )
+    return int(quantize_decimal(value, "0.01") * Decimal("100"))
 
 
 def decimal_to_float_2(value: Decimal) -> float:
@@ -70,9 +72,11 @@ def decimal_to_float_2(value: Decimal) -> float:
 
 
 def percent_display_2_from_rate(rate: Decimal) -> float:
-    return float((Decimal(str(rate)) * Decimal("100")).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    ))
+    return float(
+        (Decimal(str(rate)) * Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+    )
 
 
 def rate_display_2_from_percent(percent_value: float) -> float:
@@ -81,6 +85,28 @@ def rate_display_2_from_percent(percent_value: float) -> float:
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
     )
+
+
+def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscription:
+    row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == user_id)
+        .first()
+    )
+    if row:
+        return row
+
+    row = UserSubscription(
+        user_id=user_id,
+        plan_key="free",
+        device_limit=1,
+        tenants_users_limit=1,
+        is_active=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 @router.get("/catalog")
@@ -262,12 +288,14 @@ def create_payment_intent(
                 "subtotal_usd": str(subtotal_usd),
                 "tax_amount_usd": str(tax_amount_usd),
                 "total_usd": str(total_usd),
+                "applied": "false",
             },
         )
 
         return {
             "ok": True,
             "clientSecret": intent.client_secret,
+            "paymentIntentId": intent.id,
             "amount": amount_cents,
             "currency": "usd",
             "planAmount": decimal_to_float_2(plan_amount_usd),
@@ -282,3 +310,99 @@ def create_payment_intent(
 
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+
+@router.post("/apply-payment")
+def apply_payment(
+    payload: ApplyPaymentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_stripe_ready()
+
+    payment_intent_id = str(payload.paymentIntentId or "").strip()
+    if not payment_intent_id:
+        raise HTTPException(status_code=400, detail="paymentIntentId is required.")
+
+    try:
+        intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+    if not intent:
+        raise HTTPException(status_code=404, detail="PaymentIntent not found.")
+
+    if str(getattr(intent, "status", "") or "").strip().lower() != "succeeded":
+        raise HTTPException(
+            status_code=400,
+            detail="PaymentIntent is not completed yet.",
+        )
+
+    metadata = getattr(intent, "metadata", {}) or {}
+
+    intent_user_id = str(metadata.get("user_id") or "").strip()
+    if intent_user_id != str(current_user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="This payment does not belong to the authenticated user.",
+        )
+
+    already_applied = str(metadata.get("applied") or "").strip().lower() == "true"
+    extra_tenant_users = max(0, int(metadata.get("extra_tenant_users") or 0))
+
+    if already_applied:
+        subscription = _get_or_create_user_subscription(db, current_user.id)
+        tenant_users_used = (
+            db.query(User)
+            .filter(User.id == current_user.id)
+            .first()
+        )
+        return {
+            "ok": True,
+            "alreadyApplied": True,
+            "added": 0,
+            "planKey": str(subscription.plan_key or "free").strip().lower(),
+            "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
+            "tenantUsersUsed": None,
+            "message": "Payment was already applied earlier.",
+        }
+
+    if extra_tenant_users <= 0:
+        subscription = _get_or_create_user_subscription(db, current_user.id)
+        return {
+            "ok": True,
+            "alreadyApplied": False,
+            "added": 0,
+            "planKey": str(subscription.plan_key or "free").strip().lower(),
+            "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
+            "tenantUsersUsed": None,
+            "message": "No additional tenant-users were purchased.",
+        }
+
+    subscription = _get_or_create_user_subscription(db, current_user.id)
+    current_limit = int(subscription.tenants_users_limit or 0)
+    subscription.tenants_users_limit = current_limit + extra_tenant_users
+
+    db.commit()
+    db.refresh(subscription)
+
+    try:
+        stripe.PaymentIntent.modify(
+            payment_intent_id,
+            metadata={
+                **metadata,
+                "applied": "true",
+            },
+        )
+    except stripe.error.StripeError:
+        pass
+
+    return {
+        "ok": True,
+        "alreadyApplied": False,
+        "added": extra_tenant_users,
+        "planKey": str(subscription.plan_key or "free").strip().lower(),
+        "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
+        "tenantUsersUsed": None,
+        "message": "Payment applied successfully.",
+    }
