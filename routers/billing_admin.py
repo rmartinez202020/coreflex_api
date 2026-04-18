@@ -130,10 +130,31 @@ def addon_display_name(addon: BillingAddon) -> str:
     return key.replace("_", " ").title()
 
 
+def stripe_product_exists(product_id: str) -> bool:
+    pid = str(product_id or "").strip()
+    if not pid:
+        return False
+
+    try:
+        product = stripe.Product.retrieve(pid)
+        # Stripe objects usually expose deleted only for deleted resources.
+        # If deleted is True, we must recreate.
+        if getattr(product, "deleted", False):
+            return False
+        return True
+    except stripe.error.InvalidRequestError:
+        return False
+
+
 def ensure_plan_product(plan: BillingPlan) -> str:
     existing_product_id = str(plan.stripe_product_id or "").strip()
     if existing_product_id:
-        return existing_product_id
+        if stripe_product_exists(existing_product_id):
+            return existing_product_id
+
+        # stale / deleted / wrong-mode product reference
+        plan.stripe_product_id = None
+        plan.stripe_price_id = None
 
     product = stripe.Product.create(
         name=plan_display_name(plan),
@@ -141,6 +162,7 @@ def ensure_plan_product(plan: BillingPlan) -> str:
             "source": "coreflex_billing_plans",
             "plan_id": str(plan.id),
             "plan_key": str(plan.plan_key or ""),
+            "billing_type": str(plan.billing_type or ""),
         },
     )
     return str(product.id)
@@ -149,7 +171,13 @@ def ensure_plan_product(plan: BillingPlan) -> str:
 def ensure_addon_product(addon: BillingAddon) -> str:
     existing_product_id = str(getattr(addon, "stripe_product_id", "") or "").strip()
     if existing_product_id:
-        return existing_product_id
+        if stripe_product_exists(existing_product_id):
+            return existing_product_id
+
+        # stale / deleted / wrong-mode product reference
+        if hasattr(addon, "stripe_product_id"):
+            addon.stripe_product_id = None
+        addon.stripe_price_id = None
 
     product = stripe.Product.create(
         name=addon_display_name(addon),
@@ -157,6 +185,7 @@ def ensure_addon_product(addon: BillingAddon) -> str:
             "source": "coreflex_billing_addons",
             "addon_id": str(addon.id),
             "addon_key": str(addon.addon_key or ""),
+            "billing_type": str(addon.billing_type or ""),
         },
     )
     return str(product.id)
@@ -291,6 +320,10 @@ def update_billing_plan_price(
         new_price = normalize_price_decimal(payload.price_usd)
 
         plan.price_usd = new_price
+
+        # ✅ force fresh Stripe price on next sync so admin can clearly resync
+        plan.stripe_price_id = None
+
         db.add(plan)
         db.commit()
         db.refresh(plan)
@@ -300,7 +333,9 @@ def update_billing_plan_price(
             "item_type": "plan",
             "item_id": plan.id,
             "price_usd": float(plan.price_usd),
-            "message": "Plan price updated successfully.",
+            "stripe_product_id": plan.stripe_product_id,
+            "stripe_price_id": plan.stripe_price_id,
+            "message": "Plan price updated successfully. Re-sync to Stripe to publish the new price.",
         }
     except HTTPException:
         db.rollback()
@@ -327,6 +362,10 @@ def update_billing_addon_price(
         new_price = normalize_price_decimal(payload.price_usd)
 
         addon.price_usd = new_price
+
+        # ✅ force fresh Stripe price on next sync so admin can clearly resync
+        addon.stripe_price_id = None
+
         db.add(addon)
         db.commit()
         db.refresh(addon)
@@ -336,7 +375,9 @@ def update_billing_addon_price(
             "item_type": "addon",
             "item_id": addon.id,
             "price_usd": float(addon.price_usd),
-            "message": "Add-on price updated successfully.",
+            "stripe_product_id": getattr(addon, "stripe_product_id", None),
+            "stripe_price_id": addon.stripe_price_id,
+            "message": "Add-on price updated successfully. Re-sync to Stripe to publish the new price.",
         }
     except HTTPException:
         db.rollback()
@@ -408,7 +449,6 @@ def sync_addon_to_stripe(
         product_id = ensure_addon_product(addon)
         price_id = create_addon_price(addon, product_id)
 
-        # if your table does not yet have stripe_product_id, add that column first
         if hasattr(addon, "stripe_product_id"):
             addon.stripe_product_id = product_id
         addon.stripe_price_id = price_id
