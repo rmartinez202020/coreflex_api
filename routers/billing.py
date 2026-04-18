@@ -1,5 +1,6 @@
 # routers/billing.py
 import os
+from decimal import Decimal, ROUND_HALF_UP
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +14,7 @@ from models import User, BillingPlan, BillingAddon
 router = APIRouter(prefix="/billing", tags=["Billing"])
 
 STRIPE_SECRET_KEY = str(os.getenv("STRIPE_SECRET_KEY") or "").strip()
+NJ_SALES_TAX_RATE = Decimal("0.06625")  # 6.625%
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -40,6 +42,21 @@ def normalize_billing_type(value: str) -> str:
             detail="billingType must be monthly or one_time.",
         )
     return v
+
+
+def to_money_decimal(value) -> Decimal:
+    try:
+        return Decimal(str(value or 0)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid money amount.")
+
+
+def money_to_cents(value: Decimal) -> int:
+    return int(
+        value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * Decimal("100")
+    )
 
 
 @router.get("/catalog")
@@ -93,6 +110,12 @@ def get_billing_catalog(
             }
             for a in addons
         ],
+        "tax": {
+            "state": "NJ",
+            "label": "NJ Sales Tax",
+            "rate": float(NJ_SALES_TAX_RATE),
+            "rate_percent": 6.625,
+        },
     }
 
 
@@ -152,12 +175,30 @@ def create_payment_intent(
             )
 
     try:
-        amount_usd = float(plan.price_usd or 0)
+        plan_amount_usd = to_money_decimal(plan.price_usd)
+
+        addon_unit_price_usd = Decimal("0.00")
+        addon_amount_usd = Decimal("0.00")
 
         if extra_tenant_users > 0 and addon:
-            amount_usd += float(addon.price_usd or 0) * extra_tenant_users
+            addon_unit_price_usd = to_money_decimal(addon.price_usd)
+            addon_amount_usd = (
+                addon_unit_price_usd * Decimal(extra_tenant_users)
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        amount_cents = int(round(amount_usd * 100))
+        subtotal_usd = (plan_amount_usd + addon_amount_usd).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        tax_amount_usd = (subtotal_usd * NJ_SALES_TAX_RATE).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        total_usd = (subtotal_usd + tax_amount_usd).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        amount_cents = money_to_cents(total_usd)
 
         if amount_cents <= 0:
             raise HTTPException(
@@ -176,6 +217,13 @@ def create_payment_intent(
                 "plan_key": plan_key,
                 "billing_type": billing_type,
                 "extra_tenant_users": str(extra_tenant_users),
+                "tax_state": "NJ",
+                "tax_rate": str(NJ_SALES_TAX_RATE),
+                "plan_amount_usd": str(plan_amount_usd),
+                "addon_amount_usd": str(addon_amount_usd),
+                "subtotal_usd": str(subtotal_usd),
+                "tax_amount_usd": str(tax_amount_usd),
+                "total_usd": str(total_usd),
             },
         )
 
@@ -184,6 +232,14 @@ def create_payment_intent(
             "clientSecret": intent.client_secret,
             "amount": amount_cents,
             "currency": "usd",
+            "planAmount": float(plan_amount_usd),
+            "addonAmount": float(addon_amount_usd),
+            "subtotal": float(subtotal_usd),
+            "tax": float(tax_amount_usd),
+            "taxRate": float(NJ_SALES_TAX_RATE),
+            "taxRatePercent": 6.625,
+            "taxLabel": "NJ Sales Tax",
+            "total": float(total_usd),
         }
 
     except stripe.error.StripeError as e:
