@@ -14,7 +14,7 @@ from models import User, BillingPlan, BillingAddon
 router = APIRouter(prefix="/billing", tags=["Billing"])
 
 STRIPE_SECRET_KEY = str(os.getenv("STRIPE_SECRET_KEY") or "").strip()
-NJ_SALES_TAX_RATE = Decimal("0.06625")  # 6.625%
+NJ_SALES_TAX_RATE = Decimal("0.06625")  # 6.625% used for actual tax calculation
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -53,9 +53,33 @@ def to_money_decimal(value) -> Decimal:
         raise HTTPException(status_code=400, detail="Invalid money amount.")
 
 
+def quantize_decimal(value: Decimal, places: str = "0.01") -> Decimal:
+    return Decimal(str(value or 0)).quantize(
+        Decimal(places), rounding=ROUND_HALF_UP
+    )
+
+
 def money_to_cents(value: Decimal) -> int:
     return int(
-        value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * Decimal("100")
+        quantize_decimal(value, "0.01") * Decimal("100")
+    )
+
+
+def decimal_to_float_2(value: Decimal) -> float:
+    return float(quantize_decimal(value, "0.01"))
+
+
+def percent_display_2_from_rate(rate: Decimal) -> float:
+    return float((Decimal(str(rate)) * Decimal("100")).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    ))
+
+
+def rate_display_2_from_percent(percent_value: float) -> float:
+    return float(
+        (Decimal(str(percent_value)) / Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
     )
 
 
@@ -77,6 +101,9 @@ def get_billing_catalog(
         .all()
     )
 
+    tax_rate_percent_display = percent_display_2_from_rate(NJ_SALES_TAX_RATE)
+    tax_rate_display = rate_display_2_from_percent(tax_rate_percent_display)
+
     return {
         "ok": True,
         "plans": [
@@ -85,7 +112,9 @@ def get_billing_catalog(
                 "plan_key": p.plan_key,
                 "plan_name": p.plan_name,
                 "billing_type": p.billing_type,
-                "price_usd": float(p.price_usd) if p.price_usd is not None else None,
+                "price_usd": float(to_money_decimal(p.price_usd))
+                if p.price_usd is not None
+                else None,
                 "currency": getattr(p, "currency", "usd"),
                 "device_limit": p.device_limit,
                 "tenant_user_limit": p.tenant_user_limit,
@@ -102,7 +131,9 @@ def get_billing_catalog(
                 "id": a.id,
                 "addon_key": a.addon_key,
                 "billing_type": a.billing_type,
-                "price_usd": float(a.price_usd) if a.price_usd is not None else None,
+                "price_usd": float(to_money_decimal(a.price_usd))
+                if a.price_usd is not None
+                else None,
                 "currency": getattr(a, "currency", "usd"),
                 "is_active": a.is_active,
                 "stripe_product_id": getattr(a, "stripe_product_id", None),
@@ -113,8 +144,8 @@ def get_billing_catalog(
         "tax": {
             "state": "NJ",
             "label": "NJ Sales Tax",
-            "rate": float(NJ_SALES_TAX_RATE),
-            "rate_percent": 6.625,
+            "rate": tax_rate_display,
+            "rate_percent": tax_rate_percent_display,
         },
     }
 
@@ -182,20 +213,24 @@ def create_payment_intent(
 
         if extra_tenant_users > 0 and addon:
             addon_unit_price_usd = to_money_decimal(addon.price_usd)
-            addon_amount_usd = (
-                addon_unit_price_usd * Decimal(extra_tenant_users)
-            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            addon_amount_usd = quantize_decimal(
+                addon_unit_price_usd * Decimal(extra_tenant_users),
+                "0.01",
+            )
 
-        subtotal_usd = (plan_amount_usd + addon_amount_usd).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
+        subtotal_usd = quantize_decimal(
+            plan_amount_usd + addon_amount_usd,
+            "0.01",
         )
 
-        tax_amount_usd = (subtotal_usd * NJ_SALES_TAX_RATE).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
+        tax_amount_usd = quantize_decimal(
+            subtotal_usd * NJ_SALES_TAX_RATE,
+            "0.01",
         )
 
-        total_usd = (subtotal_usd + tax_amount_usd).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
+        total_usd = quantize_decimal(
+            subtotal_usd + tax_amount_usd,
+            "0.01",
         )
 
         amount_cents = money_to_cents(total_usd)
@@ -205,6 +240,9 @@ def create_payment_intent(
                 status_code=400,
                 detail="Payment amount must be greater than zero.",
             )
+
+        tax_rate_percent_display = percent_display_2_from_rate(NJ_SALES_TAX_RATE)
+        tax_rate_display = rate_display_2_from_percent(tax_rate_percent_display)
 
         intent = stripe.PaymentIntent.create(
             amount=amount_cents,
@@ -232,14 +270,14 @@ def create_payment_intent(
             "clientSecret": intent.client_secret,
             "amount": amount_cents,
             "currency": "usd",
-            "planAmount": float(plan_amount_usd),
-            "addonAmount": float(addon_amount_usd),
-            "subtotal": float(subtotal_usd),
-            "tax": float(tax_amount_usd),
-            "taxRate": float(NJ_SALES_TAX_RATE),
-            "taxRatePercent": 6.625,
+            "planAmount": decimal_to_float_2(plan_amount_usd),
+            "addonAmount": decimal_to_float_2(addon_amount_usd),
+            "subtotal": decimal_to_float_2(subtotal_usd),
+            "tax": decimal_to_float_2(tax_amount_usd),
+            "taxRate": tax_rate_display,
+            "taxRatePercent": tax_rate_percent_display,
             "taxLabel": "NJ Sales Tax",
-            "total": float(total_usd),
+            "total": decimal_to_float_2(total_usd),
         }
 
     except stripe.error.StripeError as e:
