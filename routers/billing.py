@@ -26,7 +26,7 @@ FRONTEND_BASE_URL = str(
 
 STRIPE_CHECKOUT_SUCCESS_URL = str(
     os.getenv("STRIPE_CHECKOUT_SUCCESS_URL")
-    or f"{FRONTEND_BASE_URL}/?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
+    or f"{FRONTEND_BASE_URL}/app?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
 ).strip()
 
 STRIPE_CHECKOUT_CANCEL_URL = str(
