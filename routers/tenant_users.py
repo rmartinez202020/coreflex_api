@@ -17,6 +17,7 @@ from models import (
     CustomerDashboard,
     CustomerLocation,
     User,
+    UserSubscription,
 )
 from auth_utils import get_current_user
 from utils.email_service import send_tenant_credentials_email
@@ -40,9 +41,10 @@ class TenantUserCreate(BaseModel):
     customer_name: str
     dashboard_ids: List[int]
 
+
 class TenantUserUpdate(BaseModel):
     name: str
-    email: EmailStr
+    email: str
     access: str
     customer_name: str
     dashboard_ids: List[int]
@@ -69,11 +71,13 @@ class TenantUserOut(BaseModel):
     class Config:
         from_attributes = True
 
+
 # =========================
 # 🔧 HELPERS
 # =========================
 def _norm(value: Optional[str]) -> str:
     return str(value or "").strip()
+
 
 def _now_utc():
     return datetime.now(timezone.utc)
@@ -88,12 +92,15 @@ def _validate_access(access: str) -> str:
         )
     return v
 
+
 def _generate_password(length: int = 12) -> str:
     chars = string.ascii_letters + string.digits
     return "".join(secrets.choice(chars) for _ in range(length))
 
+
 def _hash_password(password: str) -> str:
     return pwd_context.hash(password)
+
 
 def _serialize_tenant_user(row: TenantUser) -> TenantUserOut:
     dashboards = []
@@ -119,6 +126,61 @@ def _serialize_tenant_user(row: TenantUser) -> TenantUserOut:
     )
 
 
+def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscription:
+    row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == user_id)
+        .first()
+    )
+    if row:
+        return row
+
+    row = UserSubscription(
+        user_id=user_id,
+        plan_key="free",
+        device_limit=1,
+        tenants_users_limit=1,
+        is_active=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _get_tenant_user_capacity(db: Session, owner_user_id: int) -> dict:
+    subscription = _get_or_create_user_subscription(db, owner_user_id)
+
+    used_count = (
+        db.query(TenantUser)
+        .filter(TenantUser.owner_user_id == owner_user_id)
+        .count()
+    )
+
+    limit_count = int(subscription.tenants_users_limit or 0)
+    available_count = max(0, limit_count - used_count)
+
+    return {
+        "limit": limit_count,
+        "used": used_count,
+        "available": available_count,
+    }
+
+
+def _ensure_tenant_user_slot_available(db: Session, owner_user_id: int) -> None:
+    capacity = _get_tenant_user_capacity(db, owner_user_id)
+
+    if capacity["available"] <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Tenant-user limit reached. "
+                f"Used {capacity['used']} of {capacity['limit']}. "
+                f"Please purchase an additional tenant-user slot."
+            ),
+        )
+
+
 def _require_customer_owned_by_admin(
     db: Session,
     owner_user_id: int,
@@ -135,6 +197,7 @@ def _require_customer_owned_by_admin(
             status_code=400,
             detail="Customer not found for this admin user.",
         )
+
 
 def _validate_dashboards_owned_by_admin_and_customer(
     db: Session,
@@ -228,6 +291,24 @@ def _build_dashboard_public_links(rows: List[CustomerDashboard]) -> List[dict]:
 
     return links
 
+
+# =========================
+# ✅ OPTIONAL SUMMARY ENDPOINT
+# =========================
+@router.get("/summary")
+def get_tenant_user_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    capacity = _get_tenant_user_capacity(db, current_user.id)
+    return {
+        "ok": True,
+        "availableTenantUsers": capacity["available"],
+        "usedTenantUsers": capacity["used"],
+        "tenantUsersLimit": capacity["limit"],
+    }
+
+
 # =========================
 # ✅ CREATE TENANT USER
 # =========================
@@ -250,6 +331,8 @@ def create_tenant_user(
         raise HTTPException(status_code=400, detail="Email is required.")
     if not customer_name:
         raise HTTPException(status_code=400, detail="Customer is required.")
+
+    _ensure_tenant_user_slot_available(db, current_user.id)
 
     _require_customer_owned_by_admin(db, current_user.id, customer_name)
     dashboard_rows = _validate_dashboards_owned_by_admin_and_customer(
@@ -312,6 +395,7 @@ def create_tenant_user(
 
     return _serialize_tenant_user(new_user)
 
+
 # =========================
 # ✅ LIST TENANT USERS
 # =========================
@@ -329,6 +413,7 @@ def list_tenant_users(
     )
     return [_serialize_tenant_user(row) for row in rows]
 
+
 # =========================
 # ✅ GET ONE TENANT USER
 # =========================
@@ -340,6 +425,7 @@ def get_tenant_user(
 ):
     row = _get_tenant_user_owned_by_admin(db, tenant_user_id, current_user.id)
     return _serialize_tenant_user(row)
+
 
 # =========================
 # ✅ UPDATE TENANT USER
@@ -396,6 +482,7 @@ def update_tenant_user(
     db.refresh(row)
 
     return _serialize_tenant_user(row)
+
 
 # =========================
 # ✅ DELETE TENANT USER
