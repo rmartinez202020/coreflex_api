@@ -34,8 +34,6 @@ STRIPE_CHECKOUT_CANCEL_URL = str(
     or f"{FRONTEND_BASE_URL}/?payment=cancel"
 ).strip()
 
-
-
 NJ_SALES_TAX_RATE = Decimal("0.06625")  # 6.625% used for actual tax calculation
 
 if STRIPE_SECRET_KEY:
@@ -448,10 +446,6 @@ def get_billing_catalog(
     }
 
 
-# -------------------------------------------------------------------
-# Legacy PaymentIntent endpoint
-# Keep this during transition so older frontend code does not break.
-# -------------------------------------------------------------------
 @router.post("/create-payment-intent")
 def create_payment_intent(
     payload: CreatePaymentIntentRequest,
@@ -507,10 +501,6 @@ def create_payment_intent(
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
 
-# -------------------------------------------------------------------
-# New Hosted Stripe Checkout endpoint
-# Frontend should call this and redirect the user to returned `url`.
-# -------------------------------------------------------------------
 @router.post("/create-checkout-session")
 def create_checkout_session(
     payload: CreateCheckoutSessionRequest,
@@ -622,10 +612,6 @@ def create_checkout_session(
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
 
-# -------------------------------------------------------------------
-# Optional endpoint for frontend success page
-# Allows frontend to read back checkout session state if needed.
-# -------------------------------------------------------------------
 @router.get("/checkout-session/{session_id}")
 def get_checkout_session(
     session_id: str,
@@ -662,10 +648,80 @@ def get_checkout_session(
     }
 
 
-# -------------------------------------------------------------------
-# Manual apply endpoint remains available for compatibility / admin recovery.
-# Webhook is now the recommended source of truth.
-# -------------------------------------------------------------------
+@router.post("/checkout-session/{session_id}/apply")
+def apply_checkout_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_stripe_ready()
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required.")
+
+    try:
+        session = stripe.checkout.Session.retrieve(sid)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Checkout session not found.")
+
+    session_metadata = getattr(session, "metadata", {}) or {}
+    session_user_id = str(session_metadata.get("user_id") or "").strip()
+
+    if session_user_id != str(current_user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="This checkout session does not belong to the authenticated user.",
+        )
+
+    payment_status = str(getattr(session, "payment_status", "") or "").strip().lower()
+    if payment_status != "paid":
+        raise HTTPException(
+            status_code=400,
+            detail="Checkout session is not paid.",
+        )
+
+    payment_intent_id = str(getattr(session, "payment_intent", "") or "").strip()
+    if not payment_intent_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Checkout session does not have a payment intent.",
+        )
+
+    try:
+        intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+    if not intent:
+        raise HTTPException(status_code=404, detail="PaymentIntent not found.")
+
+    intent_status = str(getattr(intent, "status", "") or "").strip().lower()
+    if intent_status != "succeeded":
+        raise HTTPException(
+            status_code=400,
+            detail="PaymentIntent is not completed yet.",
+        )
+
+    metadata = getattr(intent, "metadata", {}) or {}
+    intent_user_id = str(metadata.get("user_id") or "").strip()
+
+    if intent_user_id != str(current_user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="This payment does not belong to the authenticated user.",
+        )
+
+    return _apply_payment_effects(
+        db=db,
+        payment_intent_id=payment_intent_id,
+        metadata=metadata,
+    )
+
+
 @router.post("/apply-payment")
 def apply_payment(
     payload: ApplyPaymentRequest,
@@ -708,12 +764,6 @@ def apply_payment(
     )
 
 
-# -------------------------------------------------------------------
-# Stripe webhook endpoint
-# Configure Stripe to send:
-#   - checkout.session.completed
-#   - payment_intent.succeeded
-# -------------------------------------------------------------------
 @router.post("/stripe-webhook")
 async def stripe_webhook(
     request: Request,
