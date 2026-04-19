@@ -1,9 +1,10 @@
 # routers/billing.py
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 import stripe
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -14,6 +15,25 @@ from models import User, BillingPlan, BillingAddon, UserSubscription
 router = APIRouter(prefix="/billing", tags=["Billing"])
 
 STRIPE_SECRET_KEY = str(os.getenv("STRIPE_SECRET_KEY") or "").strip()
+STRIPE_WEBHOOK_SECRET = str(os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+
+# Frontend URLs for hosted Stripe Checkout redirects
+FRONTEND_BASE_URL = str(
+    os.getenv("COREFLEX_FRONTEND_URL")
+    or os.getenv("FRONTEND_URL")
+    or "http://localhost:3000"
+).strip().rstrip("/")
+
+STRIPE_CHECKOUT_SUCCESS_URL = str(
+    os.getenv("STRIPE_CHECKOUT_SUCCESS_URL")
+    or f"{FRONTEND_BASE_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
+).strip()
+
+STRIPE_CHECKOUT_CANCEL_URL = str(
+    os.getenv("STRIPE_CHECKOUT_CANCEL_URL")
+    or f"{FRONTEND_BASE_URL}/billing/cancel"
+).strip()
+
 NJ_SALES_TAX_RATE = Decimal("0.06625")  # 6.625% used for actual tax calculation
 
 if STRIPE_SECRET_KEY:
@@ -21,6 +41,12 @@ if STRIPE_SECRET_KEY:
 
 
 class CreatePaymentIntentRequest(BaseModel):
+    planKey: str
+    billingType: str
+    extraTenantUsers: int = 0
+
+
+class CreateCheckoutSessionRequest(BaseModel):
     planKey: str
     billingType: str
     extraTenantUsers: int = 0
@@ -35,6 +61,15 @@ def ensure_stripe_ready() -> None:
         raise HTTPException(
             status_code=500,
             detail="Stripe is not configured. Missing STRIPE_SECRET_KEY.",
+        )
+
+
+def ensure_stripe_webhook_ready() -> None:
+    ensure_stripe_ready()
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="Stripe webhook is not configured. Missing STRIPE_WEBHOOK_SECRET.",
         )
 
 
@@ -87,6 +122,17 @@ def rate_display_2_from_percent(percent_value: float) -> float:
     )
 
 
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _safe_int(value, default=0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
 def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscription:
     row = (
         db.query(UserSubscription)
@@ -107,6 +153,230 @@ def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscript
     db.commit()
     db.refresh(row)
     return row
+
+
+def _resolve_plan_and_addon_for_purchase(
+    db: Session,
+    plan_key: str,
+    billing_type: str,
+    extra_tenant_users: int,
+):
+    plan = (
+        db.query(BillingPlan)
+        .filter(
+            BillingPlan.plan_key == plan_key,
+            BillingPlan.billing_type == billing_type,
+            BillingPlan.is_active.is_(True),
+        )
+        .first()
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Billing plan not found.")
+
+    addon = None
+    if extra_tenant_users > 0:
+        addon = (
+            db.query(BillingAddon)
+            .filter(
+                BillingAddon.addon_key == "tenant_user",
+                BillingAddon.billing_type == billing_type,
+                BillingAddon.is_active.is_(True),
+            )
+            .first()
+        )
+        if not addon:
+            raise HTTPException(
+                status_code=404,
+                detail="Tenant-user addon not found.",
+            )
+
+    return plan, addon
+
+
+def _build_purchase_context(
+    db: Session,
+    current_user: User,
+    plan_key: str,
+    billing_type: str,
+    extra_tenant_users: int,
+):
+    subscription = _get_or_create_user_subscription(db, current_user.id)
+    current_plan_key = str(subscription.plan_key or "free").strip().lower()
+    is_current_plan = current_plan_key == plan_key
+
+    plan, addon = _resolve_plan_and_addon_for_purchase(
+        db=db,
+        plan_key=plan_key,
+        billing_type=billing_type,
+        extra_tenant_users=extra_tenant_users,
+    )
+
+    if is_current_plan:
+        plan_amount_usd = Decimal("0.00")
+    else:
+        plan_amount_usd = to_money_decimal(plan.price_usd)
+
+    addon_unit_price_usd = Decimal("0.00")
+    addon_amount_usd = Decimal("0.00")
+
+    if extra_tenant_users > 0 and addon:
+        addon_unit_price_usd = to_money_decimal(addon.price_usd)
+        addon_amount_usd = quantize_decimal(
+            addon_unit_price_usd * Decimal(extra_tenant_users),
+            "0.01",
+        )
+
+    subtotal_usd = quantize_decimal(
+        plan_amount_usd + addon_amount_usd,
+        "0.01",
+    )
+
+    tax_amount_usd = quantize_decimal(
+        subtotal_usd * NJ_SALES_TAX_RATE,
+        "0.01",
+    )
+
+    total_usd = quantize_decimal(
+        subtotal_usd + tax_amount_usd,
+        "0.01",
+    )
+
+    amount_cents = money_to_cents(total_usd)
+
+    tax_rate_percent_display = percent_display_2_from_rate(NJ_SALES_TAX_RATE)
+    tax_rate_display = rate_display_2_from_percent(tax_rate_percent_display)
+
+    metadata = {
+        "user_id": str(current_user.id),
+        "user_email": str(getattr(current_user, "email", "") or ""),
+        "plan_key": str(plan_key),
+        "current_plan_key": str(current_plan_key),
+        "is_current_plan": "true" if is_current_plan else "false",
+        "billing_type": str(billing_type),
+        "extra_tenant_users": str(extra_tenant_users),
+        "tax_state": "NJ",
+        "tax_rate": str(NJ_SALES_TAX_RATE),
+        "plan_amount_usd": str(plan_amount_usd),
+        "addon_amount_usd": str(addon_amount_usd),
+        "subtotal_usd": str(subtotal_usd),
+        "tax_amount_usd": str(tax_amount_usd),
+        "total_usd": str(total_usd),
+        "applied": "false",
+    }
+
+    return {
+        "subscription": subscription,
+        "current_plan_key": current_plan_key,
+        "is_current_plan": is_current_plan,
+        "plan": plan,
+        "addon": addon,
+        "plan_amount_usd": plan_amount_usd,
+        "addon_unit_price_usd": addon_unit_price_usd,
+        "addon_amount_usd": addon_amount_usd,
+        "subtotal_usd": subtotal_usd,
+        "tax_amount_usd": tax_amount_usd,
+        "total_usd": total_usd,
+        "amount_cents": amount_cents,
+        "tax_rate": tax_rate_display,
+        "tax_rate_percent": tax_rate_percent_display,
+        "metadata": metadata,
+    }
+
+
+def _apply_payment_effects(
+    db: Session,
+    *,
+    payment_intent_id: str,
+    metadata: dict,
+):
+    raw_user_id = str(metadata.get("user_id") or "").strip()
+    if not raw_user_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid payment metadata: user_id.")
+
+    user_id = int(raw_user_id)
+    plan_key = str(metadata.get("plan_key") or "free").strip().lower()
+    billing_type = normalize_billing_type(metadata.get("billing_type"))
+    is_current_plan = (
+        str(metadata.get("is_current_plan") or "").strip().lower() == "true"
+    )
+    extra_tenant_users = max(0, _safe_int(metadata.get("extra_tenant_users"), 0))
+    already_applied = str(metadata.get("applied") or "").strip().lower() == "true"
+
+    subscription = _get_or_create_user_subscription(db, user_id)
+
+    if already_applied:
+        return {
+            "ok": True,
+            "alreadyApplied": True,
+            "added": 0,
+            "planKey": str(subscription.plan_key or "free").strip().lower(),
+            "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
+            "tenantUsersUsed": None,
+            "message": "Payment was already applied earlier.",
+        }
+
+    plan = (
+        db.query(BillingPlan)
+        .filter(
+            BillingPlan.plan_key == plan_key,
+            BillingPlan.billing_type == billing_type,
+            BillingPlan.is_active.is_(True),
+        )
+        .first()
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Billing plan not found.")
+
+    current_limit = int(subscription.tenants_users_limit or 0)
+    base_tenant_limit = int(plan.tenant_user_limit or 0)
+    base_device_limit = int(plan.device_limit or 0)
+
+    if is_current_plan:
+        new_tenant_limit = current_limit + extra_tenant_users
+        new_plan_key = str(subscription.plan_key or "free").strip().lower()
+        new_device_limit = int(subscription.device_limit or base_device_limit or 0)
+    else:
+        new_tenant_limit = base_tenant_limit + extra_tenant_users
+        new_plan_key = plan_key
+        new_device_limit = base_device_limit
+
+    subscription.plan_key = new_plan_key
+    subscription.device_limit = new_device_limit
+    subscription.tenants_users_limit = new_tenant_limit
+    subscription.is_active = True
+
+    if hasattr(subscription, "status"):
+        subscription.status = "Active"
+
+    if hasattr(subscription, "renewal_date"):
+        if billing_type == "monthly":
+            subscription.renewal_date = _utcnow() + timedelta(days=30)
+        else:
+            subscription.renewal_date = None
+
+    db.commit()
+    db.refresh(subscription)
+
+    try:
+        stripe.PaymentIntent.modify(
+            payment_intent_id,
+            metadata={
+                **metadata,
+                "applied": "true",
+            },
+        )
+    except stripe.error.StripeError:
+        pass
+
+    return {
+        "ok": True,
+        "alreadyApplied": False,
+        "added": extra_tenant_users,
+        "planKey": str(subscription.plan_key or "free").strip().lower(),
+        "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
+        "tenantUsersUsed": None,
+        "message": "Payment applied successfully.",
+    }
 
 
 @router.get("/catalog")
@@ -176,6 +446,10 @@ def get_billing_catalog(
     }
 
 
+# -------------------------------------------------------------------
+# Legacy PaymentIntent endpoint
+# Keep this during transition so older frontend code does not break.
+# -------------------------------------------------------------------
 @router.post("/create-payment-intent")
 def create_payment_intent(
     payload: CreatePaymentIntentRequest,
@@ -188,140 +462,208 @@ def create_payment_intent(
     billing_type = normalize_billing_type(payload.billingType)
     extra_tenant_users = max(0, int(payload.extraTenantUsers or 0))
 
-    subscription = _get_or_create_user_subscription(db, current_user.id)
-    current_plan_key = str(subscription.plan_key or "free").strip().lower()
-    is_current_plan = current_plan_key == plan_key
-
-    plan = (
-        db.query(BillingPlan)
-        .filter(
-            BillingPlan.plan_key == plan_key,
-            BillingPlan.billing_type == billing_type,
-            BillingPlan.is_active.is_(True),
-        )
-        .first()
+    ctx = _build_purchase_context(
+        db=db,
+        current_user=current_user,
+        plan_key=plan_key,
+        billing_type=billing_type,
+        extra_tenant_users=extra_tenant_users,
     )
-    if not plan:
-        raise HTTPException(status_code=404, detail="Billing plan not found.")
-
-    plan_price_id = str(plan.stripe_price_id or "").strip()
-    if not plan_price_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Selected plan is not synced to Stripe yet.",
-        )
-
-    addon = None
-    if extra_tenant_users > 0:
-        addon = (
-            db.query(BillingAddon)
-            .filter(
-                BillingAddon.addon_key == "tenant_user",
-                BillingAddon.billing_type == billing_type,
-                BillingAddon.is_active.is_(True),
-            )
-            .first()
-        )
-        if not addon:
-            raise HTTPException(
-                status_code=404,
-                detail="Tenant-user addon not found.",
-            )
-
-        addon_price_id = str(addon.stripe_price_id or "").strip()
-        if not addon_price_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Tenant-user addon is not synced to Stripe yet.",
-            )
 
     try:
-        # ✅ NEVER charge the current plan
-        if is_current_plan:
-            plan_amount_usd = Decimal("0.00")
-        else:
-            plan_amount_usd = to_money_decimal(plan.price_usd)
-
-        addon_unit_price_usd = Decimal("0.00")
-        addon_amount_usd = Decimal("0.00")
-
-        if extra_tenant_users > 0 and addon:
-            addon_unit_price_usd = to_money_decimal(addon.price_usd)
-            addon_amount_usd = quantize_decimal(
-                addon_unit_price_usd * Decimal(extra_tenant_users),
-                "0.01",
-            )
-
-        subtotal_usd = quantize_decimal(
-            plan_amount_usd + addon_amount_usd,
-            "0.01",
-        )
-
-        tax_amount_usd = quantize_decimal(
-            subtotal_usd * NJ_SALES_TAX_RATE,
-            "0.01",
-        )
-
-        total_usd = quantize_decimal(
-            subtotal_usd + tax_amount_usd,
-            "0.01",
-        )
-
-        amount_cents = money_to_cents(total_usd)
-
-        if amount_cents <= 0:
+        if ctx["amount_cents"] <= 0:
             raise HTTPException(
                 status_code=400,
                 detail="Payment amount must be greater than zero.",
             )
 
-        tax_rate_percent_display = percent_display_2_from_rate(NJ_SALES_TAX_RATE)
-        tax_rate_display = rate_display_2_from_percent(tax_rate_percent_display)
-
         intent = stripe.PaymentIntent.create(
-            amount=amount_cents,
+            amount=ctx["amount_cents"],
             currency="usd",
             payment_method_types=["card"],
             receipt_email=str(getattr(current_user, "email", "") or "").strip() or None,
-            metadata={
-                "user_id": str(current_user.id),
-                "user_email": str(getattr(current_user, "email", "") or ""),
-                "plan_key": plan_key,
-                "current_plan_key": current_plan_key,
-                "is_current_plan": "true" if is_current_plan else "false",
-                "billing_type": billing_type,
-                "extra_tenant_users": str(extra_tenant_users),
-                "tax_state": "NJ",
-                "tax_rate": str(NJ_SALES_TAX_RATE),
-                "plan_amount_usd": str(plan_amount_usd),
-                "addon_amount_usd": str(addon_amount_usd),
-                "subtotal_usd": str(subtotal_usd),
-                "tax_amount_usd": str(tax_amount_usd),
-                "total_usd": str(total_usd),
-                "applied": "false",
-            },
+            metadata=ctx["metadata"],
         )
 
         return {
             "ok": True,
             "clientSecret": intent.client_secret,
             "paymentIntentId": intent.id,
-            "amount": amount_cents,
+            "amount": ctx["amount_cents"],
             "currency": "usd",
-            "planAmount": decimal_to_float_2(plan_amount_usd),
-            "addonAmount": decimal_to_float_2(addon_amount_usd),
-            "subtotal": decimal_to_float_2(subtotal_usd),
-            "tax": decimal_to_float_2(tax_amount_usd),
-            "taxRate": tax_rate_display,
-            "taxRatePercent": tax_rate_percent_display,
+            "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
+            "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
+            "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
+            "tax": decimal_to_float_2(ctx["tax_amount_usd"]),
+            "taxRate": ctx["tax_rate"],
+            "taxRatePercent": ctx["tax_rate_percent"],
             "taxLabel": "NJ Sales Tax",
-            "total": decimal_to_float_2(total_usd),
+            "total": decimal_to_float_2(ctx["total_usd"]),
         }
 
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
 
+# -------------------------------------------------------------------
+# New Hosted Stripe Checkout endpoint
+# Frontend should call this and redirect the user to returned `url`.
+# -------------------------------------------------------------------
+@router.post("/create-checkout-session")
+def create_checkout_session(
+    payload: CreateCheckoutSessionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_stripe_ready()
+
+    plan_key = str(payload.planKey or "").strip().lower()
+    billing_type = normalize_billing_type(payload.billingType)
+    extra_tenant_users = max(0, int(payload.extraTenantUsers or 0))
+
+    ctx = _build_purchase_context(
+        db=db,
+        current_user=current_user,
+        plan_key=plan_key,
+        billing_type=billing_type,
+        extra_tenant_users=extra_tenant_users,
+    )
+
+    if ctx["amount_cents"] <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Payment amount must be greater than zero.",
+        )
+
+    line_items = []
+
+    if ctx["plan_amount_usd"] > 0:
+        line_items.append(
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {
+                        "name": (
+                            f"{ctx['plan'].plan_name} Plan "
+                            f"({'Monthly' if billing_type == 'monthly' else 'One-Time License'})"
+                        ),
+                    },
+                    "unit_amount": money_to_cents(ctx["plan_amount_usd"]),
+                },
+                "quantity": 1,
+            }
+        )
+
+    if extra_tenant_users > 0 and ctx["addon"] and ctx["addon_amount_usd"] > 0:
+        line_items.append(
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {
+                        "name": "Additional Tenant-User",
+                    },
+                    "unit_amount": money_to_cents(ctx["addon_unit_price_usd"]),
+                },
+                "quantity": extra_tenant_users,
+            }
+        )
+
+    if ctx["tax_amount_usd"] > 0:
+        line_items.append(
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {
+                        "name": "NJ Sales Tax",
+                    },
+                    "unit_amount": money_to_cents(ctx["tax_amount_usd"]),
+                },
+                "quantity": 1,
+            }
+        )
+
+    if not line_items:
+        raise HTTPException(
+            status_code=400,
+            detail="There is no charge to process for this checkout session.",
+        )
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            success_url=STRIPE_CHECKOUT_SUCCESS_URL,
+            cancel_url=STRIPE_CHECKOUT_CANCEL_URL,
+            customer_email=str(getattr(current_user, "email", "") or "").strip() or None,
+            payment_method_types=["card"],
+            line_items=line_items,
+            metadata=ctx["metadata"],
+            payment_intent_data={
+                "receipt_email": str(getattr(current_user, "email", "") or "").strip() or None,
+                "metadata": ctx["metadata"],
+            },
+        )
+
+        return {
+            "ok": True,
+            "checkoutSessionId": session.id,
+            "url": session.url,
+            "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
+            "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
+            "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
+            "tax": decimal_to_float_2(ctx["tax_amount_usd"]),
+            "taxRate": ctx["tax_rate"],
+            "taxRatePercent": ctx["tax_rate_percent"],
+            "taxLabel": "NJ Sales Tax",
+            "total": decimal_to_float_2(ctx["total_usd"]),
+        }
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+
+# -------------------------------------------------------------------
+# Optional endpoint for frontend success page
+# Allows frontend to read back checkout session state if needed.
+# -------------------------------------------------------------------
+@router.get("/checkout-session/{session_id}")
+def get_checkout_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    ensure_stripe_ready()
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required.")
+
+    try:
+        session = stripe.checkout.Session.retrieve(sid)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+    metadata = getattr(session, "metadata", {}) or {}
+    session_user_id = str(metadata.get("user_id") or "").strip()
+
+    if session_user_id and session_user_id != str(current_user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="This checkout session does not belong to the authenticated user.",
+        )
+
+    return {
+        "ok": True,
+        "id": session.id,
+        "status": getattr(session, "status", None),
+        "payment_status": getattr(session, "payment_status", None),
+        "payment_intent": getattr(session, "payment_intent", None),
+        "customer_email": getattr(session, "customer_email", None),
+        "metadata": metadata,
+    }
+
+
+# -------------------------------------------------------------------
+# Manual apply endpoint remains available for compatibility / admin recovery.
+# Webhook is now the recommended source of truth.
+# -------------------------------------------------------------------
 @router.post("/apply-payment")
 def apply_payment(
     payload: ApplyPaymentRequest,
@@ -349,65 +691,98 @@ def apply_payment(
         )
 
     metadata = getattr(intent, "metadata", {}) or {}
-
     intent_user_id = str(metadata.get("user_id") or "").strip()
+
     if intent_user_id != str(current_user.id):
         raise HTTPException(
             status_code=403,
             detail="This payment does not belong to the authenticated user.",
         )
 
-    already_applied = str(metadata.get("applied") or "").strip().lower() == "true"
-    extra_tenant_users = max(0, int(metadata.get("extra_tenant_users") or 0))
+    return _apply_payment_effects(
+        db=db,
+        payment_intent_id=payment_intent_id,
+        metadata=metadata,
+    )
 
-    if already_applied:
-        subscription = _get_or_create_user_subscription(db, current_user.id)
-        return {
-            "ok": True,
-            "alreadyApplied": True,
-            "added": 0,
-            "planKey": str(subscription.plan_key or "free").strip().lower(),
-            "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
-            "tenantUsersUsed": None,
-            "message": "Payment was already applied earlier.",
-        }
 
-    if extra_tenant_users <= 0:
-        subscription = _get_or_create_user_subscription(db, current_user.id)
-        return {
-            "ok": True,
-            "alreadyApplied": False,
-            "added": 0,
-            "planKey": str(subscription.plan_key or "free").strip().lower(),
-            "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
-            "tenantUsersUsed": None,
-            "message": "No additional tenant-users were purchased.",
-        }
+# -------------------------------------------------------------------
+# Stripe webhook endpoint
+# Configure Stripe to send:
+#   - checkout.session.completed
+#   - payment_intent.succeeded
+# -------------------------------------------------------------------
+@router.post("/stripe-webhook")
+async def stripe_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ensure_stripe_webhook_ready()
 
-    subscription = _get_or_create_user_subscription(db, current_user.id)
-    current_limit = int(subscription.tenants_users_limit or 0)
-    subscription.tenants_users_limit = current_limit + extra_tenant_users
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
 
-    db.commit()
-    db.refresh(subscription)
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="Missing Stripe signature.")
 
     try:
-        stripe.PaymentIntent.modify(
-            payment_intent_id,
-            metadata={
-                **metadata,
-                "applied": "true",
-            },
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=sig_header,
+            secret=STRIPE_WEBHOOK_SECRET,
         )
-    except stripe.error.StripeError:
-        pass
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid webhook payload.")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid webhook signature.")
 
-    return {
-        "ok": True,
-        "alreadyApplied": False,
-        "added": extra_tenant_users,
-        "planKey": str(subscription.plan_key or "free").strip().lower(),
-        "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
-        "tenantUsersUsed": None,
-        "message": "Payment applied successfully.",
-    }
+    event_type = str(event.get("type") or "").strip()
+    data_object = ((event.get("data") or {}).get("object") or {})
+
+    try:
+        if event_type == "checkout.session.completed":
+            session_obj = data_object
+            payment_status = str(session_obj.get("payment_status") or "").strip().lower()
+            payment_intent_id = str(session_obj.get("payment_intent") or "").strip()
+
+            if payment_status == "paid" and payment_intent_id:
+                try:
+                    intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+                    metadata = getattr(intent, "metadata", {}) or {}
+                    _apply_payment_effects(
+                        db=db,
+                        payment_intent_id=payment_intent_id,
+                        metadata=metadata,
+                    )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to process checkout.session.completed: {str(e)}",
+                    )
+
+        elif event_type == "payment_intent.succeeded":
+            intent_obj = data_object
+            payment_intent_id = str(intent_obj.get("id") or "").strip()
+            metadata = intent_obj.get("metadata") or {}
+
+            if payment_intent_id and metadata:
+                try:
+                    _apply_payment_effects(
+                        db=db,
+                        payment_intent_id=payment_intent_id,
+                        metadata=metadata,
+                    )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to process payment_intent.succeeded: {str(e)}",
+                    )
+
+    except HTTPException:
+        raise
+
+    return {"ok": True, "received": True, "eventType": event_type}
