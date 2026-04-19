@@ -26,13 +26,15 @@ FRONTEND_BASE_URL = str(
 
 STRIPE_CHECKOUT_SUCCESS_URL = str(
     os.getenv("STRIPE_CHECKOUT_SUCCESS_URL")
-    or f"{FRONTEND_BASE_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
+    or f"{FRONTEND_BASE_URL}/?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
 ).strip()
 
 STRIPE_CHECKOUT_CANCEL_URL = str(
     os.getenv("STRIPE_CHECKOUT_CANCEL_URL")
-    or f"{FRONTEND_BASE_URL}/billing/cancel"
+    or f"{FRONTEND_BASE_URL}/?payment=cancel"
 ).strip()
+
+
 
 NJ_SALES_TAX_RATE = Decimal("0.06625")  # 6.625% used for actual tax calculation
 
