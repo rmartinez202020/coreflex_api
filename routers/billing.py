@@ -861,32 +861,54 @@ def create_checkout_session(
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
 
         session = stripe.checkout.Session.create(
-            mode="payment",
-            success_url=STRIPE_CHECKOUT_SUCCESS_URL,
-            cancel_url=STRIPE_CHECKOUT_CANCEL_URL,
-            customer_email=str(getattr(current_user, "email", "") or "").strip() or None,
-            payment_method_types=["card"],
-            line_items=line_items,
-            metadata=ctx["metadata"],
-            payment_intent_data={
-                "receipt_email": str(getattr(current_user, "email", "") or "").strip() or None,
-                "metadata": ctx["metadata"],
-            },
-        )
+    mode="payment",
+    success_url=STRIPE_CHECKOUT_SUCCESS_URL,
+    cancel_url=STRIPE_CHECKOUT_CANCEL_URL,
+    customer_email=str(getattr(current_user, "email", "") or "").strip() or None,
+    payment_method_types=["card"],
+    line_items=line_items,
+    metadata=ctx["metadata"],
+    payment_intent_data={
+        "receipt_email": str(getattr(current_user, "email", "") or "").strip() or None,
+        "metadata": ctx["metadata"],
+    },
+)
 
-        return {
-            "ok": True,
-            "checkoutSessionId": session.id,
-            "url": session.url,
-            "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
-            "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
-            "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
-            "tax": decimal_to_float_2(ctx["tax_amount_usd"]),
-            "taxRate": ctx["tax_rate"],
-            "taxRatePercent": ctx["tax_rate_percent"],
-            "taxLabel": "NJ Sales Tax",
-            "total": decimal_to_float_2(ctx["total_usd"]),
-        }
+print("✅ CHECKOUT SESSION CREATED")
+print("   session_id:", session.id)
+print("   session_metadata_immediate:", getattr(session, "metadata", {}))
+print("   payment_intent_immediate:", getattr(session, "payment_intent", None))
+
+# 🔥 VERIFY WHAT STRIPE ACTUALLY STORED
+verified_session = stripe.checkout.Session.retrieve(session.id)
+
+verified_session_metadata = getattr(verified_session, "metadata", {}) or {}
+
+verified_pi_id = str(getattr(verified_session, "payment_intent", "") or "").strip()
+
+verified_pi_metadata = {}
+if verified_pi_id:
+    verified_pi = stripe.PaymentIntent.retrieve(verified_pi_id)
+    verified_pi_metadata = getattr(verified_pi, "metadata", {}) or {}
+
+print("✅ VERIFIED STRIPE DATA")
+print("   verified_session_metadata:", verified_session_metadata)
+print("   verified_payment_intent_id:", verified_pi_id)
+print("   verified_payment_intent_metadata:", verified_pi_metadata)
+
+return {
+    "ok": True,
+    "checkoutSessionId": session.id,
+    "url": session.url,
+    "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
+    "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
+    "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
+    "tax": decimal_to_float_2(ctx["tax_amount_usd"]),
+    "taxRate": ctx["tax_rate"],
+    "taxRatePercent": ctx["tax_rate_percent"],
+    "taxLabel": "NJ Sales Tax",
+    "total": decimal_to_float_2(ctx["total_usd"]),
+}
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
