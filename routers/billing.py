@@ -793,14 +793,20 @@ async def stripe_webhook(
     except stripe.error.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid webhook signature.")
 
-    event_type = str(event.get("type") or "").strip()
-    data_object = ((event.get("data") or {}).get("object") or {})
+    event_type = str(getattr(event, "type", "") or "").strip()
+    data_object = getattr(getattr(event, "data", None), "object", None)
 
     try:
         if event_type == "checkout.session.completed":
             session_obj = data_object
-            payment_status = str(session_obj.get("payment_status") or "").strip().lower()
-            payment_intent_id = str(session_obj.get("payment_intent") or "").strip()
+
+            payment_status = str(
+                getattr(session_obj, "payment_status", "") or ""
+            ).strip().lower()
+
+            payment_intent_id = str(
+                getattr(session_obj, "payment_intent", "") or ""
+            ).strip()
 
             if payment_status == "paid" and payment_intent_id:
                 try:
@@ -821,8 +827,12 @@ async def stripe_webhook(
 
         elif event_type == "payment_intent.succeeded":
             intent_obj = data_object
-            payment_intent_id = str(intent_obj.get("id") or "").strip()
-            metadata = intent_obj.get("metadata") or {}
+
+            payment_intent_id = str(
+                getattr(intent_obj, "id", "") or ""
+            ).strip()
+
+            metadata = getattr(intent_obj, "metadata", {}) or {}
 
             if payment_intent_id and metadata:
                 try:
