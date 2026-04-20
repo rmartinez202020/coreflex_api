@@ -560,7 +560,18 @@ def _process_checkout_session_completed(db: Session, session_obj):
         )
 
     intent_metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
-    metadata = intent_metadata or session_metadata
+metadata = intent_metadata or session_metadata
+
+print("🔥 FINAL CHECKOUT METADATA CHOSEN:", metadata)
+
+if not str(metadata.get("user_id") or "").strip().isdigit():
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Invalid payment metadata: user_id. "
+            f"intent_metadata={intent_metadata} session_metadata={session_metadata}"
+        ),
+    )
 
     return _apply_payment_effects(
         db=db,
