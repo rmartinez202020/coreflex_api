@@ -180,6 +180,40 @@ def _log_debug(prefix: str, **kwargs) -> None:
         pass
 
 
+def _merge_metadata(*items) -> dict:
+    merged = {}
+    for item in items:
+        d = _safe_metadata_dict(item)
+        for key, value in d.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text == "":
+                continue
+            merged[str(key)] = text
+    return merged
+
+
+def _normalize_payment_metadata(db: Session, metadata: dict) -> dict:
+    md = _safe_metadata_dict(metadata)
+
+    raw_user_id = str(md.get("user_id") or "").strip()
+    if raw_user_id.isdigit():
+        md["user_id"] = raw_user_id
+        return md
+
+    raw_user_email = str(md.get("user_email") or "").strip().lower()
+    if raw_user_email:
+        user = db.query(User).filter(User.email == raw_user_email).first()
+        if user:
+            md["user_id"] = str(user.id)
+            md["user_email"] = raw_user_email
+            print("✅ RESOLVED user_id FROM user_email:", raw_user_email, "->", user.id)
+            return md
+
+    return md
+
+
 def _mark_payment_intent_applied(payment_intent_id: str, metadata: dict) -> None:
     try:
         stripe.PaymentIntent.modify(
@@ -361,11 +395,17 @@ def _apply_payment_effects(
         metadata=metadata,
     )
 
-    metadata = _safe_metadata_dict(metadata)
+    metadata = _normalize_payment_metadata(db, metadata)
 
     raw_user_id = str(metadata.get("user_id") or "").strip()
     if not raw_user_id.isdigit():
-        raise HTTPException(status_code=400, detail="Invalid payment metadata: user_id.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid payment metadata: user_id. "
+                f"metadata={metadata}"
+            ),
+        )
 
     user_id = int(raw_user_id)
     plan_key = str(metadata.get("plan_key") or "free").strip().lower()
@@ -560,18 +600,28 @@ def _process_checkout_session_completed(db: Session, session_obj):
         )
 
     intent_metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
-metadata = intent_metadata or session_metadata
+    metadata = _merge_metadata(session_metadata, intent_metadata)
+    metadata = _normalize_payment_metadata(db, metadata)
 
-print("🔥 FINAL CHECKOUT METADATA CHOSEN:", metadata)
-
-if not str(metadata.get("user_id") or "").strip().isdigit():
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "Invalid payment metadata: user_id. "
-            f"intent_metadata={intent_metadata} session_metadata={session_metadata}"
-        ),
+    _log_debug(
+        "🔥 FINAL CHECKOUT METADATA",
+        session_id=session_id,
+        payment_intent_id=payment_intent_id,
+        session_metadata=session_metadata,
+        intent_metadata=intent_metadata,
+        merged_metadata=metadata,
     )
+
+    if not str(metadata.get("user_id") or "").strip().isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid payment metadata: user_id. "
+                f"session_metadata={session_metadata} "
+                f"intent_metadata={intent_metadata} "
+                f"merged_metadata={metadata}"
+            ),
+        )
 
     return _apply_payment_effects(
         db=db,
@@ -583,6 +633,7 @@ if not str(metadata.get("user_id") or "").strip().isdigit():
 def _process_payment_intent_succeeded(db: Session, intent_obj):
     payment_intent_id = str(getattr(intent_obj, "id", "") or "").strip()
     metadata = _safe_metadata_dict(getattr(intent_obj, "metadata", None))
+    metadata = _normalize_payment_metadata(db, metadata)
 
     _log_debug(
         "🔥 WEBHOOK payment_intent.succeeded",
@@ -897,7 +948,7 @@ def apply_checkout_session(
     session_metadata = _safe_metadata_dict(getattr(session, "metadata", None))
     session_user_id = str(session_metadata.get("user_id") or "").strip()
 
-    if session_user_id != str(current_user.id):
+    if session_user_id and session_user_id != str(current_user.id):
         raise HTTPException(
             status_code=403,
             detail="This checkout session does not belong to the authenticated user.",
@@ -932,9 +983,13 @@ def apply_checkout_session(
             detail="PaymentIntent is not completed yet.",
         )
 
-    metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
-    intent_user_id = str(metadata.get("user_id") or "").strip()
+    metadata = _merge_metadata(
+        _safe_metadata_dict(getattr(session, "metadata", None)),
+        _safe_metadata_dict(getattr(intent, "metadata", None)),
+    )
+    metadata = _normalize_payment_metadata(db, metadata)
 
+    intent_user_id = str(metadata.get("user_id") or "").strip()
     if intent_user_id != str(current_user.id):
         raise HTTPException(
             status_code=403,
@@ -975,8 +1030,9 @@ def apply_payment(
         )
 
     metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
-    intent_user_id = str(metadata.get("user_id") or "").strip()
+    metadata = _normalize_payment_metadata(db, metadata)
 
+    intent_user_id = str(metadata.get("user_id") or "").strip()
     if intent_user_id != str(current_user.id):
         raise HTTPException(
             status_code=403,
