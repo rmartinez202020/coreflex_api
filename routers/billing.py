@@ -289,6 +289,9 @@ def _apply_payment_effects(
     payment_intent_id: str,
     metadata: dict,
 ):
+    print("🔥 APPLY PAYMENT EFFECTS payment_intent_id:", payment_intent_id)
+    print("🔥 APPLY PAYMENT EFFECTS metadata:", metadata)
+
     raw_user_id = str(metadata.get("user_id") or "").strip()
     if not raw_user_id.isdigit():
         raise HTTPException(status_code=400, detail="Invalid payment metadata: user_id.")
@@ -314,6 +317,8 @@ def _apply_payment_effects(
             "tenantUsersUsed": None,
             "message": "Payment was already applied earlier.",
         }
+
+    print("🔥 LOOKING FOR PLAN:", plan_key, billing_type)
 
     plan = (
         db.query(BillingPlan)
