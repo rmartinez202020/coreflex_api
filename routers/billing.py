@@ -295,8 +295,6 @@ def _apply_payment_effects(
     metadata = dict(metadata or {})
 
     raw_user_id = str(metadata.get("user_id") or "").strip()
-
-
     if not raw_user_id.isdigit():
         raise HTTPException(status_code=400, detail="Invalid payment metadata: user_id.")
 
@@ -304,14 +302,12 @@ def _apply_payment_effects(
     plan_key = str(metadata.get("plan_key") or "free").strip().lower()
 
     raw_billing_type = str(metadata.get("billing_type") or "").strip().lower()
-
-if raw_billing_type not in {"monthly", "one_time"}:
-    raise HTTPException(
-        status_code=400,
-        detail=f"Invalid billing_type in metadata: {raw_billing_type}",
-    )
-
-billing_type = raw_billing_type
+    if raw_billing_type not in {"monthly", "one_time"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid billing_type in metadata: {raw_billing_type}",
+        )
+    billing_type = raw_billing_type
 
     is_current_plan = (
         str(metadata.get("is_current_plan") or "").strip().lower() == "true"
@@ -647,7 +643,7 @@ def get_checkout_session(
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
-    metadata = getattr(session, "metadata", {}) or {}
+    metadata = dict(getattr(session, "metadata", {}) or {})
     session_user_id = str(metadata.get("user_id") or "").strip()
 
     if session_user_id and session_user_id != str(current_user.id):
@@ -687,7 +683,7 @@ def apply_checkout_session(
     if not session:
         raise HTTPException(status_code=404, detail="Checkout session not found.")
 
-    session_metadata = getattr(session, "metadata", {}) or {}
+    session_metadata = dict(getattr(session, "metadata", {}) or {})
     session_user_id = str(session_metadata.get("user_id") or "").strip()
 
     if session_user_id != str(current_user.id):
@@ -767,7 +763,7 @@ def apply_payment(
             detail="PaymentIntent is not completed yet.",
         )
 
-    metadata = getattr(intent, "metadata", {}) or {}
+    metadata = dict(getattr(intent, "metadata", {}) or {})
     intent_user_id = str(metadata.get("user_id") or "").strip()
 
     if intent_user_id != str(current_user.id):
@@ -825,7 +821,7 @@ async def stripe_webhook(
             if payment_status == "paid" and payment_intent_id:
                 try:
                     intent = stripe.PaymentIntent.retrieve(payment_intent_id)
-                    metadata = getattr(intent, "metadata", {}) or {}
+                    metadata = dict(getattr(intent, "metadata", {}) or {})
                     _apply_payment_effects(
                         db=db,
                         payment_intent_id=payment_intent_id,
