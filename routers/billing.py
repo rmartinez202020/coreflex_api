@@ -807,36 +807,44 @@ def create_checkout_session(
     line_items = []
 
     if ctx["plan_amount_usd"] > 0:
+        plan_price_id = str(getattr(ctx["plan"], "stripe_price_id", "") or "").strip()
+        if not plan_price_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Stripe price is missing for plan {ctx['plan'].plan_key}. "
+                    "Sync this plan to Stripe first."
+                ),
+            )
+
         line_items.append(
             {
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {
-                        "name": (
-                            f"{ctx['plan'].plan_name} Plan "
-                            f"({'Monthly' if billing_type == 'monthly' else 'One-Time License'})"
-                        ),
-                    },
-                    "unit_amount": money_to_cents(ctx["plan_amount_usd"]),
-                },
+                "price": plan_price_id,
                 "quantity": 1,
             }
         )
 
     if extra_tenant_users > 0 and ctx["addon"] and ctx["addon_amount_usd"] > 0:
+        addon_price_id = str(
+            getattr(ctx["addon"], "stripe_price_id", "") or ""
+        ).strip()
+        if not addon_price_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Stripe price is missing for tenant-user addon. "
+                    "Sync this addon to Stripe first."
+                ),
+            )
+
         line_items.append(
             {
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {
-                        "name": "Additional Tenant-User",
-                    },
-                    "unit_amount": money_to_cents(ctx["addon_unit_price_usd"]),
-                },
+                "price": addon_price_id,
                 "quantity": extra_tenant_users,
             }
         )
 
+    # Keep tax as a separate dynamic line item for now.
     if ctx["tax_amount_usd"] > 0:
         line_items.append(
             {
@@ -858,7 +866,9 @@ def create_checkout_session(
         )
 
     try:
+        print("🔥 HIT /billing/create-checkout-session")
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
+        print("🔥 LINE ITEMS TO STRIPE:", line_items)
 
         session = stripe.checkout.Session.create(
             mode="payment",
@@ -873,6 +883,33 @@ def create_checkout_session(
                 "metadata": ctx["metadata"],
             },
         )
+
+        created_session = stripe.checkout.Session.retrieve(session.id)
+        created_session_metadata = _safe_metadata_dict(
+            getattr(created_session, "metadata", None)
+        )
+        created_intent_id = str(
+            getattr(created_session, "payment_intent", "") or ""
+        ).strip()
+        created_intent_metadata = {}
+
+        if created_intent_id:
+            try:
+                created_intent = stripe.PaymentIntent.retrieve(created_intent_id)
+                created_intent_metadata = _safe_metadata_dict(
+                    getattr(created_intent, "metadata", None)
+                )
+            except stripe.error.StripeError as e:
+                print(
+                    "⚠️ FAILED TO RETRIEVE CREATED PAYMENTINTENT",
+                    created_intent_id,
+                    _describe_exception(e),
+                )
+
+        print("🔥 CREATED SESSION ID:", session.id)
+        print("🔥 CREATED SESSION METADATA:", created_session_metadata)
+        print("🔥 CREATED INTENT ID:", created_intent_id)
+        print("🔥 CREATED INTENT METADATA:", created_intent_metadata)
 
         return {
             "ok": True,
