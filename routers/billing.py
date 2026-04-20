@@ -1,5 +1,6 @@
 # routers/billing.py
 import os
+import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -131,6 +132,43 @@ def _safe_int(value, default=0) -> int:
         return int(value)
     except Exception:
         return int(default)
+
+
+def _describe_exception(exc: Exception) -> str:
+    try:
+        text = str(exc).strip()
+        if text:
+            return f"{type(exc).__name__}: {text}"
+        return type(exc).__name__
+    except Exception:
+        return exc.__class__.__name__
+
+
+def _log_debug(prefix: str, **kwargs) -> None:
+    try:
+        print(prefix)
+        for key, value in kwargs.items():
+            print(f"   {key}: {value}")
+    except Exception:
+        pass
+
+
+def _mark_payment_intent_applied(payment_intent_id: str, metadata: dict) -> None:
+    try:
+        stripe.PaymentIntent.modify(
+            payment_intent_id,
+            metadata={
+                **dict(metadata or {}),
+                "applied": "true",
+            },
+        )
+        print("✅ STRIPE METADATA UPDATED applied=true", payment_intent_id)
+    except stripe.error.StripeError as e:
+        print(
+            "⚠️ FAILED TO UPDATE STRIPE PAYMENTINTENT METADATA",
+            payment_intent_id,
+            _describe_exception(e),
+        )
 
 
 def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscription:
@@ -289,8 +327,12 @@ def _apply_payment_effects(
     payment_intent_id: str,
     metadata: dict,
 ):
-    print("🔥 APPLY PAYMENT EFFECTS payment_intent_id:", payment_intent_id)
-    print("🔥 APPLY PAYMENT EFFECTS metadata:", metadata)
+    print("🔥 APPLY PAYMENT EFFECTS START")
+    _log_debug(
+        "🔥 APPLY PAYMENT EFFECTS INPUT",
+        payment_intent_id=payment_intent_id,
+        metadata=metadata,
+    )
 
     metadata = dict(metadata or {})
 
@@ -309,17 +351,26 @@ def _apply_payment_effects(
         )
     billing_type = raw_billing_type
 
-    
-
     is_current_plan = (
         str(metadata.get("is_current_plan") or "").strip().lower() == "true"
     )
     extra_tenant_users = max(0, _safe_int(metadata.get("extra_tenant_users"), 0))
     already_applied = str(metadata.get("applied") or "").strip().lower() == "true"
 
+    _log_debug(
+        "🔥 PARSED PAYMENT METADATA",
+        user_id=user_id,
+        plan_key=plan_key,
+        billing_type=billing_type,
+        is_current_plan=is_current_plan,
+        extra_tenant_users=extra_tenant_users,
+        already_applied=already_applied,
+    )
+
     subscription = _get_or_create_user_subscription(db, user_id)
 
     if already_applied:
+        print("✅ PAYMENT ALREADY MARKED APPLIED IN STRIPE METADATA")
         return {
             "ok": True,
             "alreadyApplied": True,
@@ -331,7 +382,6 @@ def _apply_payment_effects(
         }
 
     print("🔥 LOOKING FOR PLAN:", plan_key, billing_type)
-
     plan = (
         db.query(BillingPlan)
         .filter(
@@ -342,20 +392,44 @@ def _apply_payment_effects(
         .first()
     )
     if not plan:
-        raise HTTPException(status_code=404, detail="Billing plan not found.")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Billing plan not found for plan_key={plan_key}, billing_type={billing_type}.",
+        )
 
+    _log_debug(
+        "🔥 PLAN FOUND",
+        plan_id=getattr(plan, "id", None),
+        plan_key=getattr(plan, "plan_key", None),
+        billing_type=getattr(plan, "billing_type", None),
+        tenant_user_limit=getattr(plan, "tenant_user_limit", None),
+        device_limit=getattr(plan, "device_limit", None),
+    )
+
+    current_plan_key = str(subscription.plan_key or "free").strip().lower()
     current_limit = int(subscription.tenants_users_limit or 0)
+    current_device_limit = int(subscription.device_limit or 0)
     base_tenant_limit = int(plan.tenant_user_limit or 0)
     base_device_limit = int(plan.device_limit or 0)
 
     if is_current_plan:
         new_tenant_limit = current_limit + extra_tenant_users
-        new_plan_key = str(subscription.plan_key or "free").strip().lower()
-        new_device_limit = int(subscription.device_limit or base_device_limit or 0)
+        new_plan_key = current_plan_key
+        new_device_limit = current_device_limit or base_device_limit
     else:
         new_tenant_limit = base_tenant_limit + extra_tenant_users
         new_plan_key = plan_key
         new_device_limit = base_device_limit
+
+    _log_debug(
+        "🔥 SUBSCRIPTION UPDATE PREVIEW",
+        current_plan_key=current_plan_key,
+        current_limit=current_limit,
+        current_device_limit=current_device_limit,
+        new_plan_key=new_plan_key,
+        new_tenant_limit=new_tenant_limit,
+        new_device_limit=new_device_limit,
+    )
 
     subscription.plan_key = new_plan_key
     subscription.device_limit = new_device_limit
@@ -371,19 +445,20 @@ def _apply_payment_effects(
         else:
             subscription.renewal_date = None
 
-    db.commit()
-    db.refresh(subscription)
-
     try:
-        stripe.PaymentIntent.modify(
-            payment_intent_id,
-            metadata={
-                **metadata,
-                "applied": "true",
-            },
-        )
-    except stripe.error.StripeError:
-        pass
+        print("🔥 DB COMMIT START")
+        db.commit()
+        print("✅ DB COMMIT OK")
+    except Exception:
+        db.rollback()
+        print("❌ DB COMMIT FAILED - ROLLBACK DONE")
+        traceback.print_exc()
+        raise
+
+    db.refresh(subscription)
+    print("✅ SUBSCRIPTION REFRESH OK")
+
+    _mark_payment_intent_applied(payment_intent_id, metadata)
 
     return {
         "ok": True,
@@ -394,6 +469,99 @@ def _apply_payment_effects(
         "tenantUsersUsed": None,
         "message": "Payment applied successfully.",
     }
+
+
+def _retrieve_payment_intent_or_none(payment_intent_id: str):
+    pid = str(payment_intent_id or "").strip()
+    if not pid:
+        return None
+    try:
+        return stripe.PaymentIntent.retrieve(pid)
+    except stripe.error.StripeError as e:
+        print(
+            "⚠️ FAILED TO RETRIEVE PAYMENTINTENT",
+            pid,
+            _describe_exception(e),
+        )
+        return None
+
+
+def _extract_checkout_session_data(session_obj):
+    session_id = str(getattr(session_obj, "id", "") or "").strip()
+    payment_status = str(getattr(session_obj, "payment_status", "") or "").strip().lower()
+    payment_intent_id = str(getattr(session_obj, "payment_intent", "") or "").strip()
+    metadata = dict(getattr(session_obj, "metadata", {}) or {})
+
+    return {
+        "session_id": session_id,
+        "payment_status": payment_status,
+        "payment_intent_id": payment_intent_id,
+        "metadata": metadata,
+    }
+
+
+def _process_checkout_session_completed(db: Session, session_obj):
+    extracted = _extract_checkout_session_data(session_obj)
+    session_id = extracted["session_id"]
+    payment_status = extracted["payment_status"]
+    payment_intent_id = extracted["payment_intent_id"]
+    session_metadata = extracted["metadata"]
+
+    _log_debug(
+        "🔥 WEBHOOK checkout.session.completed",
+        session_id=session_id,
+        payment_status=payment_status,
+        payment_intent_id=payment_intent_id,
+        session_metadata=session_metadata,
+    )
+
+    if payment_status != "paid":
+        print("ℹ️ checkout.session.completed ignored because payment_status is not paid")
+        return {"ok": True, "ignored": True, "reason": "payment_status_not_paid"}
+
+    if not payment_intent_id:
+        print("ℹ️ checkout.session.completed ignored because payment_intent is missing")
+        return {"ok": True, "ignored": True, "reason": "missing_payment_intent"}
+
+    intent = _retrieve_payment_intent_or_none(payment_intent_id)
+    if not intent:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process checkout.session.completed: could not retrieve payment intent.",
+        )
+
+    metadata = dict(getattr(intent, "metadata", {}) or {}) or session_metadata
+
+    return _apply_payment_effects(
+        db=db,
+        payment_intent_id=payment_intent_id,
+        metadata=metadata,
+    )
+
+
+def _process_payment_intent_succeeded(db: Session, intent_obj):
+    payment_intent_id = str(getattr(intent_obj, "id", "") or "").strip()
+    metadata = dict(getattr(intent_obj, "metadata", {}) or {})
+
+    _log_debug(
+        "🔥 WEBHOOK payment_intent.succeeded",
+        payment_intent_id=payment_intent_id,
+        metadata=metadata,
+    )
+
+    if not payment_intent_id:
+        print("ℹ️ payment_intent.succeeded ignored because id is missing")
+        return {"ok": True, "ignored": True, "reason": "missing_payment_intent_id"}
+
+    if not metadata:
+        print("ℹ️ payment_intent.succeeded ignored because metadata is missing")
+        return {"ok": True, "ignored": True, "reason": "missing_metadata"}
+
+    return _apply_payment_effects(
+        db=db,
+        payment_intent_id=payment_intent_id,
+        metadata=metadata,
+    )
 
 
 @router.get("/catalog")
@@ -805,63 +973,58 @@ async def stripe_webhook(
     except stripe.error.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid webhook signature.")
 
+    event_id = str(getattr(event, "id", "") or "").strip()
     event_type = str(getattr(event, "type", "") or "").strip()
     data_object = getattr(getattr(event, "data", None), "object", None)
 
+    _log_debug(
+        "🔥 STRIPE WEBHOOK RECEIVED",
+        event_id=event_id,
+        event_type=event_type,
+    )
+
     try:
         if event_type == "checkout.session.completed":
-            session_obj = data_object
-
-            payment_status = str(
-                getattr(session_obj, "payment_status", "") or ""
-            ).strip().lower()
-
-            payment_intent_id = str(
-                getattr(session_obj, "payment_intent", "") or ""
-            ).strip()
-
-            if payment_status == "paid" and payment_intent_id:
-                try:
-                    intent = stripe.PaymentIntent.retrieve(payment_intent_id)
-                    metadata = dict(getattr(intent, "metadata", {}) or {})
-                    _apply_payment_effects(
-                        db=db,
-                        payment_intent_id=payment_intent_id,
-                        metadata=metadata,
-                    )
-                except HTTPException:
-                    raise
-                except Exception as e:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to process checkout.session.completed: {str(e)}",
-                    )
+            return_value = _process_checkout_session_completed(db=db, session_obj=data_object)
+            _log_debug(
+                "✅ WEBHOOK checkout.session.completed PROCESSED",
+                event_id=event_id,
+                result=return_value,
+            )
 
         elif event_type == "payment_intent.succeeded":
-            intent_obj = data_object
+            return_value = _process_payment_intent_succeeded(db=db, intent_obj=data_object)
+            _log_debug(
+                "✅ WEBHOOK payment_intent.succeeded PROCESSED",
+                event_id=event_id,
+                result=return_value,
+            )
 
-            payment_intent_id = str(
-                getattr(intent_obj, "id", "") or ""
-            ).strip()
+        else:
+            print("ℹ️ STRIPE WEBHOOK IGNORED EVENT TYPE:", event_type)
 
-            metadata = dict(getattr(intent_obj, "metadata", {}) or {})
-
-            if payment_intent_id and metadata:
-                try:
-                    _apply_payment_effects(
-                        db=db,
-                        payment_intent_id=payment_intent_id,
-                        metadata=metadata,
-                    )
-                except HTTPException:
-                    raise
-                except Exception as e:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to process payment_intent.succeeded: {str(e)}",
-                    )
-
-    except HTTPException:
+    except HTTPException as e:
+        print("❌ STRIPE WEBHOOK HTTPException")
+        _log_debug(
+            "❌ WEBHOOK HTTPException DETAILS",
+            event_id=event_id,
+            event_type=event_type,
+            status_code=e.status_code,
+            detail=e.detail,
+        )
         raise
+    except Exception as e:
+        print("❌ STRIPE WEBHOOK UNHANDLED ERROR")
+        _log_debug(
+            "❌ WEBHOOK UNHANDLED ERROR DETAILS",
+            event_id=event_id,
+            event_type=event_type,
+            error=_describe_exception(e),
+        )
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process {event_type}: {_describe_exception(e)}",
+        )
 
-    return {"ok": True, "received": True, "eventType": event_type}
+    return {"ok": True, "received": True, "eventType": event_type, "eventId": event_id}
