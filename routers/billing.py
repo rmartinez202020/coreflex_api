@@ -345,7 +345,7 @@ def _build_purchase_context(
     tax_rate_percent_display = percent_display_2_from_rate(NJ_SALES_TAX_RATE)
     tax_rate_display = rate_display_2_from_percent(tax_rate_percent_display)
 
-        metadata = {
+    metadata = {
         "user_id": str(current_user.id or ""),
         "user_email": str(getattr(current_user, "email", "") or ""),
         "plan_key": str(plan_key or ""),
@@ -858,7 +858,8 @@ def create_checkout_session(
         )
 
     try:
-            print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
+        print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
+
         session = stripe.checkout.Session.create(
             mode="payment",
             success_url=STRIPE_CHECKOUT_SUCCESS_URL,
