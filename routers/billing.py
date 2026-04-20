@@ -292,7 +292,11 @@ def _apply_payment_effects(
     print("🔥 APPLY PAYMENT EFFECTS payment_intent_id:", payment_intent_id)
     print("🔥 APPLY PAYMENT EFFECTS metadata:", metadata)
 
+    metadata = dict(metadata or {})
+
     raw_user_id = str(metadata.get("user_id") or "").strip()
+
+
     if not raw_user_id.isdigit():
         raise HTTPException(status_code=400, detail="Invalid payment metadata: user_id.")
 
@@ -711,7 +715,7 @@ def apply_checkout_session(
             detail="PaymentIntent is not completed yet.",
         )
 
-    metadata = getattr(intent, "metadata", {}) or {}
+    metadata = dict(getattr(intent, "metadata", {}) or {})
     intent_user_id = str(metadata.get("user_id") or "").strip()
 
     if intent_user_id != str(current_user.id):
@@ -832,7 +836,7 @@ async def stripe_webhook(
                 getattr(intent_obj, "id", "") or ""
             ).strip()
 
-            metadata = getattr(intent_obj, "metadata", {}) or {}
+            metadata = dict(getattr(intent_obj, "metadata", {}) or {})
 
             if payment_intent_id and metadata:
                 try:
