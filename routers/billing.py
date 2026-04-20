@@ -302,12 +302,14 @@ def _apply_payment_effects(
     plan_key = str(metadata.get("plan_key") or "free").strip().lower()
 
     raw_billing_type = str(metadata.get("billing_type") or "").strip().lower()
-    if raw_billing_type not in {"monthly", "one_time"}:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid billing_type in metadata: {raw_billing_type}",
-        )
+
+if raw_billing_type not in {"monthly", "one_time"}:
+    print("⚠️ Missing/invalid billing_type in metadata. Defaulting to monthly.")
+    billing_type = "monthly"
+else:
     billing_type = raw_billing_type
+
+
 
     is_current_plan = (
         str(metadata.get("is_current_plan") or "").strip().lower() == "true"
