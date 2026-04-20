@@ -134,6 +134,33 @@ def _safe_int(value, default=0) -> int:
         return int(default)
 
 
+def _safe_metadata_dict(value) -> dict:
+    if value is None:
+        return {}
+
+    if isinstance(value, dict):
+        return dict(value)
+
+    try:
+        if hasattr(value, "to_dict_recursive"):
+            converted = value.to_dict_recursive()
+            if isinstance(converted, dict):
+                return converted
+    except Exception:
+        pass
+
+    try:
+        keys = value.keys()
+        return {str(k): value[k] for k in keys}
+    except Exception:
+        pass
+
+    try:
+        return dict(value)
+    except Exception:
+        return {}
+
+
 def _describe_exception(exc: Exception) -> str:
     try:
         text = str(exc).strip()
@@ -158,7 +185,7 @@ def _mark_payment_intent_applied(payment_intent_id: str, metadata: dict) -> None
         stripe.PaymentIntent.modify(
             payment_intent_id,
             metadata={
-                **dict(metadata or {}),
+                **_safe_metadata_dict(metadata),
                 "applied": "true",
             },
         )
@@ -334,7 +361,7 @@ def _apply_payment_effects(
         metadata=metadata,
     )
 
-    metadata = dict(metadata or {})
+    metadata = _safe_metadata_dict(metadata)
 
     raw_user_id = str(metadata.get("user_id") or "").strip()
     if not raw_user_id.isdigit():
@@ -488,9 +515,11 @@ def _retrieve_payment_intent_or_none(payment_intent_id: str):
 
 def _extract_checkout_session_data(session_obj):
     session_id = str(getattr(session_obj, "id", "") or "").strip()
-    payment_status = str(getattr(session_obj, "payment_status", "") or "").strip().lower()
+    payment_status = str(
+        getattr(session_obj, "payment_status", "") or ""
+    ).strip().lower()
     payment_intent_id = str(getattr(session_obj, "payment_intent", "") or "").strip()
-    metadata = dict(getattr(session_obj, "metadata", {}) or {})
+    metadata = _safe_metadata_dict(getattr(session_obj, "metadata", None))
 
     return {
         "session_id": session_id,
@@ -530,7 +559,8 @@ def _process_checkout_session_completed(db: Session, session_obj):
             detail="Failed to process checkout.session.completed: could not retrieve payment intent.",
         )
 
-    metadata = dict(getattr(intent, "metadata", {}) or {}) or session_metadata
+    intent_metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
+    metadata = intent_metadata or session_metadata
 
     return _apply_payment_effects(
         db=db,
@@ -541,7 +571,7 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
 def _process_payment_intent_succeeded(db: Session, intent_obj):
     payment_intent_id = str(getattr(intent_obj, "id", "") or "").strip()
-    metadata = dict(getattr(intent_obj, "metadata", {}) or {})
+    metadata = _safe_metadata_dict(getattr(intent_obj, "metadata", None))
 
     _log_debug(
         "🔥 WEBHOOK payment_intent.succeeded",
@@ -813,7 +843,7 @@ def get_checkout_session(
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
-    metadata = dict(getattr(session, "metadata", {}) or {})
+    metadata = _safe_metadata_dict(getattr(session, "metadata", None))
     session_user_id = str(metadata.get("user_id") or "").strip()
 
     if session_user_id and session_user_id != str(current_user.id):
@@ -853,7 +883,7 @@ def apply_checkout_session(
     if not session:
         raise HTTPException(status_code=404, detail="Checkout session not found.")
 
-    session_metadata = dict(getattr(session, "metadata", {}) or {})
+    session_metadata = _safe_metadata_dict(getattr(session, "metadata", None))
     session_user_id = str(session_metadata.get("user_id") or "").strip()
 
     if session_user_id != str(current_user.id):
@@ -891,7 +921,7 @@ def apply_checkout_session(
             detail="PaymentIntent is not completed yet.",
         )
 
-    metadata = dict(getattr(intent, "metadata", {}) or {})
+    metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
     intent_user_id = str(metadata.get("user_id") or "").strip()
 
     if intent_user_id != str(current_user.id):
@@ -933,7 +963,7 @@ def apply_payment(
             detail="PaymentIntent is not completed yet.",
         )
 
-    metadata = dict(getattr(intent, "metadata", {}) or {})
+    metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
     intent_user_id = str(metadata.get("user_id") or "").strip()
 
     if intent_user_id != str(current_user.id):
@@ -975,7 +1005,8 @@ async def stripe_webhook(
 
     event_id = str(getattr(event, "id", "") or "").strip()
     event_type = str(getattr(event, "type", "") or "").strip()
-    data_object = getattr(getattr(event, "data", None), "object", None)
+    event_data = getattr(event, "data", None)
+    data_object = getattr(event_data, "object", None) if event_data is not None else None
 
     _log_debug(
         "🔥 STRIPE WEBHOOK RECEIVED",
@@ -985,7 +1016,10 @@ async def stripe_webhook(
 
     try:
         if event_type == "checkout.session.completed":
-            return_value = _process_checkout_session_completed(db=db, session_obj=data_object)
+            return_value = _process_checkout_session_completed(
+                db=db,
+                session_obj=data_object,
+            )
             _log_debug(
                 "✅ WEBHOOK checkout.session.completed PROCESSED",
                 event_id=event_id,
@@ -993,7 +1027,10 @@ async def stripe_webhook(
             )
 
         elif event_type == "payment_intent.succeeded":
-            return_value = _process_payment_intent_succeeded(db=db, intent_obj=data_object)
+            return_value = _process_payment_intent_succeeded(
+                db=db,
+                intent_obj=data_object,
+            )
             _log_debug(
                 "✅ WEBHOOK payment_intent.succeeded PROCESSED",
                 event_id=event_id,
