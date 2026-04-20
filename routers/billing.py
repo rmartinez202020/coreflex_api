@@ -600,6 +600,15 @@ def _process_checkout_session_completed(db: Session, session_obj):
         )
 
     intent_metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
+
+    _log_debug(
+        "🔎 WEBHOOK RETRIEVE CHECK",
+        session_id=session_id,
+        session_metadata_from_event=session_metadata,
+        retrieved_intent_id=payment_intent_id,
+        retrieved_intent_metadata=intent_metadata,
+    )
+
     metadata = _merge_metadata(session_metadata, intent_metadata)
     metadata = _normalize_payment_metadata(db, metadata)
 
@@ -861,54 +870,64 @@ def create_checkout_session(
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
 
         session = stripe.checkout.Session.create(
-    mode="payment",
-    success_url=STRIPE_CHECKOUT_SUCCESS_URL,
-    cancel_url=STRIPE_CHECKOUT_CANCEL_URL,
-    customer_email=str(getattr(current_user, "email", "") or "").strip() or None,
-    payment_method_types=["card"],
-    line_items=line_items,
-    metadata=ctx["metadata"],
-    payment_intent_data={
-        "receipt_email": str(getattr(current_user, "email", "") or "").strip() or None,
-        "metadata": ctx["metadata"],
-    },
-)
+            mode="payment",
+            success_url=STRIPE_CHECKOUT_SUCCESS_URL,
+            cancel_url=STRIPE_CHECKOUT_CANCEL_URL,
+            customer_email=str(getattr(current_user, "email", "") or "").strip() or None,
+            payment_method_types=["card"],
+            line_items=line_items,
+            metadata=ctx["metadata"],
+            payment_intent_data={
+                "receipt_email": str(getattr(current_user, "email", "") or "").strip() or None,
+                "metadata": ctx["metadata"],
+            },
+        )
 
-print("✅ CHECKOUT SESSION CREATED")
-print("   session_id:", session.id)
-print("   session_metadata_immediate:", getattr(session, "metadata", {}))
-print("   payment_intent_immediate:", getattr(session, "payment_intent", None))
+        print("✅ CHECKOUT SESSION CREATED")
+        print("   session_id:", session.id)
+        print(
+            "   session_metadata_immediate:",
+            _safe_metadata_dict(getattr(session, "metadata", None)),
+        )
+        print(
+            "   payment_intent_immediate:",
+            getattr(session, "payment_intent", None),
+        )
 
-# 🔥 VERIFY WHAT STRIPE ACTUALLY STORED
-verified_session = stripe.checkout.Session.retrieve(session.id)
+        verified_session = stripe.checkout.Session.retrieve(session.id)
+        verified_session_metadata = _safe_metadata_dict(
+            getattr(verified_session, "metadata", None)
+        )
+        verified_payment_intent_id = str(
+            getattr(verified_session, "payment_intent", "") or ""
+        ).strip()
 
-verified_session_metadata = getattr(verified_session, "metadata", {}) or {}
+        verified_intent_metadata = {}
+        if verified_payment_intent_id:
+            verified_intent = stripe.PaymentIntent.retrieve(verified_payment_intent_id)
+            verified_intent_metadata = _safe_metadata_dict(
+                getattr(verified_intent, "metadata", None)
+            )
 
-verified_pi_id = str(getattr(verified_session, "payment_intent", "") or "").strip()
+        print("✅ VERIFIED STRIPE OBJECTS AFTER CREATE")
+        print("   verified_session_id:", getattr(verified_session, "id", None))
+        print("   verified_session_metadata:", verified_session_metadata)
+        print("   verified_payment_intent_id:", verified_payment_intent_id)
+        print("   verified_payment_intent_metadata:", verified_intent_metadata)
 
-verified_pi_metadata = {}
-if verified_pi_id:
-    verified_pi = stripe.PaymentIntent.retrieve(verified_pi_id)
-    verified_pi_metadata = getattr(verified_pi, "metadata", {}) or {}
-
-print("✅ VERIFIED STRIPE DATA")
-print("   verified_session_metadata:", verified_session_metadata)
-print("   verified_payment_intent_id:", verified_pi_id)
-print("   verified_payment_intent_metadata:", verified_pi_metadata)
-
-return {
-    "ok": True,
-    "checkoutSessionId": session.id,
-    "url": session.url,
-    "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
-    "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
-    "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
-    "tax": decimal_to_float_2(ctx["tax_amount_usd"]),
-    "taxRate": ctx["tax_rate"],
-    "taxRatePercent": ctx["tax_rate_percent"],
-    "taxLabel": "NJ Sales Tax",
-    "total": decimal_to_float_2(ctx["total_usd"]),
-}
+        return {
+            "ok": True,
+            "checkoutSessionId": session.id,
+            "url": session.url,
+            "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
+            "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
+            "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
+            "tax": decimal_to_float_2(ctx["tax_amount_usd"]),
+            "taxRate": ctx["tax_rate"],
+            "taxRatePercent": ctx["tax_rate_percent"],
+            "taxLabel": "NJ Sales Tax",
+            "total": decimal_to_float_2(ctx["total_usd"]),
+        }
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
