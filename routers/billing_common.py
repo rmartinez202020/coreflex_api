@@ -829,6 +829,17 @@ def _process_checkout_session_completed(db: Session, session_obj):
     )
 
     metadata = _merge_metadata(session_metadata, intent_metadata)
+
+    # 🔥 FORCE FALLBACK if metadata is still missing
+    if not metadata or not str(metadata.get("user_id") or "").strip():
+        client_ref = getattr(session_obj, "client_reference_id", None)
+        fallback = _metadata_from_client_reference_id(client_ref)
+
+        print("⚠️ FALLBACK USING client_reference_id:", client_ref)
+        print("⚠️ PARSED FALLBACK:", fallback)
+
+        metadata = _merge_metadata(metadata, fallback)
+
     metadata = _normalize_payment_metadata(db, metadata)
 
     _log_debug(
