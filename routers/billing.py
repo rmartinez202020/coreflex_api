@@ -215,19 +215,24 @@ def _normalize_payment_metadata(db: Session, metadata: dict) -> dict:
 
 
 def _mark_payment_intent_applied(payment_intent_id: str, metadata: dict) -> None:
+    pid = str(payment_intent_id or "").strip()
+    if not pid:
+        print("ℹ️ SKIPPING PAYMENTINTENT applied=true MARK because payment_intent_id is empty")
+        return
+
     try:
         stripe.PaymentIntent.modify(
-            payment_intent_id,
+            pid,
             metadata={
                 **_safe_metadata_dict(metadata),
                 "applied": "true",
             },
         )
-        print("✅ STRIPE METADATA UPDATED applied=true", payment_intent_id)
+        print("✅ STRIPE METADATA UPDATED applied=true", pid)
     except stripe.error.StripeError as e:
         print(
             "⚠️ FAILED TO UPDATE STRIPE PAYMENTINTENT METADATA",
-            payment_intent_id,
+            pid,
             _describe_exception(e),
         )
 
@@ -553,18 +558,173 @@ def _retrieve_payment_intent_or_none(payment_intent_id: str):
         return None
 
 
+def _retrieve_invoice_or_none(invoice_id: str):
+    iid = str(invoice_id or "").strip()
+    if not iid:
+        return None
+    try:
+        return stripe.Invoice.retrieve(iid, expand=["payment_intent"])
+    except stripe.error.StripeError as e:
+        print(
+            "⚠️ FAILED TO RETRIEVE INVOICE",
+            iid,
+            _describe_exception(e),
+        )
+        return None
+
+
+def _retrieve_subscription_or_none(subscription_id: str):
+    sid = str(subscription_id or "").strip()
+    if not sid:
+        return None
+    try:
+        return stripe.Subscription.retrieve(
+            sid,
+            expand=["latest_invoice.payment_intent"],
+        )
+    except stripe.error.StripeError as e:
+        print(
+            "⚠️ FAILED TO RETRIEVE SUBSCRIPTION",
+            sid,
+            _describe_exception(e),
+        )
+        return None
+
+
+def _extract_payment_intent_id_from_invoice(invoice_obj) -> str:
+    if not invoice_obj:
+        return ""
+
+    payment_intent = getattr(invoice_obj, "payment_intent", None)
+    if isinstance(payment_intent, str):
+        return str(payment_intent or "").strip()
+
+    return str(getattr(payment_intent, "id", "") or "").strip()
+
+
+def _resolve_checkout_session_payment_intent(session_obj):
+    direct_payment_intent_id = str(
+        getattr(session_obj, "payment_intent", "") or ""
+    ).strip()
+    if direct_payment_intent_id:
+        return {
+            "payment_intent_id": direct_payment_intent_id,
+            "source": "session.payment_intent",
+            "invoice_id": "",
+            "subscription_id": "",
+        }
+
+    invoice_id = str(getattr(session_obj, "invoice", "") or "").strip()
+    if invoice_id:
+        invoice_obj = _retrieve_invoice_or_none(invoice_id)
+        invoice_payment_intent_id = _extract_payment_intent_id_from_invoice(invoice_obj)
+        if invoice_payment_intent_id:
+            return {
+                "payment_intent_id": invoice_payment_intent_id,
+                "source": "session.invoice.payment_intent",
+                "invoice_id": invoice_id,
+                "subscription_id": "",
+            }
+
+    subscription_id = str(getattr(session_obj, "subscription", "") or "").strip()
+    if subscription_id:
+        subscription_obj = _retrieve_subscription_or_none(subscription_id)
+        latest_invoice = getattr(subscription_obj, "latest_invoice", None)
+        latest_invoice_payment_intent_id = _extract_payment_intent_id_from_invoice(
+            latest_invoice
+        )
+        if latest_invoice_payment_intent_id:
+            return {
+                "payment_intent_id": latest_invoice_payment_intent_id,
+                "source": "session.subscription.latest_invoice.payment_intent",
+                "invoice_id": str(getattr(latest_invoice, "id", "") or "").strip(),
+                "subscription_id": subscription_id,
+            }
+
+    return {
+        "payment_intent_id": "",
+        "source": "",
+        "invoice_id": invoice_id,
+        "subscription_id": str(getattr(session_obj, "subscription", "") or "").strip(),
+    }
+
+
+def _build_checkout_line_items(ctx: dict, billing_type: str):
+    checkout_mode = "subscription" if billing_type == "monthly" else "payment"
+    line_items = []
+
+    def _build_price_data(name: str, unit_amount: int):
+        price_data = {
+            "currency": "usd",
+            "product_data": {
+                "name": name,
+            },
+            "unit_amount": unit_amount,
+        }
+        if checkout_mode == "subscription":
+            price_data["recurring"] = {"interval": "month"}
+        return price_data
+
+    if ctx["plan_amount_usd"] > 0:
+        line_items.append(
+            {
+                "price_data": _build_price_data(
+                    (
+                        f"{ctx['plan'].plan_name} Plan "
+                        f"({'Monthly' if billing_type == 'monthly' else 'One-Time License'})"
+                    ),
+                    money_to_cents(ctx["plan_amount_usd"]),
+                ),
+                "quantity": 1,
+            }
+        )
+
+    if ctx["addon"] and ctx["addon_amount_usd"] > 0:
+        line_items.append(
+            {
+                "price_data": _build_price_data(
+                    "Additional Tenant-User",
+                    money_to_cents(ctx["addon_unit_price_usd"]),
+                ),
+                "quantity": int(
+                    Decimal(str(ctx["addon_amount_usd"])) / Decimal(str(ctx["addon_unit_price_usd"]))
+                )
+                if ctx["addon_unit_price_usd"] > 0
+                else 0,
+            }
+        )
+
+    if ctx["tax_amount_usd"] > 0:
+        line_items.append(
+            {
+                "price_data": _build_price_data(
+                    "NJ Sales Tax",
+                    money_to_cents(ctx["tax_amount_usd"]),
+                ),
+                "quantity": 1,
+            }
+        )
+
+    line_items = [item for item in line_items if int(item.get("quantity") or 0) > 0]
+    return checkout_mode, line_items
+
+
 def _extract_checkout_session_data(session_obj):
     session_id = str(getattr(session_obj, "id", "") or "").strip()
     payment_status = str(
         getattr(session_obj, "payment_status", "") or ""
     ).strip().lower()
-    payment_intent_id = str(getattr(session_obj, "payment_intent", "") or "").strip()
     metadata = _safe_metadata_dict(getattr(session_obj, "metadata", None))
+    resolved = _resolve_checkout_session_payment_intent(session_obj)
+    payment_intent_id = resolved["payment_intent_id"]
 
     return {
         "session_id": session_id,
         "payment_status": payment_status,
         "payment_intent_id": payment_intent_id,
+        "payment_intent_source": resolved["source"],
+        "invoice_id": resolved["invoice_id"],
+        "subscription_id": resolved["subscription_id"],
         "metadata": metadata,
     }
 
@@ -574,6 +734,9 @@ def _process_checkout_session_completed(db: Session, session_obj):
     session_id = extracted["session_id"]
     payment_status = extracted["payment_status"]
     payment_intent_id = extracted["payment_intent_id"]
+    payment_intent_source = extracted["payment_intent_source"]
+    invoice_id = extracted["invoice_id"]
+    subscription_id = extracted["subscription_id"]
     session_metadata = extracted["metadata"]
 
     _log_debug(
@@ -581,6 +744,9 @@ def _process_checkout_session_completed(db: Session, session_obj):
         session_id=session_id,
         payment_status=payment_status,
         payment_intent_id=payment_intent_id,
+        payment_intent_source=payment_intent_source,
+        invoice_id=invoice_id,
+        subscription_id=subscription_id,
         session_metadata=session_metadata,
     )
 
@@ -589,8 +755,14 @@ def _process_checkout_session_completed(db: Session, session_obj):
         return {"ok": True, "ignored": True, "reason": "payment_status_not_paid"}
 
     if not payment_intent_id:
-        print("ℹ️ checkout.session.completed ignored because payment_intent is missing")
-        return {"ok": True, "ignored": True, "reason": "missing_payment_intent"}
+        print("ℹ️ checkout.session.completed ignored because payment_intent could not be resolved")
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "missing_payment_intent",
+            "invoice_id": invoice_id,
+            "subscription_id": subscription_id,
+        }
 
     intent = _retrieve_payment_intent_or_none(payment_intent_id)
     if not intent:
@@ -606,7 +778,10 @@ def _process_checkout_session_completed(db: Session, session_obj):
         session_id=session_id,
         session_metadata_from_event=session_metadata,
         retrieved_intent_id=payment_intent_id,
+        retrieved_intent_source=payment_intent_source,
         retrieved_intent_metadata=intent_metadata,
+        invoice_id=invoice_id,
+        subscription_id=subscription_id,
     )
 
     metadata = _merge_metadata(session_metadata, intent_metadata)
@@ -616,6 +791,7 @@ def _process_checkout_session_completed(db: Session, session_obj):
         "🔥 FINAL CHECKOUT METADATA",
         session_id=session_id,
         payment_intent_id=payment_intent_id,
+        payment_intent_source=payment_intent_source,
         session_metadata=session_metadata,
         intent_metadata=intent_metadata,
         merged_metadata=metadata,
@@ -813,52 +989,7 @@ def create_checkout_session(
             detail="Payment amount must be greater than zero.",
         )
 
-    line_items = []
-
-    if ctx["plan_amount_usd"] > 0:
-        line_items.append(
-            {
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {
-                        "name": (
-                            f"{ctx['plan'].plan_name} Plan "
-                            f"({'Monthly' if billing_type == 'monthly' else 'One-Time License'})"
-                        ),
-                    },
-                    "unit_amount": money_to_cents(ctx["plan_amount_usd"]),
-                },
-                "quantity": 1,
-            }
-        )
-
-    if extra_tenant_users > 0 and ctx["addon"] and ctx["addon_amount_usd"] > 0:
-        line_items.append(
-            {
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {
-                        "name": "Additional Tenant-User",
-                    },
-                    "unit_amount": money_to_cents(ctx["addon_unit_price_usd"]),
-                },
-                "quantity": extra_tenant_users,
-            }
-        )
-
-    if ctx["tax_amount_usd"] > 0:
-        line_items.append(
-            {
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {
-                        "name": "NJ Sales Tax",
-                    },
-                    "unit_amount": money_to_cents(ctx["tax_amount_usd"]),
-                },
-                "quantity": 1,
-            }
-        )
+    checkout_mode, line_items = _build_checkout_line_items(ctx, billing_type)
 
     if not line_items:
         raise HTTPException(
@@ -868,23 +999,34 @@ def create_checkout_session(
 
     try:
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
+        print("🔥 CHECKOUT MODE:", checkout_mode)
+        print("🔥 LINE ITEMS:", line_items)
 
-        session = stripe.checkout.Session.create(
-            mode="payment",
-            success_url=STRIPE_CHECKOUT_SUCCESS_URL,
-            cancel_url=STRIPE_CHECKOUT_CANCEL_URL,
-            customer_email=str(getattr(current_user, "email", "") or "").strip() or None,
-            payment_method_types=["card"],
-            line_items=line_items,
-            metadata=ctx["metadata"],
-            payment_intent_data={
+        checkout_kwargs = {
+            "mode": checkout_mode,
+            "success_url": STRIPE_CHECKOUT_SUCCESS_URL,
+            "cancel_url": STRIPE_CHECKOUT_CANCEL_URL,
+            "customer_email": str(getattr(current_user, "email", "") or "").strip() or None,
+            "payment_method_types": ["card"],
+            "line_items": line_items,
+            "metadata": ctx["metadata"],
+        }
+
+        if checkout_mode == "payment":
+            checkout_kwargs["payment_intent_data"] = {
                 "receipt_email": str(getattr(current_user, "email", "") or "").strip() or None,
                 "metadata": ctx["metadata"],
-            },
-        )
+            }
+        else:
+            checkout_kwargs["subscription_data"] = {
+                "metadata": ctx["metadata"],
+            }
+
+        session = stripe.checkout.Session.create(**checkout_kwargs)
 
         print("✅ CHECKOUT SESSION CREATED")
         print("   session_id:", session.id)
+        print("   checkout_mode:", checkout_mode)
         print(
             "   session_metadata_immediate:",
             _safe_metadata_dict(getattr(session, "metadata", None)),
@@ -893,14 +1035,25 @@ def create_checkout_session(
             "   payment_intent_immediate:",
             getattr(session, "payment_intent", None),
         )
+        print(
+            "   invoice_immediate:",
+            getattr(session, "invoice", None),
+        )
+        print(
+            "   subscription_immediate:",
+            getattr(session, "subscription", None),
+        )
 
         verified_session = stripe.checkout.Session.retrieve(session.id)
         verified_session_metadata = _safe_metadata_dict(
             getattr(verified_session, "metadata", None)
         )
-        verified_payment_intent_id = str(
-            getattr(verified_session, "payment_intent", "") or ""
-        ).strip()
+
+        resolved_payment = _resolve_checkout_session_payment_intent(verified_session)
+        verified_payment_intent_id = resolved_payment["payment_intent_id"]
+        verified_payment_source = resolved_payment["source"]
+        verified_invoice_id = resolved_payment["invoice_id"]
+        verified_subscription_id = resolved_payment["subscription_id"]
 
         verified_intent_metadata = {}
         if verified_payment_intent_id:
@@ -913,12 +1066,16 @@ def create_checkout_session(
         print("   verified_session_id:", getattr(verified_session, "id", None))
         print("   verified_session_metadata:", verified_session_metadata)
         print("   verified_payment_intent_id:", verified_payment_intent_id)
+        print("   verified_payment_intent_source:", verified_payment_source)
+        print("   verified_invoice_id:", verified_invoice_id)
+        print("   verified_subscription_id:", verified_subscription_id)
         print("   verified_payment_intent_metadata:", verified_intent_metadata)
 
         return {
             "ok": True,
             "checkoutSessionId": session.id,
             "url": session.url,
+            "checkoutMode": checkout_mode,
             "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
             "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
             "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
@@ -957,12 +1114,18 @@ def get_checkout_session(
             detail="This checkout session does not belong to the authenticated user.",
         )
 
+    resolved_payment = _resolve_checkout_session_payment_intent(session)
+
     return {
         "ok": True,
         "id": session.id,
+        "mode": getattr(session, "mode", None),
         "status": getattr(session, "status", None),
         "payment_status": getattr(session, "payment_status", None),
-        "payment_intent": getattr(session, "payment_intent", None),
+        "payment_intent": resolved_payment["payment_intent_id"] or getattr(session, "payment_intent", None),
+        "payment_intent_source": resolved_payment["source"],
+        "invoice_id": resolved_payment["invoice_id"],
+        "subscription_id": resolved_payment["subscription_id"],
         "customer_email": getattr(session, "customer_email", None),
         "metadata": metadata,
     }
@@ -1004,11 +1167,17 @@ def apply_checkout_session(
             detail="Checkout session is not paid.",
         )
 
-    payment_intent_id = str(getattr(session, "payment_intent", "") or "").strip()
+    resolved_payment = _resolve_checkout_session_payment_intent(session)
+    payment_intent_id = resolved_payment["payment_intent_id"]
+
     if not payment_intent_id:
         raise HTTPException(
             status_code=400,
-            detail="Checkout session does not have a payment intent.",
+            detail=(
+                "Checkout session does not have a resolvable payment intent. "
+                f"invoice_id={resolved_payment['invoice_id']} "
+                f"subscription_id={resolved_payment['subscription_id']}"
+            ),
         )
 
     try:
