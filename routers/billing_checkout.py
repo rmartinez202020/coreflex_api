@@ -229,14 +229,6 @@ def create_checkout_session(
                     f"billing_type={billing_type} "
                     f"extra_tenant_users={extra_tenant_users}"
                 ),
-                "payment_settings": {
-                    "payment_method_options": {
-                        "card": {}
-                    }
-                },
-            }
-            checkout_kwargs["payment_intent_data"] = {
-                "metadata": ctx["metadata"],
             }
 
         session = stripe.checkout.Session.create(**checkout_kwargs)
