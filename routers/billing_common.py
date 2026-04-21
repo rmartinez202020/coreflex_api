@@ -798,7 +798,7 @@ def _process_checkout_session_completed(db: Session, session_obj):
         print("ℹ️ checkout.session.completed ignored because payment_status is not paid")
         return {"ok": True, "ignored": True, "reason": "payment_status_not_paid"}
 
-        if not payment_intent_id:
+    if not payment_intent_id:
         print("⚠️ checkout.session.completed has no resolved payment_intent_id")
         print("⚠️ continuing with session metadata fallback")
         print("   invoice_id:", invoice_id)
