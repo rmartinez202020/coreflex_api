@@ -187,16 +187,28 @@ def create_checkout_session(
             detail="There is no charge to process for this checkout session.",
         )
 
+    checkout_customer_email = (
+        str(getattr(current_user, "email", "") or "").strip() or None
+    )
+    client_reference_id = (
+        f"user_id={current_user.id};"
+        f"plan_key={plan_key};"
+        f"billing_type={billing_type};"
+        f"extra_tenant_users={extra_tenant_users}"
+    )
+
     try:
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
         print("🔥 CHECKOUT MODE:", checkout_mode)
         print("🔥 LINE ITEMS:", line_items)
+        print("🔥 CLIENT REFERENCE ID:", client_reference_id)
 
         checkout_kwargs = {
             "mode": checkout_mode,
             "success_url": STRIPE_CHECKOUT_SUCCESS_URL,
             "cancel_url": STRIPE_CHECKOUT_CANCEL_URL,
-            "customer_email": str(getattr(current_user, "email", "") or "").strip() or None,
+            "customer_email": checkout_customer_email,
+            "client_reference_id": client_reference_id,
             "payment_method_types": ["card"],
             "line_items": line_items,
             "metadata": ctx["metadata"],
@@ -204,12 +216,19 @@ def create_checkout_session(
 
         if checkout_mode == "payment":
             checkout_kwargs["payment_intent_data"] = {
-                "receipt_email": str(getattr(current_user, "email", "") or "").strip() or None,
+                "receipt_email": checkout_customer_email,
                 "metadata": ctx["metadata"],
             }
         else:
             checkout_kwargs["subscription_data"] = {
                 "metadata": ctx["metadata"],
+                "description": (
+                    f"CoreFlex billing "
+                    f"user_id={current_user.id} "
+                    f"plan_key={plan_key} "
+                    f"billing_type={billing_type} "
+                    f"extra_tenant_users={extra_tenant_users}"
+                ),
             }
 
         session = stripe.checkout.Session.create(**checkout_kwargs)
@@ -220,6 +239,10 @@ def create_checkout_session(
         print(
             "   session_metadata_immediate:",
             _safe_metadata_dict(getattr(session, "metadata", None)),
+        )
+        print(
+            "   session_client_reference_id_immediate:",
+            getattr(session, "client_reference_id", None),
         )
         print(
             "   payment_intent_immediate:",
@@ -238,6 +261,9 @@ def create_checkout_session(
         verified_session_metadata = _safe_metadata_dict(
             getattr(verified_session, "metadata", None)
         )
+        verified_client_reference_id = str(
+            getattr(verified_session, "client_reference_id", "") or ""
+        ).strip()
 
         resolved_payment = _resolve_checkout_session_payment_intent(verified_session)
         verified_payment_intent_id = resolved_payment["payment_intent_id"]
@@ -252,13 +278,24 @@ def create_checkout_session(
                 getattr(verified_intent, "metadata", None)
             )
 
+        verified_subscription_metadata = {}
+        if verified_subscription_id:
+            verified_subscription = stripe.Subscription.retrieve(
+                verified_subscription_id
+            )
+            verified_subscription_metadata = _safe_metadata_dict(
+                getattr(verified_subscription, "metadata", None)
+            )
+
         print("✅ VERIFIED STRIPE OBJECTS AFTER CREATE")
         print("   verified_session_id:", getattr(verified_session, "id", None))
         print("   verified_session_metadata:", verified_session_metadata)
+        print("   verified_client_reference_id:", verified_client_reference_id)
         print("   verified_payment_intent_id:", verified_payment_intent_id)
         print("   verified_payment_intent_source:", verified_payment_source)
         print("   verified_invoice_id:", verified_invoice_id)
         print("   verified_subscription_id:", verified_subscription_id)
+        print("   verified_subscription_metadata:", verified_subscription_metadata)
         print("   verified_payment_intent_metadata:", verified_intent_metadata)
 
         return {
@@ -266,6 +303,7 @@ def create_checkout_session(
             "checkoutSessionId": session.id,
             "url": session.url,
             "checkoutMode": checkout_mode,
+            "clientReferenceId": client_reference_id,
             "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
             "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
             "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
@@ -312,7 +350,9 @@ def get_checkout_session(
         "mode": getattr(session, "mode", None),
         "status": getattr(session, "status", None),
         "payment_status": getattr(session, "payment_status", None),
-        "payment_intent": resolved_payment["payment_intent_id"] or getattr(session, "payment_intent", None),
+        "client_reference_id": getattr(session, "client_reference_id", None),
+        "payment_intent": resolved_payment["payment_intent_id"]
+        or getattr(session, "payment_intent", None),
         "payment_intent_source": resolved_payment["source"],
         "invoice_id": resolved_payment["invoice_id"],
         "subscription_id": resolved_payment["subscription_id"],
