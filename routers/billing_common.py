@@ -435,14 +435,15 @@ def _apply_payment_effects(
     )
 
     subscription = _get_or_create_user_subscription(db, user_id)
+
     print("🔥 APPLY PAYMENT EFFECTS FINAL VALUES")
-print("   user_id:", user_id)
-print("   plan_key:", plan_key)
-print("   billing_type:", billing_type)
-print("   is_current_plan:", is_current_plan)
-print("   extra_tenant_users:", extra_tenant_users)
-print("   already_applied:", already_applied)
-print("   current_limit:", int(subscription.tenants_users_limit or 0))
+    print("   user_id:", user_id)
+    print("   plan_key:", plan_key)
+    print("   billing_type:", billing_type)
+    print("   is_current_plan:", is_current_plan)
+    print("   extra_tenant_users:", extra_tenant_users)
+    print("   already_applied:", already_applied)
+    print("   current_limit:", int(subscription.tenants_users_limit or 0))
 
     if already_applied:
         print("✅ PAYMENT ALREADY MARKED APPLIED IN STRIPE METADATA")
@@ -522,10 +523,11 @@ print("   current_limit:", int(subscription.tenants_users_limit or 0))
 
     try:
         print("🔥 ABOUT TO SAVE SUBSCRIPTION")
-print("   subscription.user_id:", subscription.user_id)
-print("   subscription.plan_key:", subscription.plan_key)
-print("   subscription.tenants_users_limit:", subscription.tenants_users_limit)
-print("   subscription.device_limit:", subscription.device_limit)
+        print("   subscription.user_id:", subscription.user_id)
+        print("   subscription.plan_key:", subscription.plan_key)
+        print("   subscription.tenants_users_limit:", subscription.tenants_users_limit)
+        print("   subscription.device_limit:", subscription.device_limit)
+
         print("🔥 DB COMMIT START")
         db.commit()
         print("✅ DB COMMIT OK")
