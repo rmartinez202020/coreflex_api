@@ -215,6 +215,14 @@ from routers.user_subscriptions import router as user_subscriptions_router  # no
 app.include_router(user_subscriptions_router)
 
 # ========================================
+# 💳 ADMIN SUBSCRIPTIONS ROUTES
+# Owner/admin can view and edit all user subscription rows
+# ========================================
+from routers.admin_subscriptions import router as admin_subscriptions_router  # noqa: E402
+
+app.include_router(admin_subscriptions_router)
+
+# ========================================
 # 💳 USER BILLING ROUTES
 # Stripe payment-intent route for Proceed to Payment modal
 # ========================================
