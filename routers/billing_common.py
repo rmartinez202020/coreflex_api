@@ -305,6 +305,14 @@ def _apply_payment_effects(
 
     subscription = _get_or_create_user_subscription(db, user_id)
 
+    print("🔥 DB SUBSCRIPTION BEFORE UPDATE")
+    print("   subscription.id:", getattr(subscription, "id", None))
+    print("   subscription.user_id:", getattr(subscription, "user_id", None))
+    print("   subscription.plan_key:", getattr(subscription, "plan_key", None))
+    print("   subscription.tenants_users_limit:", getattr(subscription, "tenants_users_limit", None))
+    print("   subscription.device_limit:", getattr(subscription, "device_limit", None))
+    print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None)
+
     print("🔥 APPLY PAYMENT EFFECTS FINAL VALUES")
     print("   user_id:", user_id)
     print("   plan_key:", plan_key)
@@ -407,7 +415,13 @@ def _apply_payment_effects(
         raise
 
     db.refresh(subscription)
-    print("✅ SUBSCRIPTION REFRESH OK")
+    print("🔥 DB SUBSCRIPTION AFTER UPDATE")
+    print("   subscription.id:", getattr(subscription, "id", None))
+    print("   subscription.user_id:", getattr(subscription, "user_id", None))
+    print("   subscription.plan_key:", getattr(subscription, "plan_key", None))
+    print("   subscription.tenants_users_limit:", getattr(subscription, "tenants_users_limit", None))
+    print("   subscription.device_limit:", getattr(subscription, "device_limit", None))
+    print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None))
 
     _mark_payment_intent_applied(payment_intent_id, metadata)
 
