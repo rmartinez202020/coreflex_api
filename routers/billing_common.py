@@ -798,15 +798,41 @@ def _process_checkout_session_completed(db: Session, session_obj):
         print("ℹ️ checkout.session.completed ignored because payment_status is not paid")
         return {"ok": True, "ignored": True, "reason": "payment_status_not_paid"}
 
-    if not payment_intent_id:
-        print("ℹ️ checkout.session.completed ignored because payment_intent could not be resolved")
-        return {
-            "ok": True,
-            "ignored": True,
-            "reason": "missing_payment_intent",
-            "invoice_id": invoice_id,
-            "subscription_id": subscription_id,
-        }
+        if not payment_intent_id:
+        print("⚠️ checkout.session.completed has no resolved payment_intent_id")
+        print("⚠️ continuing with session metadata fallback")
+        print("   invoice_id:", invoice_id)
+        print("   subscription_id:", subscription_id)
+
+        metadata = _normalize_payment_metadata(db, session_metadata)
+
+        _log_debug(
+            "🔥 FINAL CHECKOUT METADATA (NO PAYMENT INTENT)",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id,
+            payment_intent_source=payment_intent_source,
+            session_metadata=session_metadata,
+            merged_metadata=metadata,
+            invoice_id=invoice_id,
+            subscription_id=subscription_id,
+        )
+
+        if not str(metadata.get("user_id") or "").strip().isdigit():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid payment metadata: user_id. "
+                    f"session_metadata={session_metadata} "
+                    f"invoice_id={invoice_id} "
+                    f"subscription_id={subscription_id}"
+                ),
+            )
+
+        return _apply_payment_effects(
+            db=db,
+            payment_intent_id="",
+            metadata=metadata,
+        )
 
     intent = _retrieve_payment_intent_or_none(payment_intent_id)
     if not intent:
