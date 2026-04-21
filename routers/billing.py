@@ -10,13 +10,17 @@ from routers.billing_checkout import router as billing_checkout_router
 from routers.billing_common import (
     STRIPE_WEBHOOK_SECRET,
     ensure_stripe_webhook_ready,
-    _log_debug,
     _describe_exception,
+    _log_debug,
+    _normalize_payment_metadata,
+    _safe_metadata_dict,
+)
+from routers.billing_purchase_helpers import (
+    _apply_payment_effects,
+)
+from routers.billing_webhook_helpers import (
     _process_checkout_session_completed,
     _process_payment_intent_succeeded,
-    _safe_metadata_dict,
-    _normalize_payment_metadata,
-    _apply_payment_effects,
 )
 
 router = APIRouter(prefix="/billing", tags=["Billing"])

@@ -19,13 +19,18 @@ from routers.billing_common import (
     decimal_to_float_2,
     percent_display_2_from_rate,
     rate_display_2_from_percent,
-    _build_purchase_context,
-    _build_checkout_line_items,
-    _resolve_checkout_session_payment_intent,
     _safe_metadata_dict,
     _merge_metadata,
     _normalize_payment_metadata,
+    _metadata_from_client_reference_id,
     _apply_payment_effects,
+)
+from routers.billing_purchase_helpers import (
+    _build_purchase_context,
+    _build_checkout_line_items,
+)
+from routers.billing_webhook_helpers import (
+    _resolve_checkout_session_payment_intent,
 )
 
 router = APIRouter()
@@ -222,7 +227,7 @@ def create_checkout_session(
         else:
             # Keep subscription mode lean and working.
             # Metadata fallback for webhook is handled via client_reference_id
-            # in billing_common.py.
+            # in billing_webhook_helpers.py / billing_common.py.
             checkout_kwargs["subscription_data"] = {
                 "metadata": ctx["metadata"],
                 "description": (
@@ -386,7 +391,6 @@ def apply_checkout_session(
 
     session_metadata = _safe_metadata_dict(getattr(session, "metadata", None))
     if not session_metadata:
-        from routers.billing_common import _metadata_from_client_reference_id
         session_metadata = _metadata_from_client_reference_id(
             getattr(session, "client_reference_id", None)
         )
