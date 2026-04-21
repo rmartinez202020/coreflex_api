@@ -773,6 +773,16 @@ def _process_checkout_session_completed(db: Session, session_obj):
     subscription_id = extracted["subscription_id"]
     session_metadata = extracted["metadata"]
 
+    if not session_metadata:
+        try:
+            ref = str(getattr(session_obj, "client_reference_id", "") or "").strip()
+            print("⚠️ FALLBACK USING client_reference_id:", ref)
+            session_metadata = _metadata_from_client_reference_id(ref)
+            print("✅ REBUILT METADATA FROM client_reference_id:", session_metadata)
+        except Exception as e:
+            print("❌ FAILED TO PARSE client_reference_id:", e)
+            session_metadata = {}
+
     _log_debug(
         "🔥 WEBHOOK checkout.session.completed",
         session_id=session_id,
