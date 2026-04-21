@@ -220,6 +220,9 @@ def create_checkout_session(
                 "metadata": ctx["metadata"],
             }
         else:
+            # Keep subscription mode lean and working.
+            # Metadata fallback for webhook is handled via client_reference_id
+            # in billing_common.py.
             checkout_kwargs["subscription_data"] = {
                 "metadata": ctx["metadata"],
                 "description": (
@@ -382,6 +385,12 @@ def apply_checkout_session(
         raise HTTPException(status_code=404, detail="Checkout session not found.")
 
     session_metadata = _safe_metadata_dict(getattr(session, "metadata", None))
+    if not session_metadata:
+        from routers.billing_common import _metadata_from_client_reference_id
+        session_metadata = _metadata_from_client_reference_id(
+            getattr(session, "client_reference_id", None)
+        )
+
     session_user_id = str(session_metadata.get("user_id") or "").strip()
 
     if session_user_id and session_user_id != str(current_user.id):
@@ -426,7 +435,7 @@ def apply_checkout_session(
         )
 
     metadata = _merge_metadata(
-        _safe_metadata_dict(getattr(session, "metadata", None)),
+        session_metadata,
         _safe_metadata_dict(getattr(intent, "metadata", None)),
     )
     metadata = _normalize_payment_metadata(db, metadata)
