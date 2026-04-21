@@ -156,6 +156,24 @@ def _safe_metadata_dict(value) -> dict:
         return {}
 
 
+def _metadata_from_client_reference_id(value: str) -> dict:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+
+    parsed = {}
+    for part in text.split(";"):
+        part = str(part or "").strip()
+        if not part or "=" not in part:
+            continue
+        key, raw_value = part.split("=", 1)
+        key = str(key or "").strip()
+        raw_value = str(raw_value or "").strip()
+        if key and raw_value:
+            parsed[key] = raw_value
+    return parsed
+
+
 def _describe_exception(exc: Exception) -> str:
     try:
         text = str(exc).strip()
@@ -724,7 +742,13 @@ def _extract_checkout_session_data(session_obj):
     payment_status = str(
         getattr(session_obj, "payment_status", "") or ""
     ).strip().lower()
+
     metadata = _safe_metadata_dict(getattr(session_obj, "metadata", None))
+    if not metadata:
+        metadata = _metadata_from_client_reference_id(
+            getattr(session_obj, "client_reference_id", None)
+        )
+
     resolved = _resolve_checkout_session_payment_intent(session_obj)
     payment_intent_id = resolved["payment_intent_id"]
 
