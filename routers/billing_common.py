@@ -309,9 +309,15 @@ def _apply_payment_effects(
     print("   subscription.id:", getattr(subscription, "id", None))
     print("   subscription.user_id:", getattr(subscription, "user_id", None))
     print("   subscription.plan_key:", getattr(subscription, "plan_key", None))
-    print("   subscription.tenants_users_limit:", getattr(subscription, "tenants_users_limit", None))
+    print(
+        "   subscription.tenants_users_limit:",
+        getattr(subscription, "tenants_users_limit", None),
+    )
     print("   subscription.device_limit:", getattr(subscription, "device_limit", None))
-    print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None)
+    print(
+        "   subscription.renewal_date:",
+        getattr(subscription, "renewal_date", None),
+    )
 
     print("🔥 APPLY PAYMENT EFFECTS FINAL VALUES")
     print("   user_id:", user_id)
@@ -419,9 +425,15 @@ def _apply_payment_effects(
     print("   subscription.id:", getattr(subscription, "id", None))
     print("   subscription.user_id:", getattr(subscription, "user_id", None))
     print("   subscription.plan_key:", getattr(subscription, "plan_key", None))
-    print("   subscription.tenants_users_limit:", getattr(subscription, "tenants_users_limit", None))
+    print(
+        "   subscription.tenants_users_limit:",
+        getattr(subscription, "tenants_users_limit", None),
+    )
     print("   subscription.device_limit:", getattr(subscription, "device_limit", None))
-    print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None))
+    print(
+        "   subscription.renewal_date:",
+        getattr(subscription, "renewal_date", None),
+    )
 
     _mark_payment_intent_applied(payment_intent_id, metadata)
 
