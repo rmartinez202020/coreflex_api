@@ -195,11 +195,15 @@ def create_checkout_session(
     checkout_customer_email = (
         str(getattr(current_user, "email", "") or "").strip() or None
     )
+
     client_reference_id = (
-        f"user_id={current_user.id};"
-        f"plan_key={plan_key};"
-        f"billing_type={billing_type};"
-        f"extra_tenant_users={extra_tenant_users}"
+    f"user_id={current_user.id};"
+    f"user_email={str(getattr(current_user, 'email', '') or '').strip()};"
+    f"plan_key={plan_key};"
+    f"current_plan_key={ctx['current_plan_key']};"
+    f"is_current_plan={'true' if ctx['is_current_plan'] else 'false'};"
+    f"billing_type={billing_type};"
+    f"extra_tenant_users={extra_tenant_users}"
     )
 
     try:
