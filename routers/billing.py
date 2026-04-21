@@ -14,6 +14,9 @@ from routers.billing_common import (
     _describe_exception,
     _process_checkout_session_completed,
     _process_payment_intent_succeeded,
+    _safe_metadata_dict,
+    _normalize_payment_metadata,
+    _apply_payment_effects,
 )
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
@@ -74,6 +77,43 @@ async def stripe_webhook(
             )
             _log_debug(
                 "✅ WEBHOOK payment_intent.succeeded PROCESSED",
+                event_id=event_id,
+                result=return_value,
+            )
+
+        elif event_type in {"invoice.payment_succeeded", "invoice_payment.paid"}:
+            invoice_obj = data_object
+
+            payment_intent_id = ""
+            raw_payment_intent = getattr(invoice_obj, "payment_intent", None)
+
+            if isinstance(raw_payment_intent, str):
+                payment_intent_id = str(raw_payment_intent or "").strip()
+            else:
+                payment_intent_id = str(
+                    getattr(raw_payment_intent, "id", "") or ""
+                ).strip()
+
+            if not payment_intent_id:
+                print("ℹ️ invoice paid event ignored because payment_intent is missing")
+                return_value = {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "missing_payment_intent",
+                }
+            else:
+                intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+                metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
+                metadata = _normalize_payment_metadata(db, metadata)
+
+                return_value = _apply_payment_effects(
+                    db=db,
+                    payment_intent_id=payment_intent_id,
+                    metadata=metadata,
+                )
+
+            _log_debug(
+                f"✅ WEBHOOK {event_type} PROCESSED",
                 event_id=event_id,
                 result=return_value,
             )
