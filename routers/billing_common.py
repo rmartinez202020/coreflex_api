@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import User, BillingPlan, UserSubscription
+from models import User, BillingPlan, UserSubscription, SubscriptionAgreementAcceptance
 
 STRIPE_SECRET_KEY = str(os.getenv("STRIPE_SECRET_KEY") or "").strip()
 STRIPE_WEBHOOK_SECRET = str(os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
@@ -368,39 +368,87 @@ def _apply_payment_effects(
     current_plan_key = str(subscription.plan_key or "free").strip().lower()
     current_limit = int(subscription.tenants_users_limit or 0)
     current_device_limit = int(subscription.device_limit or 0)
-    plan_tenant_add = int(plan.tenant_user_limit or 0)
+    target_plan_tenant_amount = int(plan.tenant_user_limit or 0)
     base_device_limit = int(plan.device_limit or 0)
 
+    current_plan_row = (
+        db.query(BillingPlan)
+        .filter(
+            BillingPlan.plan_key == current_plan_key,
+            BillingPlan.billing_type == billing_type,
+            BillingPlan.is_active.is_(True),
+        )
+        .first()
+    )
+    current_plan_tenant_amount = int(
+        getattr(current_plan_row, "tenant_user_limit", 0) or 0
+    )
+
+    is_upgrade = (
+        not is_current_plan
+        and target_plan_tenant_amount > current_plan_tenant_amount
+    )
+    is_downgrade_or_lateral = (
+        not is_current_plan
+        and target_plan_tenant_amount <= current_plan_tenant_amount
+    )
+
+    # Check whether user already accepted / bought this target plan before.
+    # If yes, do not grant the plan tenant-users again.
+    prior_same_plan_acceptance = (
+        db.query(SubscriptionAgreementAcceptance.id)
+        .filter(SubscriptionAgreementAcceptance.user_id == user_id)
+        .filter(SubscriptionAgreementAcceptance.plan_key == plan_key)
+        .filter(SubscriptionAgreementAcceptance.confirmed.is_(True))
+        .first()
+    )
+    has_bought_same_plan_before = prior_same_plan_acceptance is not None
+
     if is_current_plan:
+        # Same plan purchase:
+        # keep existing behavior for add-ons only.
         new_tenant_limit = current_limit + extra_tenant_users
         new_plan_key = current_plan_key
         new_device_limit = current_device_limit or base_device_limit
         added_from_plan = 0
+        added_from_addons = extra_tenant_users
     else:
-        # Requested behavior:
-        # When purchasing a plan, add that plan's tenant-user amount
-        # on top of the current tenant-user limit, plus any extra add-ons.
-        # Example:
-        # Starter => +2
-        # Professional => +3
-        # Industrial => +4
-        # Enterprise => +5
-        new_tenant_limit = current_limit + plan_tenant_add + extra_tenant_users
         new_plan_key = plan_key
         new_device_limit = base_device_limit
-        added_from_plan = plan_tenant_add
+
+        if is_upgrade:
+            if has_bought_same_plan_before:
+                added_from_plan = 0
+            else:
+                added_from_plan = target_plan_tenant_amount
+
+            # On upgrade, only add plan tenant-users if this exact plan was never bought before.
+            # Add-ons still apply on upgrade.
+            added_from_addons = extra_tenant_users
+            new_tenant_limit = current_limit + added_from_plan + added_from_addons
+        else:
+            # On downgrade/lateral:
+            # do NOT add plan tenant-users
+            # do NOT add extra tenant-users
+            added_from_plan = 0
+            added_from_addons = 0
+            new_tenant_limit = current_limit
 
     _log_debug(
         "🔥 SUBSCRIPTION UPDATE PREVIEW",
         current_plan_key=current_plan_key,
         current_limit=current_limit,
         current_device_limit=current_device_limit,
-        plan_tenant_add=plan_tenant_add,
+        current_plan_tenant_amount=current_plan_tenant_amount,
+        target_plan_tenant_amount=target_plan_tenant_amount,
+        is_upgrade=is_upgrade,
+        is_downgrade_or_lateral=is_downgrade_or_lateral,
+        has_bought_same_plan_before=has_bought_same_plan_before,
         new_plan_key=new_plan_key,
         new_tenant_limit=new_tenant_limit,
         new_device_limit=new_device_limit,
         added_from_plan=added_from_plan,
-        extra_tenant_users=extra_tenant_users,
+        added_from_addons=added_from_addons,
     )
 
     subscription.plan_key = new_plan_key
@@ -453,7 +501,7 @@ def _apply_payment_effects(
     return {
         "ok": True,
         "alreadyApplied": False,
-        "added": added_from_plan + extra_tenant_users,
+        "added": added_from_plan + added_from_addons,
         "planKey": str(subscription.plan_key or "free").strip().lower(),
         "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
         "tenantUsersUsed": None,
