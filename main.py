@@ -231,6 +231,16 @@ from routers.billing import router as billing_router  # noqa: E402
 app.include_router(billing_router)
 
 # ========================================
+# ✅ SUBSCRIPTION AGREEMENTS ROUTES
+# Separate from billing; stores permanent agreement acceptance history
+# ========================================
+from routers.subscription_agreements import (  # noqa: E402
+    router as subscription_agreements_router,
+)
+
+app.include_router(subscription_agreements_router)
+
+# ========================================
 # 💳 ADMIN BILLING ROUTES
 # Stripe billing plans / addons sync
 # ========================================

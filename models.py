@@ -1282,3 +1282,48 @@ class BillingAddon(Base):
     __table_args__ = (
         UniqueConstraint("addon_key", "billing_type", name="unique_addon_billing"),
     )
+
+
+# ===============================
+# ✅ SUBSCRIPTION AGREEMENT ACCEPTANCES
+# Permanent audit trail:
+# - one NEW row every time user accepts agreement
+# - never update old rows
+# - never delete old rows
+# ===============================
+class SubscriptionAgreementAcceptance(Base):
+    __tablename__ = "subscription_agreement_acceptances"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    plan_key = Column(String(50), nullable=False, index=True)
+    billing_type = Column(String(20), nullable=False, index=True)
+    agreement_version = Column(String(20), nullable=False, server_default="v1")
+
+    confirmed = Column(Boolean, nullable=False, server_default=func.true())
+    confirmed_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    checkout_session_id = Column(String(255), nullable=True, index=True)
+    payment_intent_id = Column(String(255), nullable=True, index=True)
+
+    ip_address = Column(String(100), nullable=True)
+    user_agent = Column(String, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User")
