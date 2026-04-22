@@ -368,62 +368,39 @@ def _apply_payment_effects(
     current_plan_key = str(subscription.plan_key or "free").strip().lower()
     current_limit = int(subscription.tenants_users_limit or 0)
     current_device_limit = int(subscription.device_limit or 0)
-    base_tenant_limit = int(plan.tenant_user_limit or 0)
+    plan_tenant_add = int(plan.tenant_user_limit or 0)
     base_device_limit = int(plan.device_limit or 0)
-
-    current_plan_row = (
-        db.query(BillingPlan)
-        .filter(
-            BillingPlan.plan_key == current_plan_key,
-            BillingPlan.billing_type == billing_type,
-            BillingPlan.is_active.is_(True),
-        )
-        .first()
-    )
-    current_plan_base_tenant_limit = int(
-        getattr(current_plan_row, "tenant_user_limit", 0) or 0
-    )
-
-    is_upgrade = (
-        not is_current_plan
-        and base_tenant_limit > current_plan_base_tenant_limit
-    )
-
-    is_downgrade_or_lateral = (
-        not is_current_plan
-        and base_tenant_limit <= current_plan_base_tenant_limit
-    )
 
     if is_current_plan:
         new_tenant_limit = current_limit + extra_tenant_users
         new_plan_key = current_plan_key
         new_device_limit = current_device_limit or base_device_limit
+        added_from_plan = 0
     else:
-        # Upgrade behavior requested:
-        # keep the user's current tenant-user limit and add +1 on top,
-        # then also add any purchased extra tenant-users.
-        if is_upgrade:
-            new_tenant_limit = current_limit + 1 + extra_tenant_users
-        else:
-            # For downgrade/lateral move, keep current tenant-user limit
-            # and only apply paid extras if any.
-            new_tenant_limit = current_limit + extra_tenant_users
-
+        # Requested behavior:
+        # When purchasing a plan, add that plan's tenant-user amount
+        # on top of the current tenant-user limit, plus any extra add-ons.
+        # Example:
+        # Starter => +2
+        # Professional => +3
+        # Industrial => +4
+        # Enterprise => +5
+        new_tenant_limit = current_limit + plan_tenant_add + extra_tenant_users
         new_plan_key = plan_key
         new_device_limit = base_device_limit
+        added_from_plan = plan_tenant_add
 
     _log_debug(
         "🔥 SUBSCRIPTION UPDATE PREVIEW",
         current_plan_key=current_plan_key,
         current_limit=current_limit,
         current_device_limit=current_device_limit,
-        current_plan_base_tenant_limit=current_plan_base_tenant_limit,
-        target_plan_base_tenant_limit=base_tenant_limit,
-        is_upgrade=is_upgrade,
-        is_downgrade_or_lateral=is_downgrade_or_lateral,
+        plan_tenant_add=plan_tenant_add,
         new_plan_key=new_plan_key,
         new_tenant_limit=new_tenant_limit,
         new_device_limit=new_device_limit,
+        added_from_plan=added_from_plan,
+        extra_tenant_users=extra_tenant_users,
     )
 
     subscription.plan_key = new_plan_key
@@ -476,7 +453,7 @@ def _apply_payment_effects(
     return {
         "ok": True,
         "alreadyApplied": False,
-        "added": (1 if is_upgrade and not is_current_plan else 0) + extra_tenant_users,
+        "added": added_from_plan + extra_tenant_users,
         "planKey": str(subscription.plan_key or "free").strip().lower(),
         "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
         "tenantUsersUsed": None,
