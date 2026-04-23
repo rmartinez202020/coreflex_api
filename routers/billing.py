@@ -6,17 +6,15 @@ import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from auth_utils import get_current_user
 from database import get_db
-from models import UserSubscription
+from models import User, UserSubscription
 from routers.billing_checkout import router as billing_checkout_router
 from routers.billing_common import (
     STRIPE_WEBHOOK_SECRET,
     ensure_stripe_webhook_ready,
     _describe_exception,
     _log_debug,
-    _normalize_payment_metadata,
-    _safe_metadata_dict,
-    _apply_payment_effects,
 )
 from routers.billing_webhook_helpers import (
     _process_checkout_session_completed,
@@ -175,6 +173,83 @@ def _process_invoice_payment_failed(db: Session, invoice_obj):
     }
 
 
+@router.post("/cancel-subscription")
+def cancel_subscription(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    sub_row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == current_user.id)
+        .first()
+    )
+
+    if not sub_row:
+        raise HTTPException(status_code=404, detail="Subscription record not found.")
+
+    stripe_subscription_id = str(
+        getattr(sub_row, "stripe_subscription_id", "") or ""
+    ).strip()
+    if not stripe_subscription_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No active Stripe subscription is linked to this user.",
+        )
+
+    current_status = str(
+        getattr(sub_row, "subscription_status", "") or ""
+    ).strip().lower()
+    if current_status in {"canceled", "incomplete_expired"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Subscription is already canceled.",
+        )
+
+    if bool(getattr(sub_row, "cancel_at_period_end", False)):
+        return {
+            "ok": True,
+            "alreadyScheduled": True,
+            "message": "Subscription is already scheduled to cancel at period end.",
+            "subscriptionStatus": sub_row.subscription_status,
+            "cancelAtPeriodEnd": sub_row.cancel_at_period_end,
+            "renewalDate": sub_row.renewal_date.isoformat()
+            if sub_row.renewal_date
+            else None,
+        }
+
+    try:
+        stripe_subscription = stripe.Subscription.modify(
+            stripe_subscription_id,
+            cancel_at_period_end=True,
+        )
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+    _update_user_subscription_from_stripe_subscription(
+        db=db,
+        stripe_subscription_obj=stripe_subscription,
+    )
+
+    current_period_end = _to_dt_utc_from_unix(
+        getattr(stripe_subscription, "current_period_end", None)
+    )
+
+    return {
+        "ok": True,
+        "message": "Subscription will cancel at the end of the current billing period.",
+        "subscriptionId": stripe_subscription_id,
+        "subscriptionStatus": str(
+            getattr(stripe_subscription, "status", "") or ""
+        ).strip(),
+        "cancelAtPeriodEnd": bool(
+            getattr(stripe_subscription, "cancel_at_period_end", False)
+        ),
+        "currentPeriodEnd": current_period_end.isoformat()
+        if current_period_end
+        else None,
+    }
+
+
 @router.post("/stripe-webhook")
 async def stripe_webhook(
     request: Request,
@@ -246,7 +321,9 @@ async def stripe_webhook(
                 }
             else:
                 try:
-                    stripe_subscription_obj = stripe.Subscription.retrieve(subscription_id)
+                    stripe_subscription_obj = stripe.Subscription.retrieve(
+                        subscription_id
+                    )
                     return_value = _update_user_subscription_from_stripe_subscription(
                         db=db,
                         stripe_subscription_obj=stripe_subscription_obj,
