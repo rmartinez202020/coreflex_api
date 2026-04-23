@@ -235,34 +235,27 @@ async def stripe_webhook(
 
         elif event_type in {"invoice.payment_succeeded", "invoice_payment.paid"}:
             invoice_obj = data_object
+            subscription_id = str(getattr(invoice_obj, "subscription", "") or "").strip()
 
-            payment_intent_id = ""
-            raw_payment_intent = getattr(invoice_obj, "payment_intent", None)
-
-            if isinstance(raw_payment_intent, str):
-                payment_intent_id = str(raw_payment_intent or "").strip()
-            else:
-                payment_intent_id = str(
-                    getattr(raw_payment_intent, "id", "") or ""
-                ).strip()
-
-            if not payment_intent_id:
-                print("ℹ️ invoice paid event ignored because payment_intent is missing")
+            if not subscription_id:
+                print("ℹ️ invoice paid event ignored because subscription_id is missing")
                 return_value = {
                     "ok": True,
                     "ignored": True,
-                    "reason": "missing_payment_intent",
+                    "reason": "missing_subscription_id",
                 }
             else:
-                intent = stripe.PaymentIntent.retrieve(payment_intent_id)
-                metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
-                metadata = _normalize_payment_metadata(db, metadata)
-
-                return_value = _apply_payment_effects(
-                    db=db,
-                    payment_intent_id=payment_intent_id,
-                    metadata=metadata,
-                )
+                try:
+                    stripe_subscription_obj = stripe.Subscription.retrieve(subscription_id)
+                    return_value = _update_user_subscription_from_stripe_subscription(
+                        db=db,
+                        stripe_subscription_obj=stripe_subscription_obj,
+                    )
+                except stripe.error.StripeError as e:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Stripe error: {str(e)}",
+                    )
 
             _log_debug(
                 f"✅ WEBHOOK {event_type} PROCESSED",
