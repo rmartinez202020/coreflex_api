@@ -1,11 +1,13 @@
 # routers/billing.py
 import traceback
+from datetime import datetime, timezone
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from database import get_db
+from models import UserSubscription
 from routers.billing_checkout import router as billing_checkout_router
 from routers.billing_common import (
     STRIPE_WEBHOOK_SECRET,
@@ -23,6 +25,154 @@ from routers.billing_webhook_helpers import (
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
 router.include_router(billing_checkout_router)
+
+
+def _to_dt_utc_from_unix(ts_value):
+    try:
+        if ts_value is None:
+            return None
+        return datetime.fromtimestamp(int(ts_value), timezone.utc)
+    except Exception:
+        return None
+
+
+def _update_user_subscription_from_stripe_subscription(
+    db: Session,
+    *,
+    stripe_subscription_obj,
+):
+    if not stripe_subscription_obj:
+        print("ℹ️ No Stripe subscription object provided")
+        return {"ok": True, "ignored": True, "reason": "missing_subscription_object"}
+
+    subscription_id = str(getattr(stripe_subscription_obj, "id", "") or "").strip()
+    customer_id = str(getattr(stripe_subscription_obj, "customer", "") or "").strip()
+    status = str(getattr(stripe_subscription_obj, "status", "") or "").strip()
+    cancel_at_period_end = bool(
+        getattr(stripe_subscription_obj, "cancel_at_period_end", False)
+    )
+    current_period_start = _to_dt_utc_from_unix(
+        getattr(stripe_subscription_obj, "current_period_start", None)
+    )
+    current_period_end = _to_dt_utc_from_unix(
+        getattr(stripe_subscription_obj, "current_period_end", None)
+    )
+    latest_invoice_id = str(
+        getattr(stripe_subscription_obj, "latest_invoice", "") or ""
+    ).strip()
+
+    stripe_price_id = None
+    try:
+        items = getattr(stripe_subscription_obj, "items", None)
+        data = getattr(items, "data", None) or []
+        if data:
+            first_item = data[0]
+            price_obj = getattr(first_item, "price", None)
+            stripe_price_id = str(getattr(price_obj, "id", "") or "").strip() or None
+    except Exception:
+        stripe_price_id = None
+
+    if not subscription_id:
+        print("ℹ️ subscription.updated/deleted ignored because subscription_id is missing")
+        return {"ok": True, "ignored": True, "reason": "missing_subscription_id"}
+
+    sub_row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.stripe_subscription_id == subscription_id)
+        .first()
+    )
+    if not sub_row and customer_id:
+        sub_row = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.stripe_customer_id == customer_id)
+            .first()
+        )
+
+    if not sub_row:
+        print("⚠️ No matching user_subscriptions row found for Stripe subscription")
+        print("   stripe_subscription_id:", subscription_id)
+        print("   stripe_customer_id:", customer_id)
+        return {"ok": True, "ignored": True, "reason": "subscription_row_not_found"}
+
+    sub_row.stripe_customer_id = customer_id or None
+    sub_row.stripe_subscription_id = subscription_id
+    sub_row.stripe_price_id = stripe_price_id
+    sub_row.subscription_status = status or None
+    sub_row.cancel_at_period_end = cancel_at_period_end
+    sub_row.current_period_start = current_period_start
+    sub_row.current_period_end = current_period_end
+    sub_row.last_invoice_id = latest_invoice_id or None
+
+    if current_period_end:
+        sub_row.renewal_date = current_period_end
+
+    if status in {"active", "trialing"}:
+        sub_row.is_active = True
+    elif status in {"canceled", "unpaid", "incomplete_expired"}:
+        sub_row.is_active = False
+
+    db.commit()
+    db.refresh(sub_row)
+
+    print("✅ user_subscriptions updated from Stripe subscription")
+    print("   user_id:", sub_row.user_id)
+    print("   stripe_subscription_id:", sub_row.stripe_subscription_id)
+    print("   subscription_status:", sub_row.subscription_status)
+    print("   cancel_at_period_end:", sub_row.cancel_at_period_end)
+    print("   current_period_end:", sub_row.current_period_end)
+
+    return {
+        "ok": True,
+        "user_id": sub_row.user_id,
+        "stripe_subscription_id": sub_row.stripe_subscription_id,
+        "subscription_status": sub_row.subscription_status,
+    }
+
+
+def _process_invoice_payment_failed(db: Session, invoice_obj):
+    subscription_id = str(getattr(invoice_obj, "subscription", "") or "").strip()
+    customer_id = str(getattr(invoice_obj, "customer", "") or "").strip()
+    invoice_id = str(getattr(invoice_obj, "id", "") or "").strip()
+
+    sub_row = None
+
+    if subscription_id:
+        sub_row = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.stripe_subscription_id == subscription_id)
+            .first()
+        )
+
+    if not sub_row and customer_id:
+        sub_row = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.stripe_customer_id == customer_id)
+            .first()
+        )
+
+    if not sub_row:
+        print("⚠️ invoice.payment_failed: no matching user_subscriptions row found")
+        print("   subscription_id:", subscription_id)
+        print("   customer_id:", customer_id)
+        return {"ok": True, "ignored": True, "reason": "subscription_row_not_found"}
+
+    sub_row.subscription_status = "past_due"
+    sub_row.last_invoice_id = invoice_id or None
+    sub_row.is_active = False
+
+    db.commit()
+    db.refresh(sub_row)
+
+    print("⚠️ invoice.payment_failed updated user_subscriptions")
+    print("   user_id:", sub_row.user_id)
+    print("   stripe_subscription_id:", sub_row.stripe_subscription_id)
+    print("   subscription_status:", sub_row.subscription_status)
+
+    return {
+        "ok": True,
+        "user_id": sub_row.user_id,
+        "subscription_status": sub_row.subscription_status,
+    }
 
 
 @router.post("/stripe-webhook")
@@ -116,6 +266,39 @@ async def stripe_webhook(
 
             _log_debug(
                 f"✅ WEBHOOK {event_type} PROCESSED",
+                event_id=event_id,
+                result=return_value,
+            )
+
+        elif event_type == "invoice.payment_failed":
+            return_value = _process_invoice_payment_failed(
+                db=db,
+                invoice_obj=data_object,
+            )
+            _log_debug(
+                "⚠️ WEBHOOK invoice.payment_failed PROCESSED",
+                event_id=event_id,
+                result=return_value,
+            )
+
+        elif event_type == "customer.subscription.updated":
+            return_value = _update_user_subscription_from_stripe_subscription(
+                db=db,
+                stripe_subscription_obj=data_object,
+            )
+            _log_debug(
+                "✅ WEBHOOK customer.subscription.updated PROCESSED",
+                event_id=event_id,
+                result=return_value,
+            )
+
+        elif event_type == "customer.subscription.deleted":
+            return_value = _update_user_subscription_from_stripe_subscription(
+                db=db,
+                stripe_subscription_obj=data_object,
+            )
+            _log_debug(
+                "✅ WEBHOOK customer.subscription.deleted PROCESSED",
                 event_id=event_id,
                 result=return_value,
             )
