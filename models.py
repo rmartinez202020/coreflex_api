@@ -1139,6 +1139,17 @@ class UserSubscription(Base):
 
     is_active = Column(Boolean, nullable=False, server_default=func.true())
 
+    # ✅ STRIPE MONTHLY SUBSCRIPTION FIELDS
+    stripe_customer_id = Column(String(255), nullable=True, index=True)
+    stripe_subscription_id = Column(String(255), nullable=True, index=True)
+    stripe_price_id = Column(String(255), nullable=True)
+    subscription_status = Column(String(50), nullable=True, index=True)
+    cancel_at_period_end = Column(Boolean, nullable=False, server_default=func.false())
+    current_period_start = Column(DateTime(timezone=True), nullable=True)
+    current_period_end = Column(DateTime(timezone=True), nullable=True)
+    last_invoice_id = Column(String(255), nullable=True)
+    last_payment_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
