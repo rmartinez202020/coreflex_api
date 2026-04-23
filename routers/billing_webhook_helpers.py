@@ -1,7 +1,9 @@
 import stripe
+from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from models import UserSubscription
 from routers.billing_common import (
     _apply_payment_effects,
     _describe_exception,
@@ -73,6 +75,8 @@ def _extract_payment_intent_id_from_invoice(invoice_obj) -> str:
 
 
 def _resolve_checkout_session_payment_intent(session_obj):
+    invoice_id = ""
+
     direct_payment_intent_id = str(
         getattr(session_obj, "payment_intent", "") or ""
     ).strip()
@@ -145,6 +149,102 @@ def _extract_checkout_session_data(session_obj):
     }
 
 
+def _to_dt_utc_from_unix(ts_value):
+    try:
+        if ts_value is None:
+            return None
+        return datetime.fromtimestamp(int(ts_value), timezone.utc)
+    except Exception:
+        return None
+
+
+def _save_subscription_state_from_stripe(
+    db: Session,
+    *,
+    user_id: int,
+    subscription_id: str,
+):
+    sid = str(subscription_id or "").strip()
+    if not sid:
+        print("ℹ️ No subscription_id to save into user_subscriptions")
+        return
+
+    try:
+        stripe_sub = stripe.Subscription.retrieve(sid)
+    except stripe.error.StripeError as e:
+        print(
+            "⚠️ FAILED TO RETRIEVE SUBSCRIPTION FOR DB SAVE",
+            sid,
+            _describe_exception(e),
+        )
+        return
+
+    customer_id = str(getattr(stripe_sub, "customer", "") or "").strip()
+    status = str(getattr(stripe_sub, "status", "") or "").strip()
+    cancel_at_period_end = bool(getattr(stripe_sub, "cancel_at_period_end", False))
+    current_period_start = _to_dt_utc_from_unix(
+        getattr(stripe_sub, "current_period_start", None)
+    )
+    current_period_end = _to_dt_utc_from_unix(
+        getattr(stripe_sub, "current_period_end", None)
+    )
+    latest_invoice_id = str(getattr(stripe_sub, "latest_invoice", "") or "").strip()
+
+    stripe_price_id = None
+    try:
+        items = getattr(stripe_sub, "items", None)
+        data = getattr(items, "data", None) or []
+        if data:
+            first_item = data[0]
+            price_obj = getattr(first_item, "price", None)
+            stripe_price_id = str(getattr(price_obj, "id", "") or "").strip() or None
+    except Exception:
+        stripe_price_id = None
+
+    sub_row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == user_id)
+        .first()
+    )
+    if not sub_row:
+        print("⚠️ user_subscriptions row not found for user_id:", user_id)
+        return
+
+    sub_row.stripe_customer_id = customer_id or None
+    sub_row.stripe_subscription_id = sid
+    sub_row.stripe_price_id = stripe_price_id
+    sub_row.subscription_status = status or None
+    sub_row.cancel_at_period_end = cancel_at_period_end
+    sub_row.current_period_start = current_period_start
+    sub_row.current_period_end = current_period_end
+    sub_row.last_invoice_id = latest_invoice_id or None
+
+    if status in {"active", "trialing"}:
+        sub_row.is_active = True
+    elif status in {"canceled", "unpaid", "incomplete_expired"}:
+        sub_row.is_active = False
+
+    if current_period_end:
+        sub_row.renewal_date = current_period_end
+
+    try:
+        db.commit()
+        print("✅ STRIPE SUBSCRIPTION SAVED TO user_subscriptions")
+        print("   user_id:", user_id)
+        print("   stripe_customer_id:", sub_row.stripe_customer_id)
+        print("   stripe_subscription_id:", sub_row.stripe_subscription_id)
+        print("   stripe_price_id:", sub_row.stripe_price_id)
+        print("   subscription_status:", sub_row.subscription_status)
+        print("   cancel_at_period_end:", sub_row.cancel_at_period_end)
+        print("   current_period_start:", sub_row.current_period_start)
+        print("   current_period_end:", sub_row.current_period_end)
+        print("   last_invoice_id:", sub_row.last_invoice_id)
+    except Exception:
+        db.rollback()
+        print("❌ FAILED TO SAVE STRIPE SUBSCRIPTION INTO user_subscriptions")
+        raise
+
+
 def _process_checkout_session_completed(db: Session, session_obj):
     extracted = _extract_checkout_session_data(session_obj)
     session_id = extracted["session_id"]
@@ -210,11 +310,23 @@ def _process_checkout_session_completed(db: Session, session_obj):
                 ),
             )
 
-        return _apply_payment_effects(
+        result = _apply_payment_effects(
             db=db,
             payment_intent_id="",
             metadata=metadata,
         )
+
+        if subscription_id:
+            try:
+                _save_subscription_state_from_stripe(
+                    db=db,
+                    user_id=int(metadata["user_id"]),
+                    subscription_id=subscription_id,
+                )
+            except Exception as e:
+                print("❌ FAILED AFTER APPLY WHILE SAVING STRIPE SUBSCRIPTION:", e)
+
+        return result
 
     intent = _retrieve_payment_intent_or_none(payment_intent_id)
     if not intent:
@@ -270,11 +382,23 @@ def _process_checkout_session_completed(db: Session, session_obj):
             ),
         )
 
-    return _apply_payment_effects(
+    result = _apply_payment_effects(
         db=db,
         payment_intent_id=payment_intent_id,
         metadata=metadata,
     )
+
+    if subscription_id:
+        try:
+            _save_subscription_state_from_stripe(
+                db=db,
+                user_id=int(metadata["user_id"]),
+                subscription_id=subscription_id,
+            )
+        except Exception as e:
+            print("❌ FAILED AFTER APPLY WHILE SAVING STRIPE SUBSCRIPTION:", e)
+
+    return result
 
 
 def _process_payment_intent_succeeded(db: Session, intent_obj):
