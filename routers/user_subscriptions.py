@@ -61,18 +61,47 @@ def get_my_subscription(
             or 0
         )
 
+        subscription_status = str(
+            getattr(subscription, "subscription_status", "") or ""
+        ).strip()
+
+        cancel_at_period_end = bool(
+            getattr(subscription, "cancel_at_period_end", False)
+        )
+
+        display_status = (
+            "Canceled"
+            if cancel_at_period_end
+            else (
+                subscription_status.title()
+                if subscription_status
+                else ("Active" if bool(subscription.is_active) else "Inactive")
+            )
+        )
+
         return {
             "user_id": current_user.id,
             "plan_key": subscription.plan_key,
             "plan_label": serialize_plan_label(subscription.plan_key),
-            "status": "Active" if bool(subscription.is_active) else "Inactive",
+            "status": display_status,
+            "subscription_status": subscription_status or None,
             "is_active": bool(subscription.is_active),
+            "cancel_at_period_end": cancel_at_period_end,
             "active_date": subscription.active_date,
             "renewal_date": subscription.renewal_date,
+            "current_period_start": getattr(subscription, "current_period_start", None),
+            "current_period_end": getattr(subscription, "current_period_end", None),
+            "updated_at": getattr(subscription, "updated_at", None),
             "device_limit": int(subscription.device_limit or 0),
             "tenants_users_limit": int(subscription.tenants_users_limit or 0),
             "devices_used": int(devices_used),
             "tenant_users_used": int(tenant_users_used),
+            "stripe_customer_id": getattr(subscription, "stripe_customer_id", None),
+            "stripe_subscription_id": getattr(
+                subscription, "stripe_subscription_id", None
+            ),
+            "stripe_price_id": getattr(subscription, "stripe_price_id", None),
+            "last_invoice_id": getattr(subscription, "last_invoice_id", None),
         }
 
     except HTTPException:
