@@ -363,10 +363,79 @@ async def stripe_webhook(
             )
 
         elif event_type == "customer.subscription.deleted":
+            stripe_subscription_obj = data_object
+
             return_value = _update_user_subscription_from_stripe_subscription(
                 db=db,
-                stripe_subscription_obj=data_object,
+                stripe_subscription_obj=stripe_subscription_obj,
             )
+
+            subscription_id = str(
+                getattr(stripe_subscription_obj, "id", "") or ""
+            ).strip()
+            customer_id = str(
+                getattr(stripe_subscription_obj, "customer", "") or ""
+            ).strip()
+
+            sub_row = None
+
+            if subscription_id:
+                sub_row = (
+                    db.query(UserSubscription)
+                    .filter(UserSubscription.stripe_subscription_id == subscription_id)
+                    .first()
+                )
+
+            if not sub_row and customer_id:
+                sub_row = (
+                    db.query(UserSubscription)
+                    .filter(UserSubscription.stripe_customer_id == customer_id)
+                    .first()
+                )
+
+            if sub_row:
+                print("🔥 DOWNGRADING USER TO FREE PLAN")
+                print("   user_id:", sub_row.user_id)
+                print("   old_plan_key:", sub_row.plan_key)
+                print("   old_device_limit:", sub_row.device_limit)
+                print("   old_tenants_users_limit:", sub_row.tenants_users_limit)
+
+                sub_row.plan_key = "free"
+                sub_row.device_limit = 1
+                sub_row.tenants_users_limit = 1
+                sub_row.subscription_status = "canceled"
+                sub_row.is_active = True
+                sub_row.stripe_subscription_id = None
+                sub_row.stripe_price_id = None
+                sub_row.cancel_at_period_end = False
+                sub_row.current_period_start = None
+                sub_row.current_period_end = None
+                sub_row.renewal_date = None
+
+                db.commit()
+                db.refresh(sub_row)
+
+                print("✅ USER DOWNGRADED TO FREE")
+                print("   user_id:", sub_row.user_id)
+                print("   new_plan_key:", sub_row.plan_key)
+                print("   new_device_limit:", sub_row.device_limit)
+                print("   new_tenants_users_limit:", sub_row.tenants_users_limit)
+
+                return_value = {
+                    **(return_value or {}),
+                    "downgradedToFree": True,
+                    "planKey": sub_row.plan_key,
+                    "deviceLimit": sub_row.device_limit,
+                    "tenantsUsersLimit": sub_row.tenants_users_limit,
+                }
+            else:
+                print("⚠️ customer.subscription.deleted: could not find subscription row to downgrade")
+                return_value = {
+                    **(return_value or {}),
+                    "downgradedToFree": False,
+                    "reason": "subscription_row_not_found_for_downgrade",
+                }
+
             _log_debug(
                 "✅ WEBHOOK customer.subscription.deleted PROCESSED",
                 event_id=event_id,
