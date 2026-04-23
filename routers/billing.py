@@ -250,6 +250,83 @@ def cancel_subscription(
     }
 
 
+@router.post("/reactivate-subscription")
+def reactivate_subscription(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    sub_row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == current_user.id)
+        .first()
+    )
+
+    if not sub_row:
+        raise HTTPException(status_code=404, detail="Subscription record not found.")
+
+    stripe_subscription_id = str(
+        getattr(sub_row, "stripe_subscription_id", "") or ""
+    ).strip()
+    if not stripe_subscription_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No active Stripe subscription is linked to this user.",
+        )
+
+    current_status = str(
+        getattr(sub_row, "subscription_status", "") or ""
+    ).strip().lower()
+    if current_status in {"canceled", "incomplete_expired"}:
+        raise HTTPException(
+            status_code=400,
+            detail="This subscription has already ended and cannot be reactivated.",
+        )
+
+    if not bool(getattr(sub_row, "cancel_at_period_end", False)):
+        return {
+            "ok": True,
+            "alreadyActive": True,
+            "message": "Subscription is already active and set to renew normally.",
+            "subscriptionStatus": sub_row.subscription_status,
+            "cancelAtPeriodEnd": sub_row.cancel_at_period_end,
+            "renewalDate": sub_row.renewal_date.isoformat()
+            if sub_row.renewal_date
+            else None,
+        }
+
+    try:
+        stripe_subscription = stripe.Subscription.modify(
+            stripe_subscription_id,
+            cancel_at_period_end=False,
+        )
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+
+    _update_user_subscription_from_stripe_subscription(
+        db=db,
+        stripe_subscription_obj=stripe_subscription,
+    )
+
+    current_period_end = _to_dt_utc_from_unix(
+        getattr(stripe_subscription, "current_period_end", None)
+    )
+
+    return {
+        "ok": True,
+        "message": "Subscription reactivated successfully. Your plan will continue to renew normally.",
+        "subscriptionId": stripe_subscription_id,
+        "subscriptionStatus": str(
+            getattr(stripe_subscription, "status", "") or ""
+        ).strip(),
+        "cancelAtPeriodEnd": bool(
+            getattr(stripe_subscription, "cancel_at_period_end", False)
+        ),
+        "currentPeriodEnd": current_period_end.isoformat()
+        if current_period_end
+        else None,
+    }
+
+
 @router.post("/stripe-webhook")
 async def stripe_webhook(
     request: Request,
@@ -429,7 +506,9 @@ async def stripe_webhook(
                     "tenantsUsersLimit": sub_row.tenants_users_limit,
                 }
             else:
-                print("⚠️ customer.subscription.deleted: could not find subscription row to downgrade")
+                print(
+                    "⚠️ customer.subscription.deleted: could not find subscription row to downgrade"
+                )
                 return_value = {
                     **(return_value or {}),
                     "downgradedToFree": False,
