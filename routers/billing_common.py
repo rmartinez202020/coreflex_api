@@ -285,8 +285,8 @@ def _apply_payment_effects(
             status_code=400,
             detail=f"Invalid billing_type in metadata: {raw_billing_type}",
         )
-    billing_type = raw_billing_type
 
+    billing_type = raw_billing_type
     is_current_plan = (
         str(metadata.get("is_current_plan") or "").strip().lower() == "true"
     )
@@ -319,27 +319,6 @@ def _apply_payment_effects(
         getattr(subscription, "renewal_date", None),
     )
 
-    print("🔥 APPLY PAYMENT EFFECTS FINAL VALUES")
-    print("   user_id:", user_id)
-    print("   plan_key:", plan_key)
-    print("   billing_type:", billing_type)
-    print("   is_current_plan:", is_current_plan)
-    print("   extra_tenant_users:", extra_tenant_users)
-    print("   already_applied:", already_applied)
-    print("   current_limit:", int(subscription.tenants_users_limit or 0))
-
-    if already_applied:
-        print("✅ PAYMENT ALREADY MARKED APPLIED IN STRIPE METADATA")
-        return {
-            "ok": True,
-            "alreadyApplied": True,
-            "added": 0,
-            "planKey": str(subscription.plan_key or "free").strip().lower(),
-            "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
-            "tenantUsersUsed": None,
-            "message": "Payment was already applied earlier.",
-        }
-
     print("🔥 LOOKING FOR PLAN:", plan_key, billing_type)
     plan = (
         db.query(BillingPlan)
@@ -350,6 +329,7 @@ def _apply_payment_effects(
         )
         .first()
     )
+
     if not plan:
         raise HTTPException(
             status_code=404,
@@ -368,82 +348,59 @@ def _apply_payment_effects(
     current_plan_key = str(subscription.plan_key or "free").strip().lower()
     current_limit = int(subscription.tenants_users_limit or 0)
     current_device_limit = int(subscription.device_limit or 0)
+
     target_plan_tenant_amount = int(plan.tenant_user_limit or 0)
     base_device_limit = int(plan.device_limit or 0)
 
-    current_plan_row = (
-        db.query(BillingPlan)
-        .filter(
-            BillingPlan.plan_key == current_plan_key,
-            BillingPlan.billing_type == billing_type,
-            BillingPlan.is_active.is_(True),
-        )
-        .first()
-    )
-    current_plan_tenant_amount = int(
-        getattr(current_plan_row, "tenant_user_limit", 0) or 0
-    )
+    plan_is_changing = plan_key != current_plan_key
 
-    is_upgrade = (
-        not is_current_plan
-        and target_plan_tenant_amount > current_plan_tenant_amount
-    )
-    is_downgrade_or_lateral = (
-        not is_current_plan
-        and target_plan_tenant_amount <= current_plan_tenant_amount
-    )
+    print("🔥 APPLY PAYMENT EFFECTS FINAL VALUES")
+    print("   user_id:", user_id)
+    print("   current_plan_key:", current_plan_key)
+    print("   target_plan_key:", plan_key)
+    print("   billing_type:", billing_type)
+    print("   is_current_plan:", is_current_plan)
+    print("   plan_is_changing:", plan_is_changing)
+    print("   extra_tenant_users:", extra_tenant_users)
+    print("   already_applied:", already_applied)
+    print("   current_limit:", current_limit)
 
-    # Check whether user already accepted / bought this target plan before.
-    # If yes, do not grant the plan tenant-users again.
-    prior_same_plan_acceptance = (
-        db.query(SubscriptionAgreementAcceptance.id)
-        .filter(SubscriptionAgreementAcceptance.user_id == user_id)
-        .filter(SubscriptionAgreementAcceptance.plan_key == plan_key)
-        .filter(SubscriptionAgreementAcceptance.confirmed.is_(True))
-        .first()
-    )
-    has_bought_same_plan_before = prior_same_plan_acceptance is not None
-
-    if is_current_plan:
-        # Same plan purchase:
-        # keep existing behavior for add-ons only.
-        new_tenant_limit = current_limit + extra_tenant_users
-        new_plan_key = current_plan_key
-        new_device_limit = current_device_limit or base_device_limit
-        added_from_plan = 0
-        added_from_addons = extra_tenant_users
-    else:
+    # ✅ IMPORTANT:
+    # Upgrade/downgrade must REPLACE the old plan in CoreFlex DB.
+    # Do NOT add old plan tenant limit + new plan tenant limit.
+    # Stripe now keeps only one active subscription; DB must mirror the latest checkout.
+    if plan_is_changing or not is_current_plan:
         new_plan_key = plan_key
         new_device_limit = base_device_limit
+        new_tenant_limit = target_plan_tenant_amount + extra_tenant_users
 
-        if is_upgrade:
-            if has_bought_same_plan_before:
-                added_from_plan = 0
-            else:
-                added_from_plan = target_plan_tenant_amount
+        added_from_plan = max(0, target_plan_tenant_amount - current_limit)
+        added_from_addons = extra_tenant_users
 
-            # On upgrade, only add plan tenant-users if this exact plan was never bought before.
-            # Add-ons still apply on upgrade.
-            added_from_addons = extra_tenant_users
-            new_tenant_limit = current_limit + added_from_plan + added_from_addons
-        else:
-            # On downgrade/lateral:
-            # do NOT add plan tenant-users
-            # do NOT add extra tenant-users
+    else:
+        new_plan_key = current_plan_key
+        new_device_limit = current_device_limit or base_device_limit
+
+        # Same current plan:
+        # Only add tenant-user add-ons when this payment was not already applied.
+        if already_applied:
+            new_tenant_limit = current_limit
             added_from_plan = 0
             added_from_addons = 0
-            new_tenant_limit = current_limit
+        else:
+            new_tenant_limit = current_limit + extra_tenant_users
+            added_from_plan = 0
+            added_from_addons = extra_tenant_users
 
     _log_debug(
         "🔥 SUBSCRIPTION UPDATE PREVIEW",
         current_plan_key=current_plan_key,
         current_limit=current_limit,
         current_device_limit=current_device_limit,
-        current_plan_tenant_amount=current_plan_tenant_amount,
         target_plan_tenant_amount=target_plan_tenant_amount,
-        is_upgrade=is_upgrade,
-        is_downgrade_or_lateral=is_downgrade_or_lateral,
-        has_bought_same_plan_before=has_bought_same_plan_before,
+        base_device_limit=base_device_limit,
+        plan_is_changing=plan_is_changing,
+        already_applied=already_applied,
         new_plan_key=new_plan_key,
         new_tenant_limit=new_tenant_limit,
         new_device_limit=new_device_limit,
@@ -482,6 +439,7 @@ def _apply_payment_effects(
         raise
 
     db.refresh(subscription)
+
     print("🔥 DB SUBSCRIPTION AFTER UPDATE")
     print("   subscription.id:", getattr(subscription, "id", None))
     print("   subscription.user_id:", getattr(subscription, "user_id", None))
@@ -496,11 +454,14 @@ def _apply_payment_effects(
         getattr(subscription, "renewal_date", None),
     )
 
-    _mark_payment_intent_applied(payment_intent_id, metadata)
+    if not already_applied:
+        _mark_payment_intent_applied(payment_intent_id, metadata)
+    else:
+        print("✅ PAYMENT WAS ALREADY MARKED APPLIED, DB WAS RECONCILED ONLY")
 
     return {
         "ok": True,
-        "alreadyApplied": False,
+        "alreadyApplied": already_applied,
         "added": added_from_plan + added_from_addons,
         "planKey": str(subscription.plan_key or "free").strip().lower(),
         "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
