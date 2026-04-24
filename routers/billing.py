@@ -173,6 +173,40 @@ def _process_invoice_payment_failed(db: Session, invoice_obj):
     }
 
 
+def _find_active_subscription_for_customer(customer_id: str, deleted_subscription_id: str = ""):
+    customer_id = str(customer_id or "").strip()
+    deleted_subscription_id = str(deleted_subscription_id or "").strip()
+
+    if not customer_id:
+        return None
+
+    active_statuses = ["active", "trialing", "past_due", "unpaid", "incomplete"]
+
+    for status in active_statuses:
+        try:
+            subs = stripe.Subscription.list(
+                customer=customer_id,
+                status=status,
+                limit=100,
+            )
+        except stripe.error.StripeError as e:
+            print("❌ FAILED TO LIST CUSTOMER SUBSCRIPTIONS")
+            print("   customer_id:", customer_id)
+            print("   status:", status)
+            print("   error:", str(e))
+            raise
+
+        for sub in subs.data:
+            sid = str(getattr(sub, "id", "") or "").strip()
+            if not sid:
+                continue
+            if deleted_subscription_id and sid == deleted_subscription_id:
+                continue
+            return sub
+
+    return None
+
+
 @router.post("/cancel-subscription")
 def cancel_subscription(
     db: Session = Depends(get_db),
@@ -442,84 +476,125 @@ async def stripe_webhook(
         elif event_type == "customer.subscription.deleted":
             stripe_subscription_obj = data_object
 
-            return_value = _update_user_subscription_from_stripe_subscription(
-                db=db,
-                stripe_subscription_obj=stripe_subscription_obj,
-            )
-
-            subscription_id = str(
+            deleted_subscription_id = str(
                 getattr(stripe_subscription_obj, "id", "") or ""
             ).strip()
             customer_id = str(
                 getattr(stripe_subscription_obj, "customer", "") or ""
             ).strip()
 
-            sub_row = None
+            print("⚠️ customer.subscription.deleted received")
+            print("   deleted_subscription_id:", deleted_subscription_id)
+            print("   customer_id:", customer_id)
 
-            if subscription_id:
-                sub_row = (
-                    db.query(UserSubscription)
-                    .filter(UserSubscription.stripe_subscription_id == subscription_id)
-                    .first()
-                )
-
-            if not sub_row and customer_id:
-                sub_row = (
-                    db.query(UserSubscription)
-                    .filter(UserSubscription.stripe_customer_id == customer_id)
-                    .first()
-                )
-
-            if sub_row:
-                print("🔥 DOWNGRADING USER TO FREE PLAN")
-                print("   user_id:", sub_row.user_id)
-                print("   old_plan_key:", sub_row.plan_key)
-                print("   old_device_limit:", sub_row.device_limit)
-                print("   old_tenants_users_limit:", sub_row.tenants_users_limit)
-
-                sub_row.plan_key = "free"
-                sub_row.device_limit = 1
-                sub_row.tenants_users_limit = 1
-                sub_row.subscription_status = "canceled"
-                sub_row.is_active = True
-                sub_row.stripe_subscription_id = None
-                sub_row.stripe_price_id = None
-                sub_row.cancel_at_period_end = False
-                sub_row.current_period_start = None
-                sub_row.current_period_end = None
-                sub_row.renewal_date = None
-
-                db.commit()
-                db.refresh(sub_row)
-
-                print("✅ USER DOWNGRADED TO FREE")
-                print("   user_id:", sub_row.user_id)
-                print("   new_plan_key:", sub_row.plan_key)
-                print("   new_device_limit:", sub_row.device_limit)
-                print("   new_tenants_users_limit:", sub_row.tenants_users_limit)
-
-                return_value = {
-                    **(return_value or {}),
-                    "downgradedToFree": True,
-                    "planKey": sub_row.plan_key,
-                    "deviceLimit": sub_row.device_limit,
-                    "tenantsUsersLimit": sub_row.tenants_users_limit,
-                }
-            else:
-                print(
-                    "⚠️ customer.subscription.deleted: could not find subscription row to downgrade"
-                )
-                return_value = {
-                    **(return_value or {}),
-                    "downgradedToFree": False,
-                    "reason": "subscription_row_not_found_for_downgrade",
-                }
-
-            _log_debug(
-                "✅ WEBHOOK customer.subscription.deleted PROCESSED",
-                event_id=event_id,
-                result=return_value,
+            active_subscription = _find_active_subscription_for_customer(
+                customer_id=customer_id,
+                deleted_subscription_id=deleted_subscription_id,
             )
+
+            if active_subscription:
+                active_subscription_id = str(
+                    getattr(active_subscription, "id", "") or ""
+                ).strip()
+
+                print("✅ CUSTOMER STILL HAS AN ACTIVE SUBSCRIPTION")
+                print("   active_subscription_id:", active_subscription_id)
+                print("   deleted_subscription_id:", deleted_subscription_id)
+                print("   ACTION: Do NOT downgrade to Free.")
+
+                return_value = _update_user_subscription_from_stripe_subscription(
+                    db=db,
+                    stripe_subscription_obj=active_subscription,
+                )
+
+                return_value = {
+                    **(return_value or {}),
+                    "ignoredDeletedSubscription": True,
+                    "reason": "customer_has_another_active_subscription",
+                    "deletedSubscriptionId": deleted_subscription_id,
+                    "keptSubscriptionId": active_subscription_id,
+                }
+
+                _log_debug(
+                    "✅ WEBHOOK customer.subscription.deleted IGNORED OLD SUBSCRIPTION",
+                    event_id=event_id,
+                    result=return_value,
+                )
+
+            else:
+                print("🔥 NO OTHER ACTIVE SUBSCRIPTION FOUND")
+                print("   ACTION: downgrade user to Free")
+
+                sub_row = None
+
+                if deleted_subscription_id:
+                    sub_row = (
+                        db.query(UserSubscription)
+                        .filter(
+                            UserSubscription.stripe_subscription_id
+                            == deleted_subscription_id
+                        )
+                        .first()
+                    )
+
+                if not sub_row and customer_id:
+                    sub_row = (
+                        db.query(UserSubscription)
+                        .filter(UserSubscription.stripe_customer_id == customer_id)
+                        .first()
+                    )
+
+                if sub_row:
+                    print("🔥 DOWNGRADING USER TO FREE PLAN")
+                    print("   user_id:", sub_row.user_id)
+                    print("   old_plan_key:", sub_row.plan_key)
+                    print("   old_device_limit:", sub_row.device_limit)
+                    print("   old_tenants_users_limit:", sub_row.tenants_users_limit)
+
+                    sub_row.plan_key = "free"
+                    sub_row.device_limit = 1
+                    sub_row.tenants_users_limit = 1
+                    sub_row.subscription_status = "canceled"
+                    sub_row.is_active = True
+                    sub_row.stripe_subscription_id = None
+                    sub_row.stripe_price_id = None
+                    sub_row.cancel_at_period_end = False
+                    sub_row.current_period_start = None
+                    sub_row.current_period_end = None
+                    sub_row.renewal_date = None
+
+                    db.commit()
+                    db.refresh(sub_row)
+
+                    print("✅ USER DOWNGRADED TO FREE")
+                    print("   user_id:", sub_row.user_id)
+                    print("   new_plan_key:", sub_row.plan_key)
+                    print("   new_device_limit:", sub_row.device_limit)
+                    print("   new_tenants_users_limit:", sub_row.tenants_users_limit)
+
+                    return_value = {
+                        "ok": True,
+                        "downgradedToFree": True,
+                        "planKey": sub_row.plan_key,
+                        "deviceLimit": sub_row.device_limit,
+                        "tenantsUsersLimit": sub_row.tenants_users_limit,
+                    }
+                else:
+                    print(
+                        "⚠️ customer.subscription.deleted: could not find subscription row to downgrade"
+                    )
+                    return_value = {
+                        "ok": True,
+                        "ignored": True,
+                        "downgradedToFree": False,
+                        "reason": "subscription_row_not_found_for_downgrade",
+                    }
+
+                _log_debug(
+                    "✅ WEBHOOK customer.subscription.deleted PROCESSED",
+                    event_id=event_id,
+                    result=return_value,
+                )
 
         else:
             print("ℹ️ STRIPE WEBHOOK IGNORED EVENT TYPE:", event_type)
