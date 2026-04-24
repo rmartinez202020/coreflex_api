@@ -36,6 +36,77 @@ from routers.billing_webhook_helpers import (
 router = APIRouter()
 
 
+def _get_or_create_stripe_customer_for_user(current_user: User):
+    user_email = str(getattr(current_user, "email", "") or "").strip()
+    user_name = str(getattr(current_user, "name", "") or "").strip()
+    user_id = str(getattr(current_user, "id", "") or "").strip()
+
+    if not user_email:
+        raise HTTPException(
+            status_code=400,
+            detail="User email is required to create a Stripe customer.",
+        )
+
+    existing_customers = stripe.Customer.list(email=user_email, limit=10)
+
+    for customer in existing_customers.data:
+        if str(getattr(customer, "email", "") or "").strip().lower() == user_email.lower():
+            print("✅ USING EXISTING STRIPE CUSTOMER:", customer.id, user_email)
+            return customer
+
+    customer = stripe.Customer.create(
+        email=user_email,
+        name=user_name or None,
+        metadata={
+            "coreflex_user_id": user_id,
+            "coreflex_user_email": user_email,
+        },
+    )
+
+    print("✅ CREATED NEW STRIPE CUSTOMER:", customer.id, user_email)
+    return customer
+
+
+def _cancel_other_active_subscriptions_for_customer(
+    stripe_customer_id: str,
+    keep_subscription_id: str | None = None,
+):
+    customer_id = str(stripe_customer_id or "").strip()
+    keep_id = str(keep_subscription_id or "").strip()
+
+    if not customer_id:
+        return {"cancelled": 0, "kept": keep_id or None}
+
+    cancelled_count = 0
+
+    active_subscriptions = stripe.Subscription.list(
+        customer=customer_id,
+        status="active",
+        limit=100,
+    )
+
+    for sub in active_subscriptions.data:
+        sub_id = str(getattr(sub, "id", "") or "").strip()
+
+        if keep_id and sub_id == keep_id:
+            print("✅ KEEPING CURRENT SUBSCRIPTION:", sub_id)
+            continue
+
+        print("🔥 CANCELLING OLD ACTIVE SUBSCRIPTION:", sub_id)
+
+        stripe.Subscription.delete(
+            sub_id,
+            prorate=False,
+        )
+
+        cancelled_count += 1
+
+    return {
+        "cancelled": cancelled_count,
+        "kept": keep_id or None,
+    }
+
+
 @router.get("/catalog")
 def get_billing_catalog(
     db: Session = Depends(get_db),
@@ -197,13 +268,13 @@ def create_checkout_session(
     )
 
     client_reference_id = (
-    f"user_id={current_user.id};"
-    f"user_email={str(getattr(current_user, 'email', '') or '').strip()};"
-    f"plan_key={plan_key};"
-    f"current_plan_key={ctx['current_plan_key']};"
-    f"is_current_plan={'true' if ctx['is_current_plan'] else 'false'};"
-    f"billing_type={billing_type};"
-    f"extra_tenant_users={extra_tenant_users}"
+        f"user_id={current_user.id};"
+        f"user_email={str(getattr(current_user, 'email', '') or '').strip()};"
+        f"plan_key={plan_key};"
+        f"current_plan_key={ctx['current_plan_key']};"
+        f"is_current_plan={'true' if ctx['is_current_plan'] else 'false'};"
+        f"billing_type={billing_type};"
+        f"extra_tenant_users={extra_tenant_users}"
     )
 
     try:
@@ -216,7 +287,6 @@ def create_checkout_session(
             "mode": checkout_mode,
             "success_url": STRIPE_CHECKOUT_SUCCESS_URL,
             "cancel_url": STRIPE_CHECKOUT_CANCEL_URL,
-            "customer_email": checkout_customer_email,
             "client_reference_id": client_reference_id,
             "payment_method_types": ["card"],
             "line_items": line_items,
@@ -224,14 +294,15 @@ def create_checkout_session(
         }
 
         if checkout_mode == "payment":
+            checkout_kwargs["customer_email"] = checkout_customer_email
             checkout_kwargs["payment_intent_data"] = {
                 "receipt_email": checkout_customer_email,
                 "metadata": ctx["metadata"],
             }
         else:
-            # Keep subscription mode lean and working.
-            # Metadata fallback for webhook is handled via client_reference_id
-            # in billing_webhook_helpers.py / billing_common.py.
+            stripe_customer = _get_or_create_stripe_customer_for_user(current_user)
+
+            checkout_kwargs["customer"] = stripe_customer.id
             checkout_kwargs["subscription_data"] = {
                 "metadata": ctx["metadata"],
                 "description": (
@@ -416,6 +487,7 @@ def apply_checkout_session(
 
     resolved_payment = _resolve_checkout_session_payment_intent(session)
     payment_intent_id = resolved_payment["payment_intent_id"]
+    new_subscription_id = str(resolved_payment["subscription_id"] or "").strip()
 
     if not payment_intent_id:
         raise HTTPException(
@@ -455,11 +527,37 @@ def apply_checkout_session(
             detail="This payment does not belong to the authenticated user.",
         )
 
-    return _apply_payment_effects(
+    apply_result = _apply_payment_effects(
         db=db,
         payment_intent_id=payment_intent_id,
         metadata=metadata,
     )
+
+    if new_subscription_id:
+        try:
+            new_subscription = stripe.Subscription.retrieve(new_subscription_id)
+            stripe_customer_id = str(
+                getattr(new_subscription, "customer", "") or ""
+            ).strip()
+
+            cleanup_result = _cancel_other_active_subscriptions_for_customer(
+                stripe_customer_id=stripe_customer_id,
+                keep_subscription_id=new_subscription_id,
+            )
+
+            print("✅ STRIPE SUBSCRIPTION CLEANUP RESULT:", cleanup_result)
+
+            if isinstance(apply_result, dict):
+                apply_result["stripe_subscription_cleanup"] = cleanup_result
+
+        except stripe.error.StripeError as e:
+            print("❌ Stripe cleanup failed after payment:", str(e))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Stripe subscription cleanup failed: {str(e)}",
+            )
+
+    return apply_result
 
 
 @router.post("/apply-payment")
