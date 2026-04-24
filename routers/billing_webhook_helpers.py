@@ -319,6 +319,81 @@ def _save_subscription_state_from_stripe(
         raise
 
 
+def _process_customer_subscription_deleted(db: Session, subscription_obj):
+    deleted_subscription_id = str(getattr(subscription_obj, "id", "") or "").strip()
+    customer_id = str(getattr(subscription_obj, "customer", "") or "").strip()
+
+    print("🔥 WEBHOOK customer.subscription.deleted")
+    print("   deleted_subscription_id:", deleted_subscription_id)
+    print("   customer_id:", customer_id)
+
+    if not deleted_subscription_id:
+        return {"ok": True, "ignored": True, "reason": "missing_subscription_id"}
+
+    sub_row = None
+
+    if customer_id:
+        sub_row = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.stripe_customer_id == customer_id)
+            .first()
+        )
+
+    if not sub_row:
+        sub_row = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.stripe_subscription_id == deleted_subscription_id)
+            .first()
+        )
+
+    if not sub_row:
+        print("ℹ️ Deleted subscription ignored. No matching user_subscriptions row.")
+        return {"ok": True, "ignored": True, "reason": "no_matching_subscription_row"}
+
+    current_subscription_id = str(sub_row.stripe_subscription_id or "").strip()
+
+    if current_subscription_id and current_subscription_id != deleted_subscription_id:
+        print("✅ OLD SUBSCRIPTION DELETE IGNORED")
+        print("   deleted_subscription_id:", deleted_subscription_id)
+        print("   current_db_subscription_id:", current_subscription_id)
+        print("   user_id:", sub_row.user_id)
+        print("   reason: deleted subscription is not the current active DB subscription")
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "deleted_subscription_is_not_current",
+            "deleted_subscription_id": deleted_subscription_id,
+            "current_db_subscription_id": current_subscription_id,
+            "user_id": sub_row.user_id,
+        }
+
+    sub_row.subscription_status = "canceled"
+    sub_row.cancel_at_period_end = False
+    sub_row.is_active = False
+    sub_row.stripe_subscription_id = None
+    sub_row.stripe_price_id = None
+    sub_row.current_period_start = None
+    sub_row.current_period_end = None
+    sub_row.last_invoice_id = None
+    sub_row.renewal_date = None
+
+    try:
+        db.commit()
+        print("✅ CURRENT SUBSCRIPTION MARKED CANCELED IN DB")
+        print("   user_id:", sub_row.user_id)
+        print("   deleted_subscription_id:", deleted_subscription_id)
+        return {
+            "ok": True,
+            "updated": True,
+            "user_id": sub_row.user_id,
+            "deleted_subscription_id": deleted_subscription_id,
+        }
+    except Exception:
+        db.rollback()
+        print("❌ FAILED TO MARK SUBSCRIPTION CANCELED IN DB")
+        raise
+
+
 def _process_checkout_session_completed(db: Session, session_obj):
     extracted = _extract_checkout_session_data(session_obj)
     session_id = extracted["session_id"]
