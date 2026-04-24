@@ -107,6 +107,68 @@ def _cancel_other_active_subscriptions_for_customer(
     }
 
 
+def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> bool:
+    """
+    Tenant-user add-on only must NOT create/update a Stripe subscription.
+
+    This means:
+    - user is staying on the current plan
+    - no plan charge is being purchased
+    - tenant-user add-ons are being purchased
+    - total amount is greater than zero
+    """
+    try:
+        return (
+            bool(ctx.get("is_current_plan")) is True
+            and int(extra_tenant_users or 0) > 0
+            and to_money_decimal(ctx.get("plan_amount_usd")) <= to_money_decimal(0)
+            and to_money_decimal(ctx.get("addon_amount_usd")) > to_money_decimal(0)
+            and int(ctx.get("amount_cents") or 0) > 0
+        )
+    except Exception:
+        return False
+
+
+def _build_one_time_tenant_user_addon_line_items(ctx: dict, extra_tenant_users: int):
+    """
+    Creates a one-time Stripe Checkout line item for tenant-user add-on purchase.
+
+    IMPORTANT:
+    Do not use recurring price_data here.
+    Do not use subscription mode here.
+    This checkout is only a one-time payment that your backend applies to the user's
+    tenant-user allowance after payment succeeds.
+    """
+    total_cents = int(ctx.get("amount_cents") or 0)
+
+    if total_cents <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Tenant-user add-on payment amount must be greater than zero.",
+        )
+
+    return [
+        {
+            "price_data": {
+                "currency": "usd",
+                "product_data": {
+                    "name": (
+                        "Additional Tenant-User"
+                        if int(extra_tenant_users or 0) == 1
+                        else f"Additional Tenant-Users × {int(extra_tenant_users or 0)}"
+                    ),
+                    "metadata": {
+                        "coreflex_item_type": "tenant_user_addon",
+                        "extra_tenant_users": str(int(extra_tenant_users or 0)),
+                    },
+                },
+                "unit_amount": total_cents,
+            },
+            "quantity": 1,
+        }
+    ]
+
+
 @router.get("/catalog")
 def get_billing_catalog(
     db: Session = Depends(get_db),
@@ -255,7 +317,26 @@ def create_checkout_session(
             detail="Payment amount must be greater than zero.",
         )
 
-    checkout_mode, line_items = _build_checkout_line_items(ctx, billing_type)
+    is_tenant_user_addon_only = _is_tenant_user_addon_only_checkout(
+        ctx=ctx,
+        extra_tenant_users=extra_tenant_users,
+    )
+
+    if is_tenant_user_addon_only:
+        checkout_mode = "payment"
+        line_items = _build_one_time_tenant_user_addon_line_items(
+            ctx=ctx,
+            extra_tenant_users=extra_tenant_users,
+        )
+
+        ctx["metadata"] = {
+            **ctx["metadata"],
+            "checkout_type": "tenant_user_addon_only",
+            "force_one_time_payment": "true",
+            "do_not_create_subscription": "true",
+        }
+    else:
+        checkout_mode, line_items = _build_checkout_line_items(ctx, billing_type)
 
     if not line_items:
         raise HTTPException(
@@ -274,11 +355,13 @@ def create_checkout_session(
         f"current_plan_key={ctx['current_plan_key']};"
         f"is_current_plan={'true' if ctx['is_current_plan'] else 'false'};"
         f"billing_type={billing_type};"
-        f"extra_tenant_users={extra_tenant_users}"
+        f"extra_tenant_users={extra_tenant_users};"
+        f"checkout_type={'tenant_user_addon_only' if is_tenant_user_addon_only else 'plan_checkout'}"
     )
 
     try:
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
+        print("🔥 IS TENANT USER ADDON ONLY:", is_tenant_user_addon_only)
         print("🔥 CHECKOUT MODE:", checkout_mode)
         print("🔥 LINE ITEMS:", line_items)
         print("🔥 CLIENT REFERENCE ID:", client_reference_id)
@@ -386,6 +469,7 @@ def create_checkout_session(
             "checkoutSessionId": session.id,
             "url": session.url,
             "checkoutMode": checkout_mode,
+            "isTenantUserAddonOnly": is_tenant_user_addon_only,
             "clientReferenceId": client_reference_id,
             "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
             "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
