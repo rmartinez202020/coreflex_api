@@ -63,6 +63,80 @@ def _retrieve_subscription_or_none(subscription_id: str):
         return None
 
 
+def _cancel_previous_active_subscriptions_for_same_customer(
+    *,
+    keep_subscription_id: str,
+):
+    keep_sid = str(keep_subscription_id or "").strip()
+    if not keep_sid:
+        return {"ok": True, "cancelled": 0, "kept": None}
+
+    try:
+        keep_sub = stripe.Subscription.retrieve(keep_sid)
+        customer_id = str(getattr(keep_sub, "customer", "") or "").strip()
+
+        if not customer_id:
+            print("⚠️ No Stripe customer found for subscription:", keep_sid)
+            return {"ok": True, "cancelled": 0, "kept": keep_sid}
+
+        subs = stripe.Subscription.list(
+            customer=customer_id,
+            status="all",
+            limit=100,
+        )
+
+        cancelled_count = 0
+        skipped_count = 0
+
+        for sub in subs.data:
+            sid = str(getattr(sub, "id", "") or "").strip()
+            status = str(getattr(sub, "status", "") or "").strip().lower()
+
+            if not sid:
+                continue
+
+            if sid == keep_sid:
+                print("✅ KEEPING NEW CURRENT SUBSCRIPTION:", sid)
+                skipped_count += 1
+                continue
+
+            if status in {"canceled", "incomplete_expired"}:
+                skipped_count += 1
+                continue
+
+            if status in {"active", "trialing", "past_due", "unpaid", "incomplete"}:
+                print("🛑 CANCELING PREVIOUS SUBSCRIPTION FOR SAME CUSTOMER:", sid)
+                print("   customer_id:", customer_id)
+                print("   old_status:", status)
+                print("   keeping:", keep_sid)
+
+                stripe.Subscription.delete(
+                    sid,
+                    prorate=False,
+                )
+
+                cancelled_count += 1
+
+        result = {
+            "ok": True,
+            "customer_id": customer_id,
+            "cancelled": cancelled_count,
+            "skipped": skipped_count,
+            "kept": keep_sid,
+        }
+
+        print("✅ STRIPE PREVIOUS SUBSCRIPTION CLEANUP COMPLETE:", result)
+        return result
+
+    except stripe.error.StripeError as e:
+        print(
+            "❌ FAILED TO CANCEL PREVIOUS STRIPE SUBSCRIPTIONS",
+            keep_sid,
+            _describe_exception(e),
+        )
+        raise
+
+
 def _extract_payment_intent_id_from_invoice(invoice_obj) -> str:
     if not invoice_obj:
         return ""
@@ -318,13 +392,22 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
         if subscription_id:
             try:
+                cleanup_result = _cancel_previous_active_subscriptions_for_same_customer(
+                    keep_subscription_id=subscription_id,
+                )
+                print("✅ WEBHOOK SUBSCRIPTION CLEANUP RESULT:", cleanup_result)
+
                 _save_subscription_state_from_stripe(
                     db=db,
                     user_id=int(metadata["user_id"]),
                     subscription_id=subscription_id,
                 )
+
+                if isinstance(result, dict):
+                    result["stripe_subscription_cleanup"] = cleanup_result
+
             except Exception as e:
-                print("❌ FAILED AFTER APPLY WHILE SAVING STRIPE SUBSCRIPTION:", e)
+                print("❌ FAILED AFTER APPLY WHILE CLEANING/SAVING STRIPE SUBSCRIPTION:", e)
 
         return result
 
@@ -390,13 +473,22 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
     if subscription_id:
         try:
+            cleanup_result = _cancel_previous_active_subscriptions_for_same_customer(
+                keep_subscription_id=subscription_id,
+            )
+            print("✅ WEBHOOK SUBSCRIPTION CLEANUP RESULT:", cleanup_result)
+
             _save_subscription_state_from_stripe(
                 db=db,
                 user_id=int(metadata["user_id"]),
                 subscription_id=subscription_id,
             )
+
+            if isinstance(result, dict):
+                result["stripe_subscription_cleanup"] = cleanup_result
+
         except Exception as e:
-            print("❌ FAILED AFTER APPLY WHILE SAVING STRIPE SUBSCRIPTION:", e)
+            print("❌ FAILED AFTER APPLY WHILE CLEANING/SAVING STRIPE SUBSCRIPTION:", e)
 
     return result
 
