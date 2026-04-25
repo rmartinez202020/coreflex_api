@@ -624,6 +624,11 @@ def _process_checkout_session_completed(db: Session, session_obj):
         )
 
         if not str(metadata.get("user_id") or "").strip().isdigit():
+            print("❌ FINAL METADATA MISSING USER_ID")
+            print("   session_metadata:", session_metadata)
+            print("   intent_metadata:", {})
+            print("   merged_metadata:", metadata)
+
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -720,6 +725,12 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
     metadata = _normalize_payment_metadata(db, metadata)
 
+    # ✅ IMPORTANT SAFER FALLBACK:
+    # If intent metadata was missing/incomplete but the Checkout Session metadata
+    # has the user_id, trust/re-normalize the Checkout Session metadata.
+    if not str(metadata.get("user_id") or "").strip().isdigit():
+        metadata = _normalize_payment_metadata(db, session_metadata)
+
     _log_debug(
         "🔥 FINAL CHECKOUT METADATA",
         session_id=session_id,
@@ -731,6 +742,11 @@ def _process_checkout_session_completed(db: Session, session_obj):
     )
 
     if not str(metadata.get("user_id") or "").strip().isdigit():
+        print("❌ FINAL METADATA MISSING USER_ID")
+        print("   session_metadata:", session_metadata)
+        print("   intent_metadata:", intent_metadata)
+        print("   merged_metadata:", metadata)
+
         raise HTTPException(
             status_code=400,
             detail=(
@@ -798,6 +814,8 @@ def _process_payment_intent_succeeded(db: Session, intent_obj):
     metadata = _safe_metadata_dict(getattr(intent_obj, "metadata", None))
     metadata = _normalize_payment_metadata(db, metadata)
 
+    print("🔥 PAYMENT INTENT METADATA FINAL:", metadata)
+
     _log_debug(
         "🔥 WEBHOOK payment_intent.succeeded",
         payment_intent_id=payment_intent_id,
@@ -812,6 +830,11 @@ def _process_payment_intent_succeeded(db: Session, intent_obj):
     if not metadata:
         print("ℹ️ payment_intent.succeeded ignored because metadata is missing")
         return {"ok": True, "ignored": True, "reason": "missing_metadata"}
+
+    print("🔥 PAYMENT INTENT REQUIRED METADATA CHECK")
+    print("   user_id:", metadata.get("user_id"))
+    print("   plan_key:", metadata.get("plan_key"))
+    print("   billing_type:", metadata.get("billing_type"))
 
     result = _apply_payment_effects(
         db=db,
