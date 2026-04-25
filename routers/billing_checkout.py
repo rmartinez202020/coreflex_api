@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from auth_utils import get_current_user
 from database import get_db
-from models import User, BillingPlan, BillingAddon
+from models import User, BillingPlan, BillingAddon, UserSubscription
 from routers.billing_common import (
     NJ_SALES_TAX_RATE,
     CreatePaymentIntentRequest,
@@ -84,6 +84,261 @@ def _get_existing_stripe_customers_for_user(current_user: User):
     return matched_customers
 
 
+def _get_user_subscription_row(db: Session, current_user: User):
+    return (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == current_user.id)
+        .first()
+    )
+
+
+def _get_tenant_user_monthly_addon(db: Session):
+    addon = (
+        db.query(BillingAddon)
+        .filter(BillingAddon.is_active.is_(True))
+        .filter(BillingAddon.addon_key == "tenant_user")
+        .filter(BillingAddon.billing_type == "monthly")
+        .first()
+    )
+
+    if not addon:
+        addon = (
+            db.query(BillingAddon)
+            .filter(BillingAddon.is_active.is_(True))
+            .filter(BillingAddon.addon_key == "tenant_user")
+            .first()
+        )
+
+    return addon
+
+
+def _get_active_subscription_for_customer(customer_id: str):
+    customer_id = str(customer_id or "").strip()
+
+    if not customer_id:
+        return None
+
+    for status in ["active", "trialing", "past_due"]:
+        subscriptions = stripe.Subscription.list(
+            customer=customer_id,
+            status=status,
+            limit=100,
+        )
+
+        for sub in subscriptions.data:
+            sub_id = str(getattr(sub, "id", "") or "").strip()
+            if sub_id:
+                return sub
+
+    return None
+
+
+def _get_existing_subscription_item_for_price(stripe_subscription, price_id: str):
+    price_id = str(price_id or "").strip()
+
+    if not stripe_subscription or not price_id:
+        return None
+
+    items = getattr(stripe_subscription, "items", None)
+    data = getattr(items, "data", None) or []
+
+    for item in data:
+        item_price = getattr(item, "price", None)
+        item_price_id = str(getattr(item_price, "id", "") or "").strip()
+
+        if item_price_id == price_id:
+            return item
+
+    return None
+
+
+def _add_tenant_users_to_existing_subscription(
+    db: Session,
+    *,
+    current_user: User,
+    extra_tenant_users: int,
+    ctx: dict,
+):
+    """
+    Tenant-user purchases for an existing monthly subscription must be handled
+    as a Stripe subscription item/add-on, NOT as a separate Stripe subscription.
+
+    This prevents Stripe from showing:
+      Additional Tenant-User (+1 more)
+    as its own standalone subscription.
+
+    Instead, it attaches/updates the tenant-user recurring price on the user's
+    existing subscription.
+    """
+    extra_qty = max(0, int(extra_tenant_users or 0))
+
+    if extra_qty <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="extraTenantUsers must be greater than zero.",
+        )
+
+    sub_row = _get_user_subscription_row(db, current_user)
+
+    if not sub_row:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription record not found for this user.",
+        )
+
+    addon = _get_tenant_user_monthly_addon(db)
+
+    if not addon:
+        raise HTTPException(
+            status_code=500,
+            detail="Tenant-user add-on is not configured in billing_addons.",
+        )
+
+    tenant_price_id = str(getattr(addon, "stripe_price_id", "") or "").strip()
+
+    if not tenant_price_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Tenant-user add-on does not have a Stripe recurring price configured.",
+        )
+
+    stripe_customer = _get_or_create_stripe_customer_for_user(current_user)
+
+    stripe_subscription_id = str(
+        getattr(sub_row, "stripe_subscription_id", "") or ""
+    ).strip()
+
+    stripe_subscription = None
+
+    if stripe_subscription_id:
+        try:
+            stripe_subscription = stripe.Subscription.retrieve(stripe_subscription_id)
+        except stripe.error.StripeError as e:
+            print("⚠️ Could not retrieve subscription from DB id:", stripe_subscription_id)
+            print("   Stripe error:", str(e))
+            stripe_subscription = None
+
+    if not stripe_subscription:
+        stripe_subscription = _get_active_subscription_for_customer(stripe_customer.id)
+
+    if not stripe_subscription:
+        raise HTTPException(
+            status_code=400,
+            detail="No active Stripe subscription found to attach tenant-user add-on.",
+        )
+
+    active_subscription_id = str(getattr(stripe_subscription, "id", "") or "").strip()
+
+    if not active_subscription_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Active Stripe subscription id is missing.",
+        )
+
+    existing_item = _get_existing_subscription_item_for_price(
+        stripe_subscription,
+        tenant_price_id,
+    )
+
+    metadata = {
+        **ctx.get("metadata", {}),
+        "checkout_type": "tenant_user_subscription_addon",
+        "tenant_user_addon_applied_directly": "true",
+        "extra_tenant_users": str(extra_qty),
+        "stripe_subscription_id": active_subscription_id,
+    }
+
+    try:
+        if existing_item:
+            existing_item_id = str(getattr(existing_item, "id", "") or "").strip()
+            existing_qty = int(getattr(existing_item, "quantity", 0) or 0)
+            new_qty = existing_qty + extra_qty
+
+            print("🔥 UPDATING EXISTING TENANT-USER SUBSCRIPTION ITEM")
+            print("   subscription_id:", active_subscription_id)
+            print("   item_id:", existing_item_id)
+            print("   old_quantity:", existing_qty)
+            print("   added_quantity:", extra_qty)
+            print("   new_quantity:", new_qty)
+
+            updated_subscription = stripe.Subscription.modify(
+                active_subscription_id,
+                items=[
+                    {
+                        "id": existing_item_id,
+                        "quantity": new_qty,
+                    }
+                ],
+                proration_behavior="always_invoice",
+                metadata=metadata,
+            )
+        else:
+            print("🔥 ADDING TENANT-USER SUBSCRIPTION ITEM")
+            print("   subscription_id:", active_subscription_id)
+            print("   price_id:", tenant_price_id)
+            print("   quantity:", extra_qty)
+
+            updated_subscription = stripe.Subscription.modify(
+                active_subscription_id,
+                items=[
+                    {
+                        "price": tenant_price_id,
+                        "quantity": extra_qty,
+                    }
+                ],
+                proration_behavior="always_invoice",
+                metadata=metadata,
+            )
+
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Stripe error while adding tenant-user add-on: {str(e)}",
+        )
+
+    current_limit = getattr(sub_row, "tenants_users_limit", None)
+    safe_current_limit = (
+        int(current_limit)
+        if current_limit is not None and str(current_limit).strip() != ""
+        else 0
+    )
+
+    sub_row.tenants_users_limit = safe_current_limit + extra_qty
+    sub_row.stripe_customer_id = str(getattr(stripe_customer, "id", "") or "").strip()
+    sub_row.stripe_subscription_id = active_subscription_id
+
+    db.commit()
+    db.refresh(sub_row)
+
+    print("✅ TENANT-USER ADD-ON ATTACHED TO EXISTING SUBSCRIPTION")
+    print("   user_id:", current_user.id)
+    print("   subscription_id:", active_subscription_id)
+    print("   added_tenant_users:", extra_qty)
+    print("   new_tenants_users_limit:", sub_row.tenants_users_limit)
+
+    return {
+        "ok": True,
+        "directApplied": True,
+        "checkoutMode": "subscription_item_update",
+        "message": "Tenant-user add-on was attached to the existing subscription.",
+        "stripeSubscriptionId": active_subscription_id,
+        "subscriptionId": active_subscription_id,
+        "addedTenantUsers": extra_qty,
+        "tenantsUsersLimit": sub_row.tenants_users_limit,
+        "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
+        "addonAmount": decimal_to_float_2(ctx["addon_amount_usd"]),
+        "subtotal": decimal_to_float_2(ctx["subtotal_usd"]),
+        "tax": decimal_to_float_2(ctx["tax_amount_usd"]),
+        "taxRate": ctx["tax_rate"],
+        "taxRatePercent": ctx["tax_rate_percent"],
+        "taxLabel": "NJ Sales Tax",
+        "total": decimal_to_float_2(ctx["total_usd"]),
+        "stripeSubscriptionStatus": str(
+            getattr(updated_subscription, "status", "") or ""
+        ).strip(),
+    }
+
+
 def _cancel_other_active_subscriptions_for_customer(
     stripe_customer_id: str,
     keep_subscription_id: str | None = None,
@@ -127,13 +382,6 @@ def _cancel_other_active_subscriptions_for_customer(
 def _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
     current_user: User,
 ):
-    """
-    After a successful one-time license purchase, the user must not keep any
-    recurring Stripe subscription.
-
-    This cancels all billable recurring subscriptions found for the user's
-    Stripe customer email. It does NOT create a new Stripe customer.
-    """
     customers = _get_existing_stripe_customers_for_user(current_user)
 
     if not customers:
@@ -199,15 +447,6 @@ def _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
 
 
 def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> bool:
-    """
-    Tenant-user add-on only must NOT create/update a Stripe subscription.
-
-    This means:
-    - user is staying on the current plan
-    - no plan charge is being purchased
-    - tenant-user add-ons are being purchased
-    - total amount is greater than zero
-    """
     try:
         return (
             bool(ctx.get("is_current_plan")) is True
@@ -221,12 +460,6 @@ def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> b
 
 
 def _is_one_time_license_payment(metadata: dict) -> bool:
-    """
-    True only for real one-time license purchases.
-
-    Tenant-user add-on only checkout is also a one-time Stripe payment, but it
-    must NOT cancel recurring subscriptions.
-    """
     billing_type = str(metadata.get("billing_type") or "").strip().lower()
     checkout_type = str(metadata.get("checkout_type") or "").strip().lower()
     force_one_time_payment = (
@@ -236,7 +469,10 @@ def _is_one_time_license_payment(metadata: dict) -> bool:
         str(metadata.get("do_not_create_subscription") or "").strip().lower() == "true"
     )
 
-    if checkout_type == "tenant_user_addon_only":
+    if checkout_type in {
+        "tenant_user_addon_only",
+        "tenant_user_subscription_addon",
+    }:
         return False
 
     if force_one_time_payment and do_not_create_subscription:
@@ -249,15 +485,6 @@ def _is_one_time_license_payment(metadata: dict) -> bool:
 
 
 def _build_one_time_tenant_user_addon_line_items(ctx: dict, extra_tenant_users: int):
-    """
-    Creates a one-time Stripe Checkout line item for tenant-user add-on purchase.
-
-    IMPORTANT:
-    Do not use recurring price_data here.
-    Do not use subscription mode here.
-    This checkout is only a one-time payment that your backend applies to the user's
-    tenant-user allowance after payment succeeds.
-    """
     total_cents = int(ctx.get("amount_cents") or 0)
 
     if total_cents <= 0:
@@ -442,20 +669,14 @@ def create_checkout_session(
     )
 
     if is_tenant_user_addon_only:
-        checkout_mode = "payment"
-        line_items = _build_one_time_tenant_user_addon_line_items(
-            ctx=ctx,
+        return _add_tenant_users_to_existing_subscription(
+            db=db,
+            current_user=current_user,
             extra_tenant_users=extra_tenant_users,
+            ctx=ctx,
         )
 
-        ctx["metadata"] = {
-            **ctx["metadata"],
-            "checkout_type": "tenant_user_addon_only",
-            "force_one_time_payment": "true",
-            "do_not_create_subscription": "true",
-        }
-    else:
-        checkout_mode, line_items = _build_checkout_line_items(ctx, billing_type)
+    checkout_mode, line_items = _build_checkout_line_items(ctx, billing_type)
 
     if not line_items:
         raise HTTPException(
@@ -475,7 +696,7 @@ def create_checkout_session(
         f"is_current_plan={'true' if ctx['is_current_plan'] else 'false'};"
         f"billing_type={billing_type};"
         f"extra_tenant_users={extra_tenant_users};"
-        f"checkout_type={'tenant_user_addon_only' if is_tenant_user_addon_only else 'plan_checkout'}"
+        f"checkout_type=plan_checkout"
     )
 
     try:
@@ -518,71 +739,6 @@ def create_checkout_session(
 
         session = stripe.checkout.Session.create(**checkout_kwargs)
 
-        print("✅ CHECKOUT SESSION CREATED")
-        print("   session_id:", session.id)
-        print("   checkout_mode:", checkout_mode)
-        print(
-            "   session_metadata_immediate:",
-            _safe_metadata_dict(getattr(session, "metadata", None)),
-        )
-        print(
-            "   session_client_reference_id_immediate:",
-            getattr(session, "client_reference_id", None),
-        )
-        print(
-            "   payment_intent_immediate:",
-            getattr(session, "payment_intent", None),
-        )
-        print(
-            "   invoice_immediate:",
-            getattr(session, "invoice", None),
-        )
-        print(
-            "   subscription_immediate:",
-            getattr(session, "subscription", None),
-        )
-
-        verified_session = stripe.checkout.Session.retrieve(session.id)
-        verified_session_metadata = _safe_metadata_dict(
-            getattr(verified_session, "metadata", None)
-        )
-        verified_client_reference_id = str(
-            getattr(verified_session, "client_reference_id", "") or ""
-        ).strip()
-
-        resolved_payment = _resolve_checkout_session_payment_intent(verified_session)
-        verified_payment_intent_id = resolved_payment["payment_intent_id"]
-        verified_payment_source = resolved_payment["source"]
-        verified_invoice_id = resolved_payment["invoice_id"]
-        verified_subscription_id = resolved_payment["subscription_id"]
-
-        verified_intent_metadata = {}
-        if verified_payment_intent_id:
-            verified_intent = stripe.PaymentIntent.retrieve(verified_payment_intent_id)
-            verified_intent_metadata = _safe_metadata_dict(
-                getattr(verified_intent, "metadata", None)
-            )
-
-        verified_subscription_metadata = {}
-        if verified_subscription_id:
-            verified_subscription = stripe.Subscription.retrieve(
-                verified_subscription_id
-            )
-            verified_subscription_metadata = _safe_metadata_dict(
-                getattr(verified_subscription, "metadata", None)
-            )
-
-        print("✅ VERIFIED STRIPE OBJECTS AFTER CREATE")
-        print("   verified_session_id:", getattr(verified_session, "id", None))
-        print("   verified_session_metadata:", verified_session_metadata)
-        print("   verified_client_reference_id:", verified_client_reference_id)
-        print("   verified_payment_intent_id:", verified_payment_intent_id)
-        print("   verified_payment_intent_source:", verified_payment_source)
-        print("   verified_invoice_id:", verified_invoice_id)
-        print("   verified_subscription_id:", verified_subscription_id)
-        print("   verified_subscription_metadata:", verified_subscription_metadata)
-        print("   verified_payment_intent_metadata:", verified_intent_metadata)
-
         return {
             "ok": True,
             "checkoutSessionId": session.id,
@@ -599,6 +755,7 @@ def create_checkout_session(
             "taxLabel": "NJ Sales Tax",
             "total": decimal_to_float_2(ctx["total_usd"]),
         }
+
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
