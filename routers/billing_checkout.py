@@ -127,13 +127,6 @@ def _cancel_other_active_subscriptions_for_customer(
 def _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
     current_user: User,
 ):
-    """
-    After a successful one-time license purchase, the user must not keep any
-    recurring Stripe subscription.
-
-    This cancels all billable recurring subscriptions found for the user's
-    Stripe customer email. It does NOT create a new Stripe customer.
-    """
     customers = _get_existing_stripe_customers_for_user(current_user)
 
     if not customers:
@@ -199,15 +192,6 @@ def _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
 
 
 def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> bool:
-    """
-    Tenant-user add-on only must NOT create/update a Stripe subscription.
-
-    This means:
-    - user is staying on the current plan
-    - no plan charge is being purchased
-    - tenant-user add-ons are being purchased
-    - total amount is greater than zero
-    """
     try:
         return (
             bool(ctx.get("is_current_plan")) is True
@@ -221,12 +205,6 @@ def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> b
 
 
 def _is_one_time_license_payment(metadata: dict) -> bool:
-    """
-    True only for real one-time license purchases.
-
-    Tenant-user add-on only checkout is also a one-time Stripe payment, but it
-    must NOT cancel recurring subscriptions.
-    """
     billing_type = str(metadata.get("billing_type") or "").strip().lower()
     checkout_type = str(metadata.get("checkout_type") or "").strip().lower()
     force_one_time_payment = (
@@ -249,15 +227,6 @@ def _is_one_time_license_payment(metadata: dict) -> bool:
 
 
 def _build_one_time_tenant_user_addon_line_items(ctx: dict, extra_tenant_users: int):
-    """
-    Creates a one-time Stripe Checkout line item for tenant-user add-on purchase.
-
-    IMPORTANT:
-    Do not use recurring price_data here.
-    Do not use subscription mode here.
-    This checkout is only a one-time payment that your backend applies to the user's
-    tenant-user allowance after payment succeeds.
-    """
     total_cents = int(ctx.get("amount_cents") or 0)
 
     if total_cents <= 0:
@@ -467,16 +436,10 @@ def create_checkout_session(
         str(getattr(current_user, "email", "") or "").strip() or None
     )
 
-    client_reference_id = (
-        f"user_id={current_user.id};"
-        f"user_email={str(getattr(current_user, 'email', '') or '').strip()};"
-        f"plan_key={plan_key};"
-        f"current_plan_key={ctx['current_plan_key']};"
-        f"is_current_plan={'true' if ctx['is_current_plan'] else 'false'};"
-        f"billing_type={billing_type};"
-        f"extra_tenant_users={extra_tenant_users};"
-        f"checkout_type={'tenant_user_addon_only' if is_tenant_user_addon_only else 'plan_checkout'}"
-    )
+    # ✅ IMPORTANT:
+    # Stripe client_reference_id has a 200-character limit.
+    # Keep it short. Full billing details are already stored in metadata.
+    client_reference_id = f"uid={current_user.id};plan={plan_key}"
 
     try:
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
