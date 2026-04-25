@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -15,6 +16,10 @@ from routers.billing_common import (
 )
 
 
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
 def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscription:
     row = (
         db.query(UserSubscription)
@@ -22,13 +27,23 @@ def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscript
         .first()
     )
     if row:
+        # Safety patch for older rows if active_date was somehow missing.
+        if not getattr(row, "active_date", None):
+            row.active_date = _utcnow()
+            db.commit()
+            db.refresh(row)
+
         return row
+
+    now_utc = _utcnow()
 
     row = UserSubscription(
         user_id=user_id,
         plan_key="free",
         device_limit=1,
         tenants_users_limit=1,
+        active_date=now_utc,
+        renewal_date=None,
         is_active=True,
     )
     db.add(row)
