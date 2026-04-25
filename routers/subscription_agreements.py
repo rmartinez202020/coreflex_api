@@ -13,6 +13,61 @@ router = APIRouter(
 )
 
 
+def _serialize_agreement(row: SubscriptionAgreementAcceptance):
+    return {
+        "id": row.id,
+        "user_id": row.user_id,
+        "plan_key": row.plan_key,
+        "billing_type": row.billing_type,
+        "agreement_version": row.agreement_version,
+        "confirmed": row.confirmed,
+        "confirmed_at": row.confirmed_at.isoformat() if row.confirmed_at else None,
+        "checkout_session_id": getattr(row, "checkout_session_id", None),
+        "payment_intent_id": getattr(row, "payment_intent_id", None),
+        "ip_address": row.ip_address,
+        "user_agent": row.user_agent,
+    }
+
+
+@router.get("/me")
+def get_my_subscription_agreements(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rows = (
+        db.query(SubscriptionAgreementAcceptance)
+        .filter(SubscriptionAgreementAcceptance.user_id == current_user.id)
+        .order_by(SubscriptionAgreementAcceptance.confirmed_at.desc())
+        .all()
+    )
+
+    return {
+        "ok": True,
+        "items": [_serialize_agreement(row) for row in rows],
+    }
+
+
+@router.get("/accepted")
+def get_my_accepted_subscription_agreements(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rows = (
+        db.query(SubscriptionAgreementAcceptance)
+        .filter(
+            SubscriptionAgreementAcceptance.user_id == current_user.id,
+            SubscriptionAgreementAcceptance.confirmed.is_(True),
+        )
+        .order_by(SubscriptionAgreementAcceptance.confirmed_at.desc())
+        .all()
+    )
+
+    return {
+        "ok": True,
+        "items": [_serialize_agreement(row) for row in rows],
+    }
+
+
 @router.post("/confirm")
 def confirm_subscription_agreement(
     payload: dict,
