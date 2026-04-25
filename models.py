@@ -1338,3 +1338,24 @@ class SubscriptionAgreementAcceptance(Base):
     )
 
     user = relationship("User")
+
+
+class OneTimePaymentHistory(Base):
+    __tablename__ = "one_time_payment_history"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False)
+    user_email = Column(String(255), nullable=True)
+    plan_key = Column(String(50), nullable=False)
+    billing_type = Column(String(20), nullable=False, default="one_time")
+    stripe_checkout_session_id = Column(String(255), nullable=True)
+    stripe_payment_intent_id = Column(String(255), nullable=True)
+    stripe_customer_id = Column(String(255), nullable=True)
+    amount_usd = Column(Numeric(10, 2), nullable=True)
+    tax_amount_usd = Column(Numeric(10, 2), nullable=True)
+    total_usd = Column(Numeric(10, 2), nullable=True)
+    currency = Column(String(10), nullable=True, default="usd")
+    payment_status = Column(String(50), nullable=True)
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    metadata_json = Column("metadata", JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

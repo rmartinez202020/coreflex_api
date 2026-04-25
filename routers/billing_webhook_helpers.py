@@ -1,9 +1,16 @@
 import stripe
 from datetime import datetime, timezone
+from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from models import UserSubscription
+from models import UserSubscription, SubscriptionAgreementAcceptance
+
+try:
+    from models import OneTimePaymentHistory
+except Exception:
+    OneTimePaymentHistory = None
+
 from routers.billing_common import (
     _apply_payment_effects,
     _describe_exception,
@@ -13,6 +20,172 @@ from routers.billing_common import (
     _normalize_payment_metadata,
     _safe_metadata_dict,
 )
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _safe_decimal(value, default="0.00"):
+    try:
+        return Decimal(str(value or default)).quantize(Decimal("0.01"))
+    except Exception:
+        return Decimal(default).quantize(Decimal("0.01"))
+
+
+def _save_one_time_purchase_records(
+    db: Session,
+    *,
+    session_id: str,
+    payment_intent_id: str,
+    customer_id: str,
+    payment_status: str,
+    metadata: dict,
+):
+    metadata = _normalize_payment_metadata(db, _safe_metadata_dict(metadata))
+
+    if str(metadata.get("billing_type") or "").strip().lower() != "one_time":
+        return {"ok": True, "ignored": True, "reason": "not_one_time"}
+
+    raw_user_id = str(metadata.get("user_id") or "").strip()
+    if not raw_user_id.isdigit():
+        print("⚠️ Cannot save one-time purchase records: missing user_id")
+        return {"ok": False, "reason": "missing_user_id"}
+
+    user_id = int(raw_user_id)
+    plan_key = str(metadata.get("plan_key") or "").strip().lower()
+    user_email = str(metadata.get("user_email") or "").strip() or None
+    now_utc = _utcnow()
+
+    if not plan_key:
+        print("⚠️ Cannot save one-time purchase records: missing plan_key")
+        return {"ok": False, "reason": "missing_plan_key"}
+
+    agreement = (
+        db.query(SubscriptionAgreementAcceptance)
+        .filter(
+            SubscriptionAgreementAcceptance.user_id == user_id,
+            SubscriptionAgreementAcceptance.plan_key == plan_key,
+            SubscriptionAgreementAcceptance.billing_type == "one_time",
+            SubscriptionAgreementAcceptance.confirmed.is_(True),
+        )
+        .order_by(SubscriptionAgreementAcceptance.id.desc())
+        .first()
+    )
+
+    if not agreement:
+        agreement = SubscriptionAgreementAcceptance(
+            user_id=user_id,
+            plan_key=plan_key,
+            billing_type="one_time",
+            agreement_version="v1",
+            confirmed=True,
+            confirmed_at=now_utc,
+        )
+        db.add(agreement)
+    else:
+        agreement.confirmed = True
+        agreement.confirmed_at = agreement.confirmed_at or now_utc
+
+    if hasattr(agreement, "checkout_session_id") and session_id:
+        agreement.checkout_session_id = session_id
+
+    if hasattr(agreement, "payment_intent_id") and payment_intent_id:
+        agreement.payment_intent_id = payment_intent_id
+
+    history_id = None
+
+    if OneTimePaymentHistory is not None:
+        history = None
+
+        if payment_intent_id:
+            history = (
+                db.query(OneTimePaymentHistory)
+                .filter(
+                    OneTimePaymentHistory.stripe_payment_intent_id
+                    == payment_intent_id
+                )
+                .first()
+            )
+
+        if not history and session_id:
+            history = (
+                db.query(OneTimePaymentHistory)
+                .filter(
+                    OneTimePaymentHistory.stripe_checkout_session_id == session_id
+                )
+                .first()
+            )
+
+        if not history:
+            history = OneTimePaymentHistory(
+                user_id=user_id,
+                user_email=user_email,
+                plan_key=plan_key,
+                billing_type="one_time",
+                stripe_checkout_session_id=session_id or None,
+                stripe_payment_intent_id=payment_intent_id or None,
+                stripe_customer_id=customer_id or None,
+                amount_usd=_safe_decimal(metadata.get("plan_amount_usd")),
+                tax_amount_usd=_safe_decimal(metadata.get("tax_amount_usd")),
+                total_usd=_safe_decimal(metadata.get("total_usd")),
+                currency="usd",
+                payment_status=payment_status or "paid",
+                paid_at=now_utc,
+                metadata_json=metadata,
+            )
+            db.add(history)
+
+        db.commit()
+        db.refresh(history)
+        history_id = getattr(history, "id", None)
+    else:
+        db.commit()
+
+    db.refresh(agreement)
+
+    print("✅ ONE-TIME PURCHASE RECORDS SAVED")
+    print("   agreement_id:", getattr(agreement, "id", None))
+    print("   history_id:", history_id)
+    print("   user_id:", user_id)
+    print("   plan_key:", plan_key)
+    print("   payment_intent_id:", payment_intent_id)
+
+    return {
+        "ok": True,
+        "agreementId": getattr(agreement, "id", None),
+        "historyId": history_id,
+    }
+
+
+def _cancel_all_billable_subscriptions_for_customer(customer_id: str):
+    customer_id = str(customer_id or "").strip()
+    if not customer_id:
+        return {"ok": True, "cancelled": 0, "reason": "missing_customer_id"}
+
+    statuses = ["active", "trialing", "past_due", "unpaid", "incomplete"]
+    cancelled = 0
+
+    for status in statuses:
+        subs = stripe.Subscription.list(customer=customer_id, status=status, limit=100)
+
+        for sub in subs.data:
+            sid = str(getattr(sub, "id", "") or "").strip()
+            if not sid:
+                continue
+
+            print("🔥 ONE-TIME PURCHASE: CANCELING MONTHLY SUBSCRIPTION:", sid)
+
+            stripe.Subscription.delete(
+                sid,
+                prorate=False,
+            )
+
+            cancelled += 1
+
+    result = {"ok": True, "customer_id": customer_id, "cancelled": cancelled}
+    print("✅ ONE-TIME MONTHLY CLEANUP RESULT:", result)
+    return result
 
 
 def _retrieve_payment_intent_or_none(payment_intent_id: str):
@@ -403,6 +576,7 @@ def _process_checkout_session_completed(db: Session, session_obj):
     invoice_id = extracted["invoice_id"]
     subscription_id = extracted["subscription_id"]
     session_metadata = extracted["metadata"]
+    customer_id = str(getattr(session_obj, "customer", "") or "").strip()
 
     if not session_metadata:
         try:
@@ -422,6 +596,7 @@ def _process_checkout_session_completed(db: Session, session_obj):
         payment_intent_source=payment_intent_source,
         invoice_id=invoice_id,
         subscription_id=subscription_id,
+        customer_id=customer_id,
         session_metadata=session_metadata,
     )
 
@@ -465,6 +640,28 @@ def _process_checkout_session_completed(db: Session, session_obj):
             metadata=metadata,
         )
 
+        one_time_result = _save_one_time_purchase_records(
+            db=db,
+            session_id=session_id,
+            payment_intent_id="",
+            customer_id=customer_id,
+            payment_status=payment_status,
+            metadata=metadata,
+        )
+
+        if isinstance(result, dict):
+            result["oneTimePurchaseRecords"] = one_time_result
+
+        if str(metadata.get("billing_type") or "").strip().lower() == "one_time":
+            try:
+                cleanup_result = _cancel_all_billable_subscriptions_for_customer(
+                    customer_id
+                )
+                if isinstance(result, dict):
+                    result["stripe_one_time_cleanup"] = cleanup_result
+            except Exception as e:
+                print("❌ FAILED ONE-TIME MONTHLY CLEANUP:", e)
+
         if subscription_id:
             try:
                 cleanup_result = _cancel_previous_active_subscriptions_for_same_customer(
@@ -495,6 +692,9 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
     intent_metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
 
+    if not customer_id:
+        customer_id = str(getattr(intent, "customer", "") or "").strip()
+
     _log_debug(
         "🔎 WEBHOOK RETRIEVE CHECK",
         session_id=session_id,
@@ -504,6 +704,7 @@ def _process_checkout_session_completed(db: Session, session_obj):
         retrieved_intent_metadata=intent_metadata,
         invoice_id=invoice_id,
         subscription_id=subscription_id,
+        customer_id=customer_id,
     )
 
     metadata = _merge_metadata(session_metadata, intent_metadata)
@@ -546,6 +747,28 @@ def _process_checkout_session_completed(db: Session, session_obj):
         metadata=metadata,
     )
 
+    one_time_result = _save_one_time_purchase_records(
+        db=db,
+        session_id=session_id,
+        payment_intent_id=payment_intent_id,
+        customer_id=customer_id,
+        payment_status=payment_status,
+        metadata=metadata,
+    )
+
+    if isinstance(result, dict):
+        result["oneTimePurchaseRecords"] = one_time_result
+
+    if str(metadata.get("billing_type") or "").strip().lower() == "one_time":
+        try:
+            cleanup_result = _cancel_all_billable_subscriptions_for_customer(
+                customer_id
+            )
+            if isinstance(result, dict):
+                result["stripe_one_time_cleanup"] = cleanup_result
+        except Exception as e:
+            print("❌ FAILED ONE-TIME MONTHLY CLEANUP:", e)
+
     if subscription_id:
         try:
             cleanup_result = _cancel_previous_active_subscriptions_for_same_customer(
@@ -570,12 +793,15 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
 def _process_payment_intent_succeeded(db: Session, intent_obj):
     payment_intent_id = str(getattr(intent_obj, "id", "") or "").strip()
+    customer_id = str(getattr(intent_obj, "customer", "") or "").strip()
+
     metadata = _safe_metadata_dict(getattr(intent_obj, "metadata", None))
     metadata = _normalize_payment_metadata(db, metadata)
 
     _log_debug(
         "🔥 WEBHOOK payment_intent.succeeded",
         payment_intent_id=payment_intent_id,
+        customer_id=customer_id,
         metadata=metadata,
     )
 
@@ -587,8 +813,32 @@ def _process_payment_intent_succeeded(db: Session, intent_obj):
         print("ℹ️ payment_intent.succeeded ignored because metadata is missing")
         return {"ok": True, "ignored": True, "reason": "missing_metadata"}
 
-    return _apply_payment_effects(
+    result = _apply_payment_effects(
         db=db,
         payment_intent_id=payment_intent_id,
         metadata=metadata,
     )
+
+    one_time_result = _save_one_time_purchase_records(
+        db=db,
+        session_id="",
+        payment_intent_id=payment_intent_id,
+        customer_id=customer_id,
+        payment_status="paid",
+        metadata=metadata,
+    )
+
+    if isinstance(result, dict):
+        result["oneTimePurchaseRecords"] = one_time_result
+
+    if str(metadata.get("billing_type") or "").strip().lower() == "one_time":
+        try:
+            cleanup_result = _cancel_all_billable_subscriptions_for_customer(
+                customer_id
+            )
+            if isinstance(result, dict):
+                result["stripe_one_time_cleanup"] = cleanup_result
+        except Exception as e:
+            print("❌ FAILED ONE-TIME MONTHLY CLEANUP:", e)
+
+    return result
