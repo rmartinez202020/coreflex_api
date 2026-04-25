@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from models import BillingAddon, BillingPlan, User, UserSubscription
 from routers.billing_common import (
     NJ_SALES_TAX_RATE,
-    _safe_metadata_dict,
     money_to_cents,
     percent_display_2_from_rate,
     quantize_decimal,
@@ -27,7 +26,6 @@ def _get_or_create_user_subscription(db: Session, user_id: int) -> UserSubscript
         .first()
     )
     if row:
-        # Safety patch for older rows if active_date was somehow missing.
         if not getattr(row, "active_date", None):
             row.active_date = _utcnow()
             db.commit()
@@ -97,6 +95,10 @@ def _build_purchase_context(
     billing_type: str,
     extra_tenant_users: int,
 ):
+    plan_key = str(plan_key or "").strip().lower()
+    billing_type = str(billing_type or "").strip().lower()
+    extra_tenant_users = max(0, int(extra_tenant_users or 0))
+
     subscription = _get_or_create_user_subscription(db, current_user.id)
     current_plan_key = str(subscription.plan_key or "free").strip().lower()
     is_current_plan = current_plan_key == plan_key
@@ -108,10 +110,17 @@ def _build_purchase_context(
         extra_tenant_users=extra_tenant_users,
     )
 
-    if is_current_plan:
+    plan_price_usd = to_money_decimal(plan.price_usd)
+
+    # ✅ IMPORTANT FIX:
+    # Monthly current plan = no plan charge.
+    # One-time license = charge the license even if it matches the current monthly plan.
+    if billing_type == "monthly" and is_current_plan:
         plan_amount_usd = Decimal("0.00")
+    elif billing_type == "one_time":
+        plan_amount_usd = plan_price_usd
     else:
-        plan_amount_usd = to_money_decimal(plan.price_usd)
+        plan_amount_usd = plan_price_usd
 
     addon_unit_price_usd = Decimal("0.00")
     addon_amount_usd = Decimal("0.00")
