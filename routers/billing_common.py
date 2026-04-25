@@ -1,5 +1,6 @@
 import os
 import traceback
+import calendar
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -119,6 +120,28 @@ def rate_display_2_from_percent(percent_value: float) -> float:
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+def _add_one_calendar_month(dt_value):
+    if not dt_value:
+        return None
+
+    if dt_value.tzinfo is None:
+        dt_value = dt_value.replace(tzinfo=timezone.utc)
+    else:
+        dt_value = dt_value.astimezone(timezone.utc)
+
+    year = dt_value.year
+    month = dt_value.month + 1
+
+    if month > 12:
+        month = 1
+        year += 1
+
+    last_day = calendar.monthrange(year, month)[1]
+    day = min(dt_value.day, last_day)
+
+    return dt_value.replace(year=year, month=month, day=day)
 
 
 def _safe_int(value, default=0) -> int:
@@ -309,15 +332,11 @@ def _apply_payment_effects(
     print("   subscription.id:", getattr(subscription, "id", None))
     print("   subscription.user_id:", getattr(subscription, "user_id", None))
     print("   subscription.plan_key:", getattr(subscription, "plan_key", None))
-    print(
-        "   subscription.tenants_users_limit:",
-        getattr(subscription, "tenants_users_limit", None),
-    )
+    print("   subscription.tenants_users_limit:", getattr(subscription, "tenants_users_limit", None))
     print("   subscription.device_limit:", getattr(subscription, "device_limit", None))
-    print(
-        "   subscription.renewal_date:",
-        getattr(subscription, "renewal_date", None),
-    )
+    print("   subscription.active_date:", getattr(subscription, "active_date", None))
+    print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None))
+    print("   subscription.cancel_at_period_end:", getattr(subscription, "cancel_at_period_end", None))
 
     print("🔥 LOOKING FOR PLAN:", plan_key, billing_type)
     plan = (
@@ -353,6 +372,7 @@ def _apply_payment_effects(
     base_device_limit = int(plan.device_limit or 0)
 
     plan_is_changing = plan_key != current_plan_key
+    now_utc = _utcnow()
 
     print("🔥 APPLY PAYMENT EFFECTS FINAL VALUES")
     print("   user_id:", user_id)
@@ -365,10 +385,6 @@ def _apply_payment_effects(
     print("   already_applied:", already_applied)
     print("   current_limit:", current_limit)
 
-    # ✅ IMPORTANT:
-    # Upgrade/downgrade must REPLACE the old plan in CoreFlex DB.
-    # Do NOT add old plan tenant limit + new plan tenant limit.
-    # Stripe now keeps only one active subscription; DB must mirror the latest checkout.
     if plan_is_changing or not is_current_plan:
         new_plan_key = plan_key
         new_device_limit = base_device_limit
@@ -377,12 +393,30 @@ def _apply_payment_effects(
         added_from_plan = max(0, target_plan_tenant_amount - current_limit)
         added_from_addons = extra_tenant_users
 
+        # ✅ CRITICAL FIX:
+        # A real plan change/upgrade starts a new CoreFlex billing cycle.
+        # This prevents an old active_date from making the cancel expiration
+        # show the old plan date, like May 15 after upgrading on Apr 25/26.
+        subscription.active_date = now_utc
+
+        if billing_type == "monthly":
+            subscription.renewal_date = _add_one_calendar_month(now_utc)
+        else:
+            subscription.renewal_date = None
+
+        if hasattr(subscription, "cancel_at_period_end"):
+            subscription.cancel_at_period_end = False
+
+        if hasattr(subscription, "subscription_status"):
+            subscription.subscription_status = "active"
+
+        if hasattr(subscription, "status"):
+            subscription.status = "Active"
+
     else:
         new_plan_key = current_plan_key
         new_device_limit = current_device_limit or base_device_limit
 
-        # Same current plan:
-        # Only add tenant-user add-ons when this payment was not already applied.
         if already_applied:
             new_tenant_limit = current_limit
             added_from_plan = 0
@@ -391,6 +425,19 @@ def _apply_payment_effects(
             new_tenant_limit = current_limit + extra_tenant_users
             added_from_plan = 0
             added_from_addons = extra_tenant_users
+
+        # ✅ Same-plan add-ons must NOT reset active_date.
+        # ✅ Reactivation must NOT reset active_date.
+        if not getattr(subscription, "active_date", None):
+            subscription.active_date = now_utc
+
+        if hasattr(subscription, "renewal_date"):
+            if billing_type == "monthly" and not getattr(subscription, "renewal_date", None):
+                subscription.renewal_date = _add_one_calendar_month(
+                    getattr(subscription, "active_date", None) or now_utc
+                )
+            elif billing_type != "monthly":
+                subscription.renewal_date = None
 
     _log_debug(
         "🔥 SUBSCRIPTION UPDATE PREVIEW",
@@ -406,6 +453,8 @@ def _apply_payment_effects(
         new_device_limit=new_device_limit,
         added_from_plan=added_from_plan,
         added_from_addons=added_from_addons,
+        active_date=getattr(subscription, "active_date", None),
+        renewal_date=getattr(subscription, "renewal_date", None),
     )
 
     subscription.plan_key = new_plan_key
@@ -413,21 +462,15 @@ def _apply_payment_effects(
     subscription.tenants_users_limit = new_tenant_limit
     subscription.is_active = True
 
-    if hasattr(subscription, "status"):
-        subscription.status = "Active"
-
-    if hasattr(subscription, "renewal_date"):
-        if billing_type == "monthly":
-            subscription.renewal_date = _utcnow() + timedelta(days=30)
-        else:
-            subscription.renewal_date = None
-
     try:
         print("🔥 ABOUT TO SAVE SUBSCRIPTION")
         print("   subscription.user_id:", subscription.user_id)
         print("   subscription.plan_key:", subscription.plan_key)
         print("   subscription.tenants_users_limit:", subscription.tenants_users_limit)
         print("   subscription.device_limit:", subscription.device_limit)
+        print("   subscription.active_date:", getattr(subscription, "active_date", None))
+        print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None))
+        print("   subscription.cancel_at_period_end:", getattr(subscription, "cancel_at_period_end", None))
 
         print("🔥 DB COMMIT START")
         db.commit()
@@ -444,15 +487,11 @@ def _apply_payment_effects(
     print("   subscription.id:", getattr(subscription, "id", None))
     print("   subscription.user_id:", getattr(subscription, "user_id", None))
     print("   subscription.plan_key:", getattr(subscription, "plan_key", None))
-    print(
-        "   subscription.tenants_users_limit:",
-        getattr(subscription, "tenants_users_limit", None),
-    )
+    print("   subscription.tenants_users_limit:", getattr(subscription, "tenants_users_limit", None))
     print("   subscription.device_limit:", getattr(subscription, "device_limit", None))
-    print(
-        "   subscription.renewal_date:",
-        getattr(subscription, "renewal_date", None),
-    )
+    print("   subscription.active_date:", getattr(subscription, "active_date", None))
+    print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None))
+    print("   subscription.cancel_at_period_end:", getattr(subscription, "cancel_at_period_end", None))
 
     if not already_applied:
         _mark_payment_intent_applied(payment_intent_id, metadata)
@@ -466,5 +505,11 @@ def _apply_payment_effects(
         "planKey": str(subscription.plan_key or "free").strip().lower(),
         "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
         "tenantUsersUsed": None,
+        "activeDate": subscription.active_date.isoformat()
+        if getattr(subscription, "active_date", None)
+        else None,
+        "renewalDate": subscription.renewal_date.isoformat()
+        if getattr(subscription, "renewal_date", None)
+        else None,
         "message": "Payment applied successfully.",
     }
