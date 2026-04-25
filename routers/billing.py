@@ -1,4 +1,5 @@
 # routers/billing.py
+import calendar
 import traceback
 from datetime import datetime, timezone
 
@@ -32,6 +33,79 @@ def _to_dt_utc_from_unix(ts_value):
         return datetime.fromtimestamp(int(ts_value), timezone.utc)
     except Exception:
         return None
+
+
+def _ensure_utc(dt_value):
+    if not dt_value:
+        return None
+
+    try:
+        if dt_value.tzinfo is None:
+            return dt_value.replace(tzinfo=timezone.utc)
+        return dt_value.astimezone(timezone.utc)
+    except Exception:
+        return dt_value
+
+
+def _add_one_month(dt_value):
+    """
+    Adds exactly one calendar month while preserving the day when possible.
+    Example:
+      Apr 15 -> May 15
+      Jan 31 -> Feb 28/29
+    """
+    dt_value = _ensure_utc(dt_value)
+    if not dt_value:
+        return None
+
+    year = dt_value.year
+    month = dt_value.month + 1
+
+    if month > 12:
+        month = 1
+        year += 1
+
+    last_day = calendar.monthrange(year, month)[1]
+    day = min(dt_value.day, last_day)
+
+    return dt_value.replace(year=year, month=month, day=day)
+
+
+def _get_cancel_benefits_expire_date(sub_row):
+    """
+    IMPORTANT BUSINESS RULE:
+    If the user cancels a monthly plan, benefits expire one month after the
+    original subscription active_date.
+
+    This must NOT be recalculated from:
+      - reactivation date
+      - updated_at
+      - cancellation date
+      - Stripe subscription created date
+
+    Example:
+      active_date = Apr 15
+      cancel Apr 24 -> expire May 15
+      reactivate Apr 25
+      cancel again Apr 29 -> still expire May 15
+    """
+    active_date = getattr(sub_row, "active_date", None)
+    if active_date:
+        return _add_one_month(active_date)
+
+    current_period_start = getattr(sub_row, "current_period_start", None)
+    if current_period_start:
+        return _add_one_month(current_period_start)
+
+    renewal_date = getattr(sub_row, "renewal_date", None)
+    if renewal_date:
+        return _ensure_utc(renewal_date)
+
+    current_period_end = getattr(sub_row, "current_period_end", None)
+    if current_period_end:
+        return _ensure_utc(current_period_end)
+
+    return None
 
 
 def _update_user_subscription_from_stripe_subscription(
@@ -101,8 +175,15 @@ def _update_user_subscription_from_stripe_subscription(
     sub_row.current_period_end = current_period_end
     sub_row.last_invoice_id = latest_invoice_id or None
 
-    if current_period_end:
-        sub_row.renewal_date = current_period_end
+    if cancel_at_period_end:
+        cancel_expire_date = _get_cancel_benefits_expire_date(sub_row)
+        if cancel_expire_date:
+            sub_row.renewal_date = cancel_expire_date
+        elif current_period_end:
+            sub_row.renewal_date = current_period_end
+    else:
+        if current_period_end:
+            sub_row.renewal_date = current_period_end
 
     if status in {"active", "trialing"}:
         sub_row.is_active = True
@@ -118,12 +199,16 @@ def _update_user_subscription_from_stripe_subscription(
     print("   subscription_status:", sub_row.subscription_status)
     print("   cancel_at_period_end:", sub_row.cancel_at_period_end)
     print("   current_period_end:", sub_row.current_period_end)
+    print("   renewal_date:", sub_row.renewal_date)
 
     return {
         "ok": True,
         "user_id": sub_row.user_id,
         "stripe_subscription_id": sub_row.stripe_subscription_id,
         "subscription_status": sub_row.subscription_status,
+        "renewal_date": sub_row.renewal_date.isoformat()
+        if sub_row.renewal_date
+        else None,
     }
 
 
@@ -239,7 +324,14 @@ def cancel_subscription(
             detail="Subscription is already canceled.",
         )
 
+    cancel_expire_date = _get_cancel_benefits_expire_date(sub_row)
+
     if bool(getattr(sub_row, "cancel_at_period_end", False)):
+        if cancel_expire_date and sub_row.renewal_date != cancel_expire_date:
+            sub_row.renewal_date = cancel_expire_date
+            db.commit()
+            db.refresh(sub_row)
+
         return {
             "ok": True,
             "alreadyScheduled": True,
@@ -264,6 +356,20 @@ def cancel_subscription(
         stripe_subscription_obj=stripe_subscription,
     )
 
+    sub_row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == current_user.id)
+        .first()
+    )
+
+    cancel_expire_date = _get_cancel_benefits_expire_date(sub_row)
+
+    if cancel_expire_date:
+        sub_row.renewal_date = cancel_expire_date
+        sub_row.cancel_at_period_end = True
+        db.commit()
+        db.refresh(sub_row)
+
     current_period_end = _to_dt_utc_from_unix(
         getattr(stripe_subscription, "current_period_end", None)
     )
@@ -280,6 +386,12 @@ def cancel_subscription(
         ),
         "currentPeriodEnd": current_period_end.isoformat()
         if current_period_end
+        else None,
+        "renewalDate": sub_row.renewal_date.isoformat()
+        if sub_row.renewal_date
+        else None,
+        "benefitsExpireDate": sub_row.renewal_date.isoformat()
+        if sub_row.renewal_date
         else None,
     }
 
@@ -328,6 +440,8 @@ def reactivate_subscription(
             else None,
         }
 
+    original_active_date = getattr(sub_row, "active_date", None)
+
     try:
         stripe_subscription = stripe.Subscription.modify(
             stripe_subscription_id,
@@ -340,6 +454,19 @@ def reactivate_subscription(
         db=db,
         stripe_subscription_obj=stripe_subscription,
     )
+
+    sub_row = (
+        db.query(UserSubscription)
+        .filter(UserSubscription.user_id == current_user.id)
+        .first()
+    )
+
+    if original_active_date and getattr(sub_row, "active_date", None) != original_active_date:
+        sub_row.active_date = original_active_date
+
+    sub_row.cancel_at_period_end = False
+    db.commit()
+    db.refresh(sub_row)
 
     current_period_end = _to_dt_utc_from_unix(
         getattr(stripe_subscription, "current_period_end", None)
@@ -357,6 +484,12 @@ def reactivate_subscription(
         ),
         "currentPeriodEnd": current_period_end.isoformat()
         if current_period_end
+        else None,
+        "renewalDate": sub_row.renewal_date.isoformat()
+        if sub_row.renewal_date
+        else None,
+        "activeDate": sub_row.active_date.isoformat()
+        if getattr(sub_row, "active_date", None)
         else None,
     }
 
