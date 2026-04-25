@@ -67,6 +67,23 @@ def _get_or_create_stripe_customer_for_user(current_user: User):
     return customer
 
 
+def _get_existing_stripe_customers_for_user(current_user: User):
+    user_email = str(getattr(current_user, "email", "") or "").strip()
+
+    if not user_email:
+        return []
+
+    existing_customers = stripe.Customer.list(email=user_email, limit=100)
+
+    matched_customers = []
+    for customer in existing_customers.data:
+        customer_email = str(getattr(customer, "email", "") or "").strip().lower()
+        if customer_email == user_email.lower():
+            matched_customers.append(customer)
+
+    return matched_customers
+
+
 def _cancel_other_active_subscriptions_for_customer(
     stripe_customer_id: str,
     keep_subscription_id: str | None = None,
@@ -107,6 +124,80 @@ def _cancel_other_active_subscriptions_for_customer(
     }
 
 
+def _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
+    current_user: User,
+):
+    """
+    After a successful one-time license purchase, the user must not keep any
+    recurring Stripe subscription.
+
+    This cancels all billable recurring subscriptions found for the user's
+    Stripe customer email. It does NOT create a new Stripe customer.
+    """
+    customers = _get_existing_stripe_customers_for_user(current_user)
+
+    if not customers:
+        print("✅ ONE-TIME PURCHASE CLEANUP: No Stripe customers found.")
+        return {
+            "cancelled": 0,
+            "customers_checked": 0,
+            "statuses_checked": [],
+            "reason": "no_stripe_customer_found",
+        }
+
+    statuses_to_cancel = ["active", "trialing", "past_due", "unpaid"]
+    cancelled_count = 0
+    checked_count = 0
+    cancelled_subscription_ids = []
+
+    for customer in customers:
+        customer_id = str(getattr(customer, "id", "") or "").strip()
+        if not customer_id:
+            continue
+
+        for status in statuses_to_cancel:
+            subscriptions = stripe.Subscription.list(
+                customer=customer_id,
+                status=status,
+                limit=100,
+            )
+
+            for sub in subscriptions.data:
+                checked_count += 1
+                sub_id = str(getattr(sub, "id", "") or "").strip()
+
+                if not sub_id:
+                    continue
+
+                print(
+                    "🔥 ONE-TIME PURCHASE: CANCELLING RECURRING SUBSCRIPTION:",
+                    sub_id,
+                    "customer:",
+                    customer_id,
+                    "status:",
+                    status,
+                )
+
+                stripe.Subscription.delete(
+                    sub_id,
+                    prorate=False,
+                )
+
+                cancelled_count += 1
+                cancelled_subscription_ids.append(sub_id)
+
+    result = {
+        "cancelled": cancelled_count,
+        "customers_checked": len(customers),
+        "subscriptions_checked": checked_count,
+        "statuses_checked": statuses_to_cancel,
+        "cancelled_subscription_ids": cancelled_subscription_ids,
+    }
+
+    print("✅ ONE-TIME PURCHASE SUBSCRIPTION CLEANUP RESULT:", result)
+    return result
+
+
 def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> bool:
     """
     Tenant-user add-on only must NOT create/update a Stripe subscription.
@@ -127,6 +218,34 @@ def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> b
         )
     except Exception:
         return False
+
+
+def _is_one_time_license_payment(metadata: dict) -> bool:
+    """
+    True only for real one-time license purchases.
+
+    Tenant-user add-on only checkout is also a one-time Stripe payment, but it
+    must NOT cancel recurring subscriptions.
+    """
+    billing_type = str(metadata.get("billing_type") or "").strip().lower()
+    checkout_type = str(metadata.get("checkout_type") or "").strip().lower()
+    force_one_time_payment = (
+        str(metadata.get("force_one_time_payment") or "").strip().lower() == "true"
+    )
+    do_not_create_subscription = (
+        str(metadata.get("do_not_create_subscription") or "").strip().lower() == "true"
+    )
+
+    if checkout_type == "tenant_user_addon_only":
+        return False
+
+    if force_one_time_payment and do_not_create_subscription:
+        return False
+
+    if billing_type != "one_time":
+        return False
+
+    return True
 
 
 def _build_one_time_tenant_user_addon_line_items(ctx: dict, extra_tenant_users: int):
@@ -617,6 +736,24 @@ def apply_checkout_session(
         metadata=metadata,
     )
 
+    if _is_one_time_license_payment(metadata):
+        try:
+            cleanup_result = _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
+                current_user=current_user,
+            )
+
+            if isinstance(apply_result, dict):
+                apply_result["stripe_one_time_cleanup"] = cleanup_result
+
+        except stripe.error.StripeError as e:
+            print("❌ Stripe one-time cleanup failed after payment:", str(e))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Stripe one-time cleanup failed: {str(e)}",
+            )
+
+        return apply_result
+
     if new_subscription_id:
         try:
             new_subscription = stripe.Subscription.retrieve(new_subscription_id)
@@ -680,8 +817,26 @@ def apply_payment(
             detail="This payment does not belong to the authenticated user.",
         )
 
-    return _apply_payment_effects(
+    apply_result = _apply_payment_effects(
         db=db,
         payment_intent_id=payment_intent_id,
         metadata=metadata,
     )
+
+    if _is_one_time_license_payment(metadata):
+        try:
+            cleanup_result = _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
+                current_user=current_user,
+            )
+
+            if isinstance(apply_result, dict):
+                apply_result["stripe_one_time_cleanup"] = cleanup_result
+
+        except stripe.error.StripeError as e:
+            print("❌ Stripe one-time cleanup failed after payment:", str(e))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Stripe one-time cleanup failed: {str(e)}",
+            )
+
+    return apply_result
