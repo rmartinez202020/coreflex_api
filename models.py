@@ -10,6 +10,8 @@ from sqlalchemy import (
     Boolean,
     UniqueConstraint,
     Index,
+    Numeric,
+    JSON,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
