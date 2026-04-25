@@ -138,7 +138,7 @@ def _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
             "reason": "no_stripe_customer_found",
         }
 
-    statuses_to_cancel = ["active", "trialing", "past_due", "unpaid"]
+    statuses_to_cancel = ["active", "trialing", "past_due", "unpaid", "incomplete"]
     cancelled_count = 0
     checked_count = 0
     cancelled_subscription_ids = []
@@ -426,6 +426,14 @@ def create_checkout_session(
     else:
         checkout_mode, line_items = _build_checkout_line_items(ctx, billing_type)
 
+    # ✅ HARD SAFETY LOCK:
+    # One-Time License must NEVER create a Stripe subscription.
+    # Monthly must use subscription mode unless this is tenant-user add-on only.
+    if billing_type == "one_time":
+        checkout_mode = "payment"
+    elif billing_type == "monthly" and not is_tenant_user_addon_only:
+        checkout_mode = "subscription"
+
     if not line_items:
         raise HTTPException(
             status_code=400,
@@ -436,15 +444,15 @@ def create_checkout_session(
         str(getattr(current_user, "email", "") or "").strip() or None
     )
 
-    # ✅ IMPORTANT:
-    # Stripe client_reference_id has a 200-character limit.
-    # Keep it short. Full billing details are already stored in metadata.
-    client_reference_id = f"uid={current_user.id};plan={plan_key}"
+    client_reference_id = (
+        f"uid={current_user.id};plan={plan_key};billing_type={billing_type}"
+    )
 
     try:
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
         print("🔥 IS TENANT USER ADDON ONLY:", is_tenant_user_addon_only)
-        print("🔥 CHECKOUT MODE:", checkout_mode)
+        print("🔥 BILLING TYPE:", billing_type)
+        print("🔥 FINAL CHECKOUT MODE:", checkout_mode)
         print("🔥 LINE ITEMS:", line_items)
         print("🔥 CLIENT REFERENCE ID:", client_reference_id)
 
@@ -464,6 +472,16 @@ def create_checkout_session(
                 "receipt_email": checkout_customer_email,
                 "metadata": ctx["metadata"],
             }
+
+            # ✅ Extra protection: payment mode must not send subscription data.
+            checkout_kwargs.pop("subscription_data", None)
+            checkout_kwargs.pop("customer", None)
+
+            print("✅ PAYMENT CHECKOUT LOCKED")
+            print("   reason:", "one_time" if billing_type == "one_time" else "addon_only")
+            print("   mode:", checkout_kwargs.get("mode"))
+            print("   payment_intent_data.metadata:", ctx["metadata"])
+
         else:
             stripe_customer = _get_or_create_stripe_customer_for_user(current_user)
 
@@ -479,11 +497,20 @@ def create_checkout_session(
                 ),
             }
 
+            # ✅ Extra protection: subscription mode must not send payment_intent_data.
+            checkout_kwargs.pop("customer_email", None)
+            checkout_kwargs.pop("payment_intent_data", None)
+
+            print("✅ SUBSCRIPTION CHECKOUT LOCKED")
+            print("   mode:", checkout_kwargs.get("mode"))
+            print("   subscription_data.metadata:", ctx["metadata"])
+
         session = stripe.checkout.Session.create(**checkout_kwargs)
 
         print("✅ CHECKOUT SESSION CREATED")
         print("   session_id:", session.id)
         print("   checkout_mode:", checkout_mode)
+        print("   stripe_session_mode:", getattr(session, "mode", None))
         print(
             "   session_metadata_immediate:",
             _safe_metadata_dict(getattr(session, "metadata", None)),
@@ -537,6 +564,7 @@ def create_checkout_session(
 
         print("✅ VERIFIED STRIPE OBJECTS AFTER CREATE")
         print("   verified_session_id:", getattr(verified_session, "id", None))
+        print("   verified_session_mode:", getattr(verified_session, "mode", None))
         print("   verified_session_metadata:", verified_session_metadata)
         print("   verified_client_reference_id:", verified_client_reference_id)
         print("   verified_payment_intent_id:", verified_payment_intent_id)
@@ -546,11 +574,24 @@ def create_checkout_session(
         print("   verified_subscription_metadata:", verified_subscription_metadata)
         print("   verified_payment_intent_metadata:", verified_intent_metadata)
 
+        if billing_type == "one_time" and getattr(verified_session, "mode", None) != "payment":
+            raise HTTPException(
+                status_code=500,
+                detail="Safety lock failed: one-time checkout was not created in payment mode.",
+            )
+
+        if billing_type == "one_time" and verified_subscription_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Safety lock failed: one-time checkout created a subscription.",
+            )
+
         return {
             "ok": True,
             "checkoutSessionId": session.id,
             "url": session.url,
             "checkoutMode": checkout_mode,
+            "stripeSessionMode": getattr(verified_session, "mode", None),
             "isTenantUserAddonOnly": is_tenant_user_addon_only,
             "clientReferenceId": client_reference_id,
             "planAmount": decimal_to_float_2(ctx["plan_amount_usd"]),
@@ -562,6 +603,7 @@ def create_checkout_session(
             "taxLabel": "NJ Sales Tax",
             "total": decimal_to_float_2(ctx["total_usd"]),
         }
+
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
@@ -583,6 +625,11 @@ def get_checkout_session(
         raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
     metadata = _safe_metadata_dict(getattr(session, "metadata", None))
+    if not metadata:
+        metadata = _metadata_from_client_reference_id(
+            getattr(session, "client_reference_id", None)
+        )
+
     session_user_id = str(metadata.get("user_id") or "").strip()
 
     if session_user_id and session_user_id != str(current_user.id):
@@ -655,7 +702,10 @@ def apply_checkout_session(
     payment_intent_id = resolved_payment["payment_intent_id"]
     new_subscription_id = str(resolved_payment["subscription_id"] or "").strip()
 
-    if not payment_intent_id:
+    session_mode = str(getattr(session, "mode", "") or "").strip().lower()
+    is_payment_mode = session_mode == "payment"
+
+    if not payment_intent_id and is_payment_mode:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -665,26 +715,35 @@ def apply_checkout_session(
             ),
         )
 
-    try:
-        intent = stripe.PaymentIntent.retrieve(payment_intent_id)
-    except stripe.error.StripeError as e:
-        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+    intent = None
+    intent_metadata = {}
 
-    if not intent:
-        raise HTTPException(status_code=404, detail="PaymentIntent not found.")
+    if payment_intent_id:
+        try:
+            intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
 
-    intent_status = str(getattr(intent, "status", "") or "").strip().lower()
-    if intent_status != "succeeded":
-        raise HTTPException(
-            status_code=400,
-            detail="PaymentIntent is not completed yet.",
-        )
+        if not intent:
+            raise HTTPException(status_code=404, detail="PaymentIntent not found.")
+
+        intent_status = str(getattr(intent, "status", "") or "").strip().lower()
+        if intent_status != "succeeded":
+            raise HTTPException(
+                status_code=400,
+                detail="PaymentIntent is not completed yet.",
+            )
+
+        intent_metadata = _safe_metadata_dict(getattr(intent, "metadata", None))
 
     metadata = _merge_metadata(
         session_metadata,
-        _safe_metadata_dict(getattr(intent, "metadata", None)),
+        intent_metadata,
     )
     metadata = _normalize_payment_metadata(db, metadata)
+
+    if not str(metadata.get("user_id") or "").strip().isdigit():
+        metadata = _normalize_payment_metadata(db, session_metadata)
 
     intent_user_id = str(metadata.get("user_id") or "").strip()
     if intent_user_id != str(current_user.id):
