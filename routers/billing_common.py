@@ -188,11 +188,23 @@ def _metadata_from_client_reference_id(value: str) -> dict:
         part = str(part or "").strip()
         if not part or "=" not in part:
             continue
+
         key, raw_value = part.split("=", 1)
         key = str(key or "").strip()
         raw_value = str(raw_value or "").strip()
+
         if key and raw_value:
             parsed[key] = raw_value
+
+    if parsed.get("uid") and not parsed.get("user_id"):
+        parsed["user_id"] = parsed["uid"]
+
+    if parsed.get("plan") and not parsed.get("plan_key"):
+        parsed["plan_key"] = parsed["plan"]
+
+    if parsed.get("plan_key") and not parsed.get("billing_type"):
+        parsed["billing_type"] = "one_time"
+
     return parsed
 
 
@@ -475,13 +487,6 @@ def _apply_payment_effects(
     print("   already_applied:", already_applied)
     print("   current_limit:", current_limit)
 
-    # ✅ IMPORTANT:
-    # One-time license purchase is a real paid plan purchase even when the
-    # current monthly plan key is the same. It must:
-    # - update/keep the user on that plan
-    # - set renewal_date to None
-    # - save a confirmed one-time acceptance row
-    # - allow billing_checkout.py to cancel recurring Stripe subscriptions after apply
     is_one_time_license_purchase = billing_type == "one_time"
 
     if is_one_time_license_purchase:
@@ -512,10 +517,6 @@ def _apply_payment_effects(
         added_from_plan = max(0, target_plan_tenant_amount - current_limit)
         added_from_addons = extra_tenant_users
 
-        # ✅ CRITICAL FIX:
-        # A real plan change/upgrade starts a new CoreFlex billing cycle.
-        # This prevents an old active_date from making the cancel expiration
-        # show the old plan date, like May 15 after upgrading on Apr 25/26.
         subscription.active_date = now_utc
 
         if billing_type == "monthly":
@@ -545,8 +546,6 @@ def _apply_payment_effects(
             added_from_plan = 0
             added_from_addons = extra_tenant_users
 
-        # ✅ Same-plan add-ons must NOT reset active_date.
-        # ✅ Reactivation must NOT reset active_date.
         if not getattr(subscription, "active_date", None):
             subscription.active_date = now_utc
 
