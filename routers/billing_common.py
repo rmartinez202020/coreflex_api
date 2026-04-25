@@ -272,6 +272,96 @@ def _mark_payment_intent_applied(payment_intent_id: str, metadata: dict) -> None
         )
 
 
+def _save_one_time_license_acceptance(
+    db: Session,
+    *,
+    user_id: int,
+    plan_key: str,
+    payment_intent_id: str,
+    confirmed_at,
+):
+    plan_key = str(plan_key or "").strip().lower()
+    payment_intent_id = str(payment_intent_id or "").strip()
+
+    if not user_id or not plan_key:
+        print("⚠️ SKIPPING ONE-TIME ACCEPTANCE SAVE: missing user_id or plan_key")
+        return None
+
+    existing = None
+
+    if payment_intent_id:
+        existing = (
+            db.query(SubscriptionAgreementAcceptance)
+            .filter(
+                SubscriptionAgreementAcceptance.user_id == user_id,
+                SubscriptionAgreementAcceptance.payment_intent_id == payment_intent_id,
+            )
+            .first()
+        )
+
+    if not existing:
+        existing = (
+            db.query(SubscriptionAgreementAcceptance)
+            .filter(
+                SubscriptionAgreementAcceptance.user_id == user_id,
+                SubscriptionAgreementAcceptance.plan_key == plan_key,
+                SubscriptionAgreementAcceptance.billing_type == "one_time",
+                SubscriptionAgreementAcceptance.confirmed.is_(True),
+            )
+            .order_by(SubscriptionAgreementAcceptance.id.desc())
+            .first()
+        )
+
+    if existing:
+        existing.plan_key = plan_key
+        existing.billing_type = "one_time"
+        existing.agreement_version = getattr(existing, "agreement_version", None) or "v1"
+        existing.confirmed = True
+        existing.confirmed_at = getattr(existing, "confirmed_at", None) or confirmed_at
+
+        if hasattr(existing, "payment_intent_id") and payment_intent_id:
+            existing.payment_intent_id = payment_intent_id
+
+        db.commit()
+        db.refresh(existing)
+
+        print("✅ ONE-TIME LICENSE ACCEPTANCE ALREADY EXISTS / UPDATED")
+        print("   id:", getattr(existing, "id", None))
+        print("   user_id:", getattr(existing, "user_id", None))
+        print("   plan_key:", getattr(existing, "plan_key", None))
+        print("   billing_type:", getattr(existing, "billing_type", None))
+        print("   confirmed_at:", getattr(existing, "confirmed_at", None))
+        print("   payment_intent_id:", getattr(existing, "payment_intent_id", None))
+
+        return existing
+
+    row = SubscriptionAgreementAcceptance(
+        user_id=user_id,
+        plan_key=plan_key,
+        billing_type="one_time",
+        agreement_version="v1",
+        confirmed=True,
+        confirmed_at=confirmed_at,
+    )
+
+    if hasattr(row, "payment_intent_id") and payment_intent_id:
+        row.payment_intent_id = payment_intent_id
+
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    print("✅ ONE-TIME LICENSE ACCEPTANCE SAVED")
+    print("   id:", getattr(row, "id", None))
+    print("   user_id:", getattr(row, "user_id", None))
+    print("   plan_key:", getattr(row, "plan_key", None))
+    print("   billing_type:", getattr(row, "billing_type", None))
+    print("   confirmed_at:", getattr(row, "confirmed_at", None))
+    print("   payment_intent_id:", getattr(row, "payment_intent_id", None))
+
+    return row
+
+
 def _apply_payment_effects(
     db: Session,
     *,
@@ -385,7 +475,36 @@ def _apply_payment_effects(
     print("   already_applied:", already_applied)
     print("   current_limit:", current_limit)
 
-    if plan_is_changing or not is_current_plan:
+    # ✅ IMPORTANT:
+    # One-time license purchase is a real paid plan purchase even when the
+    # current monthly plan key is the same. It must:
+    # - update/keep the user on that plan
+    # - set renewal_date to None
+    # - save a confirmed one-time acceptance row
+    # - allow billing_checkout.py to cancel recurring Stripe subscriptions after apply
+    is_one_time_license_purchase = billing_type == "one_time"
+
+    if is_one_time_license_purchase:
+        new_plan_key = plan_key
+        new_device_limit = base_device_limit
+        new_tenant_limit = target_plan_tenant_amount + extra_tenant_users
+
+        added_from_plan = max(0, target_plan_tenant_amount - current_limit)
+        added_from_addons = extra_tenant_users
+
+        subscription.active_date = now_utc
+        subscription.renewal_date = None
+
+        if hasattr(subscription, "cancel_at_period_end"):
+            subscription.cancel_at_period_end = False
+
+        if hasattr(subscription, "subscription_status"):
+            subscription.subscription_status = "paid"
+
+        if hasattr(subscription, "status"):
+            subscription.status = "Paid"
+
+    elif plan_is_changing or not is_current_plan:
         new_plan_key = plan_key
         new_device_limit = base_device_limit
         new_tenant_limit = target_plan_tenant_amount + extra_tenant_users
@@ -448,6 +567,7 @@ def _apply_payment_effects(
         base_device_limit=base_device_limit,
         plan_is_changing=plan_is_changing,
         already_applied=already_applied,
+        is_one_time_license_purchase=is_one_time_license_purchase,
         new_plan_key=new_plan_key,
         new_tenant_limit=new_tenant_limit,
         new_device_limit=new_device_limit,
@@ -483,6 +603,28 @@ def _apply_payment_effects(
 
     db.refresh(subscription)
 
+    one_time_acceptance = None
+
+    if is_one_time_license_purchase:
+        try:
+            one_time_acceptance = _save_one_time_license_acceptance(
+                db=db,
+                user_id=user_id,
+                plan_key=plan_key,
+                payment_intent_id=payment_intent_id,
+                confirmed_at=now_utc,
+            )
+        except Exception:
+            db.rollback()
+            print("❌ FAILED TO SAVE ONE-TIME LICENSE ACCEPTANCE")
+            traceback.print_exc()
+            raise
+
+        try:
+            db.refresh(subscription)
+        except Exception:
+            pass
+
     print("🔥 DB SUBSCRIPTION AFTER UPDATE")
     print("   subscription.id:", getattr(subscription, "id", None))
     print("   subscription.user_id:", getattr(subscription, "user_id", None))
@@ -503,6 +645,8 @@ def _apply_payment_effects(
         "alreadyApplied": already_applied,
         "added": added_from_plan + added_from_addons,
         "planKey": str(subscription.plan_key or "free").strip().lower(),
+        "billingType": billing_type,
+        "isOneTimeLicensePurchase": is_one_time_license_purchase,
         "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
         "tenantUsersUsed": None,
         "activeDate": subscription.active_date.isoformat()
@@ -510,6 +654,12 @@ def _apply_payment_effects(
         else None,
         "renewalDate": subscription.renewal_date.isoformat()
         if getattr(subscription, "renewal_date", None)
+        else None,
+        "oneTimeAcceptanceId": getattr(one_time_acceptance, "id", None)
+        if one_time_acceptance
+        else None,
+        "oneTimePaidAt": getattr(one_time_acceptance, "confirmed_at", None).isoformat()
+        if one_time_acceptance and getattr(one_time_acceptance, "confirmed_at", None)
         else None,
         "message": "Payment applied successfully.",
     }
