@@ -165,6 +165,7 @@ def _cancel_all_billable_subscriptions_for_customer(customer_id: str):
 
     statuses = ["active", "trialing", "past_due", "unpaid", "incomplete"]
     cancelled = 0
+    cancelled_subscription_ids = []
 
     for status in statuses:
         subs = stripe.Subscription.list(customer=customer_id, status=status, limit=100)
@@ -175,6 +176,8 @@ def _cancel_all_billable_subscriptions_for_customer(customer_id: str):
                 continue
 
             print("🔥 ONE-TIME PURCHASE: CANCELING MONTHLY SUBSCRIPTION:", sid)
+            print("   cleanup_mode: customer_id")
+            print("   customer_id:", customer_id)
 
             stripe.Subscription.delete(
                 sid,
@@ -182,9 +185,132 @@ def _cancel_all_billable_subscriptions_for_customer(customer_id: str):
             )
 
             cancelled += 1
+            cancelled_subscription_ids.append(sid)
 
-    result = {"ok": True, "customer_id": customer_id, "cancelled": cancelled}
+    result = {
+        "ok": True,
+        "customer_id": customer_id,
+        "cancelled": cancelled,
+        "cancelled_subscription_ids": cancelled_subscription_ids,
+    }
     print("✅ ONE-TIME MONTHLY CLEANUP RESULT:", result)
+    return result
+
+
+def _cancel_all_billable_subscriptions_for_user_email(user_email: str):
+    user_email = str(user_email or "").strip().lower()
+    if not user_email:
+        return {"ok": True, "cancelled": 0, "reason": "missing_user_email"}
+
+    statuses = ["active", "trialing", "past_due", "unpaid", "incomplete"]
+    cancelled = 0
+    cancelled_subscription_ids = []
+    customer_ids = []
+
+    customers = stripe.Customer.list(email=user_email, limit=100)
+
+    for customer in customers.data:
+        customer_id = str(getattr(customer, "id", "") or "").strip()
+        if not customer_id:
+            continue
+
+        customer_ids.append(customer_id)
+
+        for status in statuses:
+            subs = stripe.Subscription.list(
+                customer=customer_id,
+                status=status,
+                limit=100,
+            )
+
+            for sub in subs.data:
+                sid = str(getattr(sub, "id", "") or "").strip()
+                if not sid:
+                    continue
+
+                print("🔥 ONE-TIME PURCHASE: CANCELING MONTHLY SUBSCRIPTION:", sid)
+                print("   cleanup_mode: user_email")
+                print("   user_email:", user_email)
+                print("   customer_id:", customer_id)
+
+                stripe.Subscription.delete(
+                    sid,
+                    prorate=False,
+                )
+
+                cancelled += 1
+                cancelled_subscription_ids.append(sid)
+
+    result = {
+        "ok": True,
+        "user_email": user_email,
+        "customer_ids": customer_ids,
+        "cancelled": cancelled,
+        "cancelled_subscription_ids": cancelled_subscription_ids,
+    }
+
+    print("✅ ONE-TIME EMAIL CLEANUP RESULT:", result)
+    return result
+
+
+def _cancel_monthly_subscriptions_after_one_time_purchase(
+    *,
+    user_email: str,
+    customer_id: str,
+):
+    email_result = None
+    customer_result = None
+
+    try:
+        email_result = _cancel_all_billable_subscriptions_for_user_email(user_email)
+    except Exception as e:
+        print("❌ FAILED ONE-TIME EMAIL MONTHLY CLEANUP:", e)
+        email_result = {
+            "ok": False,
+            "reason": "email_cleanup_failed",
+            "error": str(e),
+        }
+
+    try:
+        customer_result = _cancel_all_billable_subscriptions_for_customer(customer_id)
+    except Exception as e:
+        print("❌ FAILED ONE-TIME CUSTOMER MONTHLY CLEANUP:", e)
+        customer_result = {
+            "ok": False,
+            "reason": "customer_cleanup_failed",
+            "error": str(e),
+        }
+
+    total_cancelled = 0
+    cancelled_subscription_ids = []
+
+    for item in [email_result, customer_result]:
+        if not isinstance(item, dict):
+            continue
+
+        try:
+            total_cancelled += int(item.get("cancelled") or 0)
+        except Exception:
+            pass
+
+        ids = item.get("cancelled_subscription_ids") or []
+        if isinstance(ids, list):
+            for sid in ids:
+                sid = str(sid or "").strip()
+                if sid and sid not in cancelled_subscription_ids:
+                    cancelled_subscription_ids.append(sid)
+
+    result = {
+        "ok": True,
+        "user_email": str(user_email or "").strip().lower(),
+        "customer_id": str(customer_id or "").strip(),
+        "cancelled": total_cancelled,
+        "cancelled_subscription_ids": cancelled_subscription_ids,
+        "email_cleanup": email_result,
+        "customer_cleanup": customer_result,
+    }
+
+    print("✅ ONE-TIME FINAL MONTHLY CLEANUP RESULT:", result)
     return result
 
 
@@ -659,8 +785,9 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
         if str(metadata.get("billing_type") or "").strip().lower() == "one_time":
             try:
-                cleanup_result = _cancel_all_billable_subscriptions_for_customer(
-                    customer_id
+                cleanup_result = _cancel_monthly_subscriptions_after_one_time_purchase(
+                    user_email=metadata.get("user_email"),
+                    customer_id=customer_id,
                 )
                 if isinstance(result, dict):
                     result["stripe_one_time_cleanup"] = cleanup_result
@@ -777,8 +904,9 @@ def _process_checkout_session_completed(db: Session, session_obj):
 
     if str(metadata.get("billing_type") or "").strip().lower() == "one_time":
         try:
-            cleanup_result = _cancel_all_billable_subscriptions_for_customer(
-                customer_id
+            cleanup_result = _cancel_monthly_subscriptions_after_one_time_purchase(
+                user_email=metadata.get("user_email"),
+                customer_id=customer_id,
             )
             if isinstance(result, dict):
                 result["stripe_one_time_cleanup"] = cleanup_result
@@ -856,8 +984,9 @@ def _process_payment_intent_succeeded(db: Session, intent_obj):
 
     if str(metadata.get("billing_type") or "").strip().lower() == "one_time":
         try:
-            cleanup_result = _cancel_all_billable_subscriptions_for_customer(
-                customer_id
+            cleanup_result = _cancel_monthly_subscriptions_after_one_time_purchase(
+                user_email=metadata.get("user_email"),
+                customer_id=customer_id,
             )
             if isinstance(result, dict):
                 result["stripe_one_time_cleanup"] = cleanup_result
