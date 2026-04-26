@@ -56,6 +56,10 @@ def _resolve_plan_and_addon_for_purchase(
     billing_type: str,
     extra_tenant_users: int,
 ):
+    plan_key = str(plan_key or "").strip().lower()
+    billing_type = str(billing_type or "").strip().lower()
+    extra_tenant_users = max(0, int(extra_tenant_users or 0))
+
     plan = (
         db.query(BillingPlan)
         .filter(
@@ -68,13 +72,23 @@ def _resolve_plan_and_addon_for_purchase(
     if not plan:
         raise HTTPException(status_code=404, detail="Billing plan not found.")
 
+    # ✅ IMPORTANT FIX:
+    # Free + extra tenant-user checkout is built using the Free monthly plan context,
+    # but the tenant-user add-on purchase itself is a one-time payment.
+    # So for free add-on purchases, always look up the one_time tenant_user add-on.
+    addon_billing_type = (
+        "one_time"
+        if plan_key == "free" and extra_tenant_users > 0
+        else billing_type
+    )
+
     addon = None
     if extra_tenant_users > 0:
         addon = (
             db.query(BillingAddon)
             .filter(
                 BillingAddon.addon_key == "tenant_user",
-                BillingAddon.billing_type == billing_type,
+                BillingAddon.billing_type == addon_billing_type,
                 BillingAddon.is_active.is_(True),
             )
             .first()
@@ -82,7 +96,7 @@ def _resolve_plan_and_addon_for_purchase(
         if not addon:
             raise HTTPException(
                 status_code=404,
-                detail="Tenant-user addon not found.",
+                detail=f"Tenant-user addon not found for billing_type={addon_billing_type}.",
             )
 
     return plan, addon
@@ -112,9 +126,6 @@ def _build_purchase_context(
 
     plan_price_usd = to_money_decimal(plan.price_usd)
 
-    # ✅ IMPORTANT FIX:
-    # Monthly current plan = no plan charge.
-    # One-time license = charge the license even if it matches the current monthly plan.
     if billing_type == "monthly" and is_current_plan:
         plan_amount_usd = Decimal("0.00")
     elif billing_type == "one_time":
