@@ -620,114 +620,130 @@ async def stripe_webhook(
             print("   deleted_subscription_id:", deleted_subscription_id)
             print("   customer_id:", customer_id)
 
-            active_subscription = _find_active_subscription_for_customer(
-                customer_id=customer_id,
-                deleted_subscription_id=deleted_subscription_id,
-            )
-
-            if active_subscription:
-                active_subscription_id = str(
-                    getattr(active_subscription, "id", "") or ""
-                ).strip()
-
-                print("✅ CUSTOMER STILL HAS AN ACTIVE SUBSCRIPTION")
-                print("   active_subscription_id:", active_subscription_id)
-                print("   deleted_subscription_id:", deleted_subscription_id)
-                print("   ACTION: Do NOT downgrade to Free.")
-
-                return_value = _update_user_subscription_from_stripe_subscription(
-                    db=db,
-                    stripe_subscription_obj=active_subscription,
-                )
-
+            if not deleted_subscription_id:
                 return_value = {
-                    **(return_value or {}),
-                    "ignoredDeletedSubscription": True,
-                    "reason": "customer_has_another_active_subscription",
-                    "deletedSubscriptionId": deleted_subscription_id,
-                    "keptSubscriptionId": active_subscription_id,
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "missing_deleted_subscription_id",
                 }
 
-                _log_debug(
-                    "✅ WEBHOOK customer.subscription.deleted IGNORED OLD SUBSCRIPTION",
-                    event_id=event_id,
-                    result=return_value,
+            else:
+                # ✅ SAFER RULE:
+                # Only act on the deleted subscription if that exact subscription_id
+                # is still the current linked subscription in our DB.
+                #
+                # Do NOT fallback by customer_id here.
+                # Why? During a one-time purchase, we intentionally cancel the old
+                # monthly Stripe subscription. Stripe then sends customer.subscription.deleted.
+                # If we fallback by customer_id, we can accidentally find the user's
+                # one-time subscription row and downgrade it to Free.
+                sub_row = (
+                    db.query(UserSubscription)
+                    .filter(
+                        UserSubscription.stripe_subscription_id
+                        == deleted_subscription_id
+                    )
+                    .first()
                 )
 
-            else:
-                print("🔥 NO OTHER ACTIVE SUBSCRIPTION FOUND")
-                print("   ACTION: downgrade user to Free")
+                if not sub_row:
+                    print("✅ OLD/UNLINKED SUBSCRIPTION DELETE IGNORED")
+                    print("   deleted_subscription_id:", deleted_subscription_id)
+                    print("   reason: deleted subscription is no longer linked in DB")
 
-                sub_row = None
-
-                if deleted_subscription_id:
-                    sub_row = (
-                        db.query(UserSubscription)
-                        .filter(
-                            UserSubscription.stripe_subscription_id
-                            == deleted_subscription_id
-                        )
-                        .first()
-                    )
-
-                if not sub_row and customer_id:
-                    sub_row = (
-                        db.query(UserSubscription)
-                        .filter(UserSubscription.stripe_customer_id == customer_id)
-                        .first()
-                    )
-
-                if sub_row:
-                    print("🔥 DOWNGRADING USER TO FREE PLAN")
-                    print("   user_id:", sub_row.user_id)
-                    print("   old_plan_key:", sub_row.plan_key)
-                    print("   old_device_limit:", sub_row.device_limit)
-                    print("   old_tenants_users_limit:", sub_row.tenants_users_limit)
-
-                    sub_row.plan_key = "free"
-                    sub_row.device_limit = 1
-                    sub_row.tenants_users_limit = 1
-                    sub_row.subscription_status = "canceled"
-                    sub_row.is_active = True
-                    sub_row.stripe_subscription_id = None
-                    sub_row.stripe_price_id = None
-                    sub_row.cancel_at_period_end = False
-                    sub_row.current_period_start = None
-                    sub_row.current_period_end = None
-                    sub_row.renewal_date = None
-
-                    db.commit()
-                    db.refresh(sub_row)
-
-                    print("✅ USER DOWNGRADED TO FREE")
-                    print("   user_id:", sub_row.user_id)
-                    print("   new_plan_key:", sub_row.plan_key)
-                    print("   new_device_limit:", sub_row.device_limit)
-                    print("   new_tenants_users_limit:", sub_row.tenants_users_limit)
-
-                    return_value = {
-                        "ok": True,
-                        "downgradedToFree": True,
-                        "planKey": sub_row.plan_key,
-                        "deviceLimit": sub_row.device_limit,
-                        "tenantsUsersLimit": sub_row.tenants_users_limit,
-                    }
-                else:
-                    print(
-                        "⚠️ customer.subscription.deleted: could not find subscription row to downgrade"
-                    )
                     return_value = {
                         "ok": True,
                         "ignored": True,
-                        "downgradedToFree": False,
-                        "reason": "subscription_row_not_found_for_downgrade",
+                        "reason": "deleted_subscription_not_current_db_subscription",
+                        "deletedSubscriptionId": deleted_subscription_id,
                     }
 
-                _log_debug(
-                    "✅ WEBHOOK customer.subscription.deleted PROCESSED",
-                    event_id=event_id,
-                    result=return_value,
-                )
+                else:
+                    billing_type = str(
+                        getattr(sub_row, "billing_type", "") or ""
+                    ).strip().lower()
+
+                    plan_key = str(
+                        getattr(sub_row, "plan_key", "") or ""
+                    ).strip().lower()
+
+                    print("🔎 MATCHED DELETED SUBSCRIPTION TO DB ROW")
+                    print("   user_id:", sub_row.user_id)
+                    print("   plan_key:", plan_key)
+                    print("   billing_type:", billing_type)
+                    print("   deleted_subscription_id:", deleted_subscription_id)
+
+                    # ✅ Protect one-time users from being downgraded when the old
+                    # monthly subscription deletion event arrives.
+                    if billing_type == "one_time":
+                        print("✅ ONE-TIME USER PROTECTED FROM DOWNGRADE")
+                        print("   user_id:", sub_row.user_id)
+                        print("   deleted_subscription_id:", deleted_subscription_id)
+
+                        sub_row.subscription_status = "active"
+                        sub_row.is_active = True
+                        sub_row.stripe_subscription_id = None
+                        sub_row.stripe_price_id = None
+                        sub_row.cancel_at_period_end = False
+                        sub_row.current_period_start = None
+                        sub_row.current_period_end = None
+                        sub_row.last_invoice_id = None
+
+                        db.commit()
+                        db.refresh(sub_row)
+
+                        return_value = {
+                            "ok": True,
+                            "ignored": True,
+                            "protectedOneTimeUser": True,
+                            "reason": "one_time_purchase_should_not_downgrade_to_free",
+                            "userId": sub_row.user_id,
+                            "planKey": sub_row.plan_key,
+                            "billingType": billing_type,
+                        }
+
+                    else:
+                        print("🔥 MONTHLY SUBSCRIPTION DELETED - DOWNGRADING USER TO FREE")
+                        print("   user_id:", sub_row.user_id)
+                        print("   old_plan_key:", sub_row.plan_key)
+                        print("   old_device_limit:", sub_row.device_limit)
+                        print("   old_tenants_users_limit:", sub_row.tenants_users_limit)
+
+                        sub_row.plan_key = "free"
+                        sub_row.device_limit = 1
+                        sub_row.tenants_users_limit = 1
+                        sub_row.subscription_status = "canceled"
+                        sub_row.is_active = True
+                        sub_row.stripe_subscription_id = None
+                        sub_row.stripe_price_id = None
+                        sub_row.cancel_at_period_end = False
+                        sub_row.current_period_start = None
+                        sub_row.current_period_end = None
+                        sub_row.last_invoice_id = None
+                        sub_row.renewal_date = None
+
+                        db.commit()
+                        db.refresh(sub_row)
+
+                        print("✅ USER DOWNGRADED TO FREE")
+                        print("   user_id:", sub_row.user_id)
+                        print("   new_plan_key:", sub_row.plan_key)
+                        print("   new_device_limit:", sub_row.device_limit)
+                        print("   new_tenants_users_limit:", sub_row.tenants_users_limit)
+
+                        return_value = {
+                            "ok": True,
+                            "downgradedToFree": True,
+                            "planKey": sub_row.plan_key,
+                            "deviceLimit": sub_row.device_limit,
+                            "tenantsUsersLimit": sub_row.tenants_users_limit,
+                        }
+
+            _log_debug(
+                "✅ WEBHOOK customer.subscription.deleted PROCESSED",
+                event_id=event_id,
+                result=return_value,
+            )
 
         else:
             print("ℹ️ STRIPE WEBHOOK IGNORED EVENT TYPE:", event_type)
