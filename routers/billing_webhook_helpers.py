@@ -503,6 +503,8 @@ def _extract_checkout_session_data(session_obj):
     ).strip().lower()
 
     metadata = _safe_metadata_dict(getattr(session_obj, "metadata", None))
+
+    # ✅ Only fallback if Checkout Session metadata is completely empty.
     if not metadata:
         metadata = _metadata_from_client_reference_id(
             getattr(session_obj, "client_reference_id", None)
@@ -839,22 +841,11 @@ def _process_checkout_session_completed(db: Session, session_obj):
         customer_id=customer_id,
     )
 
+    # ✅ Preserve Checkout Session metadata and PaymentIntent metadata.
+    # Do NOT rebuild/override from client_reference_id when metadata already exists.
     metadata = _merge_metadata(session_metadata, intent_metadata)
-
-    if not metadata or not str(metadata.get("user_id") or "").strip():
-        client_ref = getattr(session_obj, "client_reference_id", None)
-        fallback = _metadata_from_client_reference_id(client_ref)
-
-        print("⚠️ FALLBACK USING client_reference_id:", client_ref)
-        print("⚠️ PARSED FALLBACK:", fallback)
-
-        metadata = _merge_metadata(metadata, fallback)
-
     metadata = _normalize_payment_metadata(db, metadata)
 
-    # ✅ IMPORTANT SAFER FALLBACK:
-    # If intent metadata was missing/incomplete but the Checkout Session metadata
-    # has the user_id, trust/re-normalize the Checkout Session metadata.
     if not str(metadata.get("user_id") or "").strip().isdigit():
         metadata = _normalize_payment_metadata(db, session_metadata)
 
