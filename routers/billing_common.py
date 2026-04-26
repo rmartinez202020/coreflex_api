@@ -537,14 +537,31 @@ def _apply_payment_effects(
         new_plan_key = current_plan_key
         new_device_limit = current_device_limit or base_device_limit
 
-        if already_applied:
+        if extra_tenant_users > 0:
+            expected_minimum_limit = target_plan_tenant_amount + extra_tenant_users
+
+            if already_applied:
+                # ✅ Reconcile failed/delayed DB update without blindly double-adding.
+                # Example: Free base limit 1 + purchased 1 = expected minimum 2.
+                # If DB still says 1, raise it to 2.
+                # If DB already says 2 or higher, do not add again.
+                if current_limit < expected_minimum_limit:
+                    new_tenant_limit = expected_minimum_limit
+                    added_from_plan = 0
+                    added_from_addons = max(0, new_tenant_limit - current_limit)
+                else:
+                    new_tenant_limit = current_limit
+                    added_from_plan = 0
+                    added_from_addons = 0
+            else:
+                # ✅ First application of add-on purchase.
+                new_tenant_limit = current_limit + extra_tenant_users
+                added_from_plan = 0
+                added_from_addons = extra_tenant_users
+        else:
             new_tenant_limit = current_limit
             added_from_plan = 0
             added_from_addons = 0
-        else:
-            new_tenant_limit = current_limit + extra_tenant_users
-            added_from_plan = 0
-            added_from_addons = extra_tenant_users
 
         if not getattr(subscription, "active_date", None):
             subscription.active_date = now_utc
