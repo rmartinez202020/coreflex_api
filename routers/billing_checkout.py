@@ -405,9 +405,21 @@ def create_checkout_session(
             detail="Payment amount must be greater than zero.",
         )
 
-    is_tenant_user_addon_only = _is_tenant_user_addon_only_checkout(
-        ctx=ctx,
-        extra_tenant_users=extra_tenant_users,
+    # ✅ HARD RULE:
+    # Free plan + tenant-user purchase is NOT a plan purchase.
+    # It must be treated as add-on only, because there is no
+    # free / one_time BillingPlan in the database.
+    is_forced_addon_only = (
+        plan_key == "free"
+        and extra_tenant_users > 0
+    )
+
+    is_tenant_user_addon_only = (
+        is_forced_addon_only
+        or _is_tenant_user_addon_only_checkout(
+            ctx=ctx,
+            extra_tenant_users=extra_tenant_users,
+        )
     )
 
     if is_tenant_user_addon_only:
@@ -450,6 +462,7 @@ def create_checkout_session(
 
     try:
         print("🔥 SENDING METADATA TO STRIPE:", ctx["metadata"])
+        print("🔥 IS FORCED ADDON ONLY:", is_forced_addon_only)
         print("🔥 IS TENANT USER ADDON ONLY:", is_tenant_user_addon_only)
         print("🔥 BILLING TYPE:", billing_type)
         print("🔥 FINAL CHECKOUT MODE:", checkout_mode)
@@ -478,7 +491,14 @@ def create_checkout_session(
             checkout_kwargs.pop("customer", None)
 
             print("✅ PAYMENT CHECKOUT LOCKED")
-            print("   reason:", "one_time" if billing_type == "one_time" else "addon_only")
+            print(
+                "   reason:",
+                "addon_only"
+                if is_tenant_user_addon_only
+                else "one_time"
+                if billing_type == "one_time"
+                else "payment",
+            )
             print("   mode:", checkout_kwargs.get("mode"))
             print("   payment_intent_data.metadata:", ctx["metadata"])
 
