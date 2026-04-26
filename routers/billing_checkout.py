@@ -191,8 +191,59 @@ def _cancel_all_billable_subscriptions_for_user_after_one_time_purchase(
     return result
 
 
+def _force_addon_metadata(
+    ctx: dict,
+    *,
+    current_user: User,
+    plan_key: str,
+    billing_type: str,
+    extra_tenant_users: int,
+):
+    user_email = str(getattr(current_user, "email", "") or "").strip()
+
+    ctx["metadata"] = {
+        **_safe_metadata_dict(ctx.get("metadata")),
+        "user_id": str(current_user.id),
+        "uid": str(current_user.id),
+        "user_email": user_email,
+        "plan_key": str(plan_key or "").strip().lower(),
+        "plan": str(plan_key or "").strip().lower(),
+        "billing_type": str(billing_type or "").strip().lower(),
+        "is_current_plan": "true",
+
+        # ✅ CRITICAL: both names are sent for compatibility.
+        "extra_tenant_users": str(int(extra_tenant_users or 0)),
+        "extraTenantUsers": str(int(extra_tenant_users or 0)),
+
+        # ✅ CRITICAL: both names are sent for compatibility.
+        "checkout_type": "tenant_user_addon_only",
+        "checkoutType": "tenant_user_addon_only",
+
+        "force_one_time_payment": "true",
+        "do_not_create_subscription": "true",
+
+        "plan_amount_usd": str(to_money_decimal(ctx.get("plan_amount_usd"))),
+        "addon_amount_usd": str(to_money_decimal(ctx.get("addon_amount_usd"))),
+        "subtotal_usd": str(to_money_decimal(ctx.get("subtotal_usd"))),
+        "tax_amount_usd": str(to_money_decimal(ctx.get("tax_amount_usd"))),
+        "total_usd": str(to_money_decimal(ctx.get("total_usd"))),
+        "tax_state": "NJ",
+        "tax_rate": str(ctx.get("tax_rate") or NJ_SALES_TAX_RATE),
+        "applied": "false",
+    }
+
+    return ctx
+
+
 def _is_tenant_user_addon_only_checkout(ctx: dict, extra_tenant_users: int) -> bool:
     try:
+        checkout_type = str(
+            _safe_metadata_dict(ctx.get("metadata")).get("checkout_type") or ""
+        ).strip().lower()
+
+        if checkout_type == "tenant_user_addon_only":
+            return True
+
         return (
             bool(ctx.get("is_current_plan")) is True
             and int(extra_tenant_users or 0) > 0
@@ -248,6 +299,8 @@ def _build_one_time_tenant_user_addon_line_items(ctx: dict, extra_tenant_users: 
                     "metadata": {
                         "coreflex_item_type": "tenant_user_addon",
                         "extra_tenant_users": str(int(extra_tenant_users or 0)),
+                        "extraTenantUsers": str(int(extra_tenant_users or 0)),
+                        "checkout_type": "tenant_user_addon_only",
                     },
                 },
                 "unit_amount": total_cents,
@@ -336,14 +389,13 @@ def create_payment_intent(
     billing_type = normalize_billing_type(payload.billingType)
     extra_tenant_users = max(0, int(payload.extraTenantUsers or 0))
 
-    # ✅ HARD RULE:
-    # Free + tenant-user purchase in One-Time tab is add-on only.
-    # Use monthly context so _build_purchase_context can find the Free plan.
-    context_billing_type = (
-        "monthly"
-        if plan_key == "free" and billing_type == "one_time" and extra_tenant_users > 0
-        else billing_type
+    is_forced_addon_only = (
+        plan_key == "free"
+        and billing_type == "one_time"
+        and extra_tenant_users > 0
     )
+
+    context_billing_type = "monthly" if is_forced_addon_only else billing_type
 
     ctx = _build_purchase_context(
         db=db,
@@ -353,14 +405,14 @@ def create_payment_intent(
         extra_tenant_users=extra_tenant_users,
     )
 
-    if context_billing_type != billing_type:
-        ctx["metadata"] = {
-            **ctx["metadata"],
-            "billing_type": billing_type,
-            "checkout_type": "tenant_user_addon_only",
-            "force_one_time_payment": "true",
-            "do_not_create_subscription": "true",
-        }
+    if is_forced_addon_only:
+        ctx = _force_addon_metadata(
+            ctx,
+            current_user=current_user,
+            plan_key=plan_key,
+            billing_type=billing_type,
+            extra_tenant_users=extra_tenant_users,
+        )
 
     try:
         if ctx["amount_cents"] <= 0:
@@ -409,20 +461,12 @@ def create_checkout_session(
     billing_type = normalize_billing_type(payload.billingType)
     extra_tenant_users = max(0, int(payload.extraTenantUsers or 0))
 
-    # ✅ HARD RULE:
-    # Free plan + tenant-user purchase is NOT a plan purchase.
-    # It must be treated as add-on only, because there is no
-    # free / one_time BillingPlan in the database.
     is_forced_addon_only = (
         plan_key == "free"
         and billing_type == "one_time"
         and extra_tenant_users > 0
     )
 
-    # ✅ Important:
-    # _build_purchase_context may look for BillingPlan(plan_key="free", billing_type="one_time").
-    # That DB row does not exist. So for this special add-on-only case, build context using
-    # the existing Free monthly plan, then override metadata back to one_time.
     context_billing_type = "monthly" if is_forced_addon_only else billing_type
 
     ctx = _build_purchase_context(
@@ -440,15 +484,13 @@ def create_checkout_session(
         )
 
     if is_forced_addon_only:
-        ctx["metadata"] = {
-            **ctx["metadata"],
-            "plan_key": plan_key,
-            "billing_type": billing_type,
-            "is_current_plan": "true",
-            "checkout_type": "tenant_user_addon_only",
-            "force_one_time_payment": "true",
-            "do_not_create_subscription": "true",
-        }
+        ctx = _force_addon_metadata(
+            ctx,
+            current_user=current_user,
+            plan_key=plan_key,
+            billing_type=billing_type,
+            extra_tenant_users=extra_tenant_users,
+        )
 
     is_tenant_user_addon_only = (
         is_forced_addon_only
@@ -465,18 +507,16 @@ def create_checkout_session(
             extra_tenant_users=extra_tenant_users,
         )
 
-        ctx["metadata"] = {
-            **ctx["metadata"],
-            "checkout_type": "tenant_user_addon_only",
-            "force_one_time_payment": "true",
-            "do_not_create_subscription": "true",
-        }
+        ctx = _force_addon_metadata(
+            ctx,
+            current_user=current_user,
+            plan_key=plan_key,
+            billing_type=billing_type,
+            extra_tenant_users=extra_tenant_users,
+        )
     else:
         checkout_mode, line_items = _build_checkout_line_items(ctx, billing_type)
 
-    # ✅ HARD SAFETY LOCK:
-    # One-Time License must NEVER create a Stripe subscription.
-    # Monthly must use subscription mode unless this is tenant-user add-on only.
     if billing_type == "one_time":
         checkout_mode = "payment"
     elif billing_type == "monthly" and not is_tenant_user_addon_only:
@@ -493,7 +533,11 @@ def create_checkout_session(
     )
 
     client_reference_id = (
-        f"uid={current_user.id};plan={plan_key};billing_type={billing_type}"
+        f"uid={current_user.id};"
+        f"plan={plan_key};"
+        f"billing_type={billing_type};"
+        f"extra_tenant_users={extra_tenant_users};"
+        f"checkout_type={'tenant_user_addon_only' if is_tenant_user_addon_only else ''}"
     )
 
     try:
@@ -523,7 +567,6 @@ def create_checkout_session(
                 "metadata": ctx["metadata"],
             }
 
-            # ✅ Extra protection: payment mode must not send subscription data.
             checkout_kwargs.pop("subscription_data", None)
             checkout_kwargs.pop("customer", None)
 
@@ -554,7 +597,6 @@ def create_checkout_session(
                 ),
             }
 
-            # ✅ Extra protection: subscription mode must not send payment_intent_data.
             checkout_kwargs.pop("customer_email", None)
             checkout_kwargs.pop("payment_intent_data", None)
 
