@@ -546,7 +546,10 @@ def _apply_payment_effects(
     elif is_one_time_license_purchase:
         new_plan_key = plan_key
         new_device_limit = base_device_limit
-        new_tenant_limit = target_plan_tenant_amount + extra_tenant_users
+
+        # ✅ One-time license should not reduce tenant-user limit.
+        # It keeps any existing add-on capacity and only adds extraTenantUsers.
+        new_tenant_limit = max(current_limit, target_plan_tenant_amount) + extra_tenant_users
 
         added_from_plan = max(0, target_plan_tenant_amount - current_limit)
         added_from_addons = extra_tenant_users
@@ -566,9 +569,21 @@ def _apply_payment_effects(
     elif plan_is_changing or not is_current_plan:
         new_plan_key = plan_key
         new_device_limit = base_device_limit
-        new_tenant_limit = target_plan_tenant_amount + extra_tenant_users
 
-        added_from_plan = max(0, target_plan_tenant_amount - current_limit)
+        # ✅ CRITICAL FIX:
+        # Do NOT reset tenant-users to the target plan base.
+        # Keep the current limit and only add the positive difference when moving
+        # to a plan with a higher tenant-user base.
+        #
+        # Example:
+        # Current Starter has 7 tenant-users because of add-ons.
+        # Industrial base has 4 tenant-users.
+        # Old bad logic: new limit = 4.
+        # New safe logic: new limit = max(7, 4) + extras = 7.
+        plan_difference = max(0, target_plan_tenant_amount - current_limit)
+        new_tenant_limit = current_limit + plan_difference + extra_tenant_users
+
+        added_from_plan = plan_difference
         added_from_addons = extra_tenant_users
 
         subscription.active_date = now_utc
