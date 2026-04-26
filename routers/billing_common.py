@@ -440,38 +440,67 @@ def _apply_payment_effects(
     print("   subscription.renewal_date:", getattr(subscription, "renewal_date", None))
     print("   subscription.cancel_at_period_end:", getattr(subscription, "cancel_at_period_end", None))
 
-    print("🔥 LOOKING FOR PLAN:", plan_key, billing_type)
-    plan = (
-        db.query(BillingPlan)
-        .filter(
-            BillingPlan.plan_key == plan_key,
-            BillingPlan.billing_type == billing_type,
-            BillingPlan.is_active.is_(True),
-        )
-        .first()
-    )
-
-    if not plan:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Billing plan not found for plan_key={plan_key}, billing_type={billing_type}.",
-        )
-
-    _log_debug(
-        "🔥 PLAN FOUND",
-        plan_id=getattr(plan, "id", None),
-        plan_key=getattr(plan, "plan_key", None),
-        billing_type=getattr(plan, "billing_type", None),
-        tenant_user_limit=getattr(plan, "tenant_user_limit", None),
-        device_limit=getattr(plan, "device_limit", None),
-    )
-
     current_plan_key = str(subscription.plan_key or "free").strip().lower()
     current_limit = int(subscription.tenants_users_limit or 0)
     current_device_limit = int(subscription.device_limit or 0)
 
-    target_plan_tenant_amount = int(plan.tenant_user_limit or 0)
-    base_device_limit = int(plan.device_limit or 0)
+    plan_amount_usd = to_money_decimal(metadata.get("plan_amount_usd"))
+    addon_amount_usd = to_money_decimal(metadata.get("addon_amount_usd"))
+    checkout_type = str(metadata.get("checkout_type") or "").strip().lower()
+
+    is_addon_only_purchase = (
+        extra_tenant_users > 0
+        and (
+            checkout_type == "tenant_user_addon_only"
+            or (
+                is_current_plan
+                and plan_amount_usd <= Decimal("0.00")
+                and addon_amount_usd > Decimal("0.00")
+            )
+        )
+    )
+
+    print("🔥 ADDON ONLY DETECTION")
+    print("   checkout_type:", checkout_type)
+    print("   plan_amount_usd:", plan_amount_usd)
+    print("   addon_amount_usd:", addon_amount_usd)
+    print("   is_addon_only_purchase:", is_addon_only_purchase)
+
+    plan = None
+
+    if not is_addon_only_purchase:
+        print("🔥 LOOKING FOR PLAN:", plan_key, billing_type)
+        plan = (
+            db.query(BillingPlan)
+            .filter(
+                BillingPlan.plan_key == plan_key,
+                BillingPlan.billing_type == billing_type,
+                BillingPlan.is_active.is_(True),
+            )
+            .first()
+        )
+
+        if not plan:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Billing plan not found for plan_key={plan_key}, billing_type={billing_type}.",
+            )
+
+        _log_debug(
+            "🔥 PLAN FOUND",
+            plan_id=getattr(plan, "id", None),
+            plan_key=getattr(plan, "plan_key", None),
+            billing_type=getattr(plan, "billing_type", None),
+            tenant_user_limit=getattr(plan, "tenant_user_limit", None),
+            device_limit=getattr(plan, "device_limit", None),
+        )
+
+        target_plan_tenant_amount = int(plan.tenant_user_limit or 0)
+        base_device_limit = int(plan.device_limit or 0)
+    else:
+        print("✅ SKIPPING BILLING PLAN LOOKUP FOR TENANT-USER ADDON ONLY PURCHASE")
+        target_plan_tenant_amount = current_limit
+        base_device_limit = current_device_limit
 
     plan_is_changing = plan_key != current_plan_key
     now_utc = _utcnow()
@@ -482,14 +511,39 @@ def _apply_payment_effects(
     print("   target_plan_key:", plan_key)
     print("   billing_type:", billing_type)
     print("   is_current_plan:", is_current_plan)
+    print("   is_addon_only_purchase:", is_addon_only_purchase)
     print("   plan_is_changing:", plan_is_changing)
     print("   extra_tenant_users:", extra_tenant_users)
     print("   already_applied:", already_applied)
     print("   current_limit:", current_limit)
 
-    is_one_time_license_purchase = billing_type == "one_time"
+    is_one_time_license_purchase = billing_type == "one_time" and not is_addon_only_purchase
 
-    if is_one_time_license_purchase:
+    if is_addon_only_purchase:
+        new_plan_key = current_plan_key
+        new_device_limit = current_device_limit or base_device_limit
+
+        if already_applied:
+            expected_minimum_limit = current_limit + extra_tenant_users
+
+            new_tenant_limit = expected_minimum_limit
+            added_from_plan = 0
+            added_from_addons = extra_tenant_users
+        else:
+            new_tenant_limit = current_limit + extra_tenant_users
+            added_from_plan = 0
+            added_from_addons = extra_tenant_users
+
+        if not getattr(subscription, "active_date", None):
+            subscription.active_date = now_utc
+
+        if hasattr(subscription, "renewal_date"):
+            if billing_type == "monthly" and not getattr(subscription, "renewal_date", None):
+                subscription.renewal_date = _add_one_calendar_month(
+                    getattr(subscription, "active_date", None) or now_utc
+                )
+
+    elif is_one_time_license_purchase:
         new_plan_key = plan_key
         new_device_limit = base_device_limit
         new_tenant_limit = target_plan_tenant_amount + extra_tenant_users
@@ -541,10 +595,6 @@ def _apply_payment_effects(
             expected_minimum_limit = target_plan_tenant_amount + extra_tenant_users
 
             if already_applied:
-                # ✅ Reconcile failed/delayed DB update without blindly double-adding.
-                # Example: Free base limit 1 + purchased 1 = expected minimum 2.
-                # If DB still says 1, raise it to 2.
-                # If DB already says 2 or higher, do not add again.
                 if current_limit < expected_minimum_limit:
                     new_tenant_limit = expected_minimum_limit
                     added_from_plan = 0
@@ -554,7 +604,6 @@ def _apply_payment_effects(
                     added_from_plan = 0
                     added_from_addons = 0
             else:
-                # ✅ First application of add-on purchase.
                 new_tenant_limit = current_limit + extra_tenant_users
                 added_from_plan = 0
                 added_from_addons = extra_tenant_users
@@ -583,6 +632,7 @@ def _apply_payment_effects(
         base_device_limit=base_device_limit,
         plan_is_changing=plan_is_changing,
         already_applied=already_applied,
+        is_addon_only_purchase=is_addon_only_purchase,
         is_one_time_license_purchase=is_one_time_license_purchase,
         new_plan_key=new_plan_key,
         new_tenant_limit=new_tenant_limit,
@@ -662,6 +712,7 @@ def _apply_payment_effects(
         "added": added_from_plan + added_from_addons,
         "planKey": str(subscription.plan_key or "free").strip().lower(),
         "billingType": billing_type,
+        "isAddonOnlyPurchase": is_addon_only_purchase,
         "isOneTimeLicensePurchase": is_one_time_license_purchase,
         "tenantsUsersLimit": int(subscription.tenants_users_limit or 0),
         "tenantUsersUsed": None,
