@@ -336,13 +336,31 @@ def create_payment_intent(
     billing_type = normalize_billing_type(payload.billingType)
     extra_tenant_users = max(0, int(payload.extraTenantUsers or 0))
 
+    # ✅ HARD RULE:
+    # Free + tenant-user purchase in One-Time tab is add-on only.
+    # Use monthly context so _build_purchase_context can find the Free plan.
+    context_billing_type = (
+        "monthly"
+        if plan_key == "free" and billing_type == "one_time" and extra_tenant_users > 0
+        else billing_type
+    )
+
     ctx = _build_purchase_context(
         db=db,
         current_user=current_user,
         plan_key=plan_key,
-        billing_type=billing_type,
+        billing_type=context_billing_type,
         extra_tenant_users=extra_tenant_users,
     )
+
+    if context_billing_type != billing_type:
+        ctx["metadata"] = {
+            **ctx["metadata"],
+            "billing_type": billing_type,
+            "checkout_type": "tenant_user_addon_only",
+            "force_one_time_payment": "true",
+            "do_not_create_subscription": "true",
+        }
 
     try:
         if ctx["amount_cents"] <= 0:
@@ -391,11 +409,27 @@ def create_checkout_session(
     billing_type = normalize_billing_type(payload.billingType)
     extra_tenant_users = max(0, int(payload.extraTenantUsers or 0))
 
+    # ✅ HARD RULE:
+    # Free plan + tenant-user purchase is NOT a plan purchase.
+    # It must be treated as add-on only, because there is no
+    # free / one_time BillingPlan in the database.
+    is_forced_addon_only = (
+        plan_key == "free"
+        and billing_type == "one_time"
+        and extra_tenant_users > 0
+    )
+
+    # ✅ Important:
+    # _build_purchase_context may look for BillingPlan(plan_key="free", billing_type="one_time").
+    # That DB row does not exist. So for this special add-on-only case, build context using
+    # the existing Free monthly plan, then override metadata back to one_time.
+    context_billing_type = "monthly" if is_forced_addon_only else billing_type
+
     ctx = _build_purchase_context(
         db=db,
         current_user=current_user,
         plan_key=plan_key,
-        billing_type=billing_type,
+        billing_type=context_billing_type,
         extra_tenant_users=extra_tenant_users,
     )
 
@@ -405,14 +439,16 @@ def create_checkout_session(
             detail="Payment amount must be greater than zero.",
         )
 
-    # ✅ HARD RULE:
-    # Free plan + tenant-user purchase is NOT a plan purchase.
-    # It must be treated as add-on only, because there is no
-    # free / one_time BillingPlan in the database.
-    is_forced_addon_only = (
-        plan_key == "free"
-        and extra_tenant_users > 0
-    )
+    if is_forced_addon_only:
+        ctx["metadata"] = {
+            **ctx["metadata"],
+            "plan_key": plan_key,
+            "billing_type": billing_type,
+            "is_current_plan": "true",
+            "checkout_type": "tenant_user_addon_only",
+            "force_one_time_payment": "true",
+            "do_not_create_subscription": "true",
+        }
 
     is_tenant_user_addon_only = (
         is_forced_addon_only
@@ -465,6 +501,7 @@ def create_checkout_session(
         print("🔥 IS FORCED ADDON ONLY:", is_forced_addon_only)
         print("🔥 IS TENANT USER ADDON ONLY:", is_tenant_user_addon_only)
         print("🔥 BILLING TYPE:", billing_type)
+        print("🔥 CONTEXT BILLING TYPE:", context_billing_type)
         print("🔥 FINAL CHECKOUT MODE:", checkout_mode)
         print("🔥 LINE ITEMS:", line_items)
         print("🔥 CLIENT REFERENCE ID:", client_reference_id)
