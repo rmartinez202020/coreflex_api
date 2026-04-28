@@ -840,10 +840,17 @@ class ControlBinding(Base):
     scale_max = Column(Float, nullable=True)
     ao_scale_min = Column(Float, nullable=True)
     ao_scale_max = Column(Float, nullable=True)
-    scale_min = Column(Float, nullable=True)
-    scale_max = Column(Float, nullable=True)
-    ao_scale_min = Column(Float, nullable=True)
-    ao_scale_max = Column(Float, nullable=True)
+    # ✅ Interlock config
+    # Only used by toggle / push_no / push_nc
+    interlock_enabled = Column(Boolean, nullable=False, server_default=func.false())
+    interlock_device_id = Column(String(64), nullable=True)
+    interlock_field = Column(String(20), nullable=True)
+    interlock_type = Column(String(10), nullable=False, server_default="NO")
+    interlock_mode = Column(
+        String(50),
+        nullable=False,
+        server_default="block_when_active",
+    )
 
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
