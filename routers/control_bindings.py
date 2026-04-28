@@ -854,7 +854,7 @@ def write_control_do(
         # Your system mapping:
         # UI ON  => DO 0
         # UI OFF => DO 1
-        trying_to_turn_on = do_num is not None and int(req.value01 or 0) == 0
+        trying_to_turn_on = do_num is not None and int(req.value01 or 0) == 1
 
         if interlock_active and trying_to_turn_on:
             raise HTTPException(
