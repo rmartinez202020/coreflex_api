@@ -31,7 +31,6 @@ router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 ALLOWED_FIELDS = {"do1", "do2", "do3", "do4", "ao1", "ao2"}
 ALLOWED_TYPES = {"toggle", "push_no", "push_nc", "display_output"}
 
-# ✅ Interlock ONLY applies to toggle and push buttons
 INTERLOCK_WIDGET_TYPES = {"toggle", "push_no", "push_nc"}
 ALLOWED_INTERLOCK_FIELDS = {"di1", "di2", "di3", "di4", "di5", "di6"}
 ALLOWED_INTERLOCK_TYPES = {"NO", "NC"}
@@ -65,6 +64,24 @@ def _as_bool(v) -> bool:
         return v
     s = str(v or "").strip().lower()
     return s in {"1", "true", "yes", "on"}
+
+
+def _to01(v) -> int:
+    try:
+        if isinstance(v, bool):
+            return 1 if v else 0
+        if isinstance(v, (int, float)):
+            return 1 if float(v) > 0 else 0
+
+        s = str(v or "").strip().lower()
+        if s in {"1", "true", "on", "yes"}:
+            return 1
+        if s in {"0", "false", "off", "no", ""}:
+            return 0
+
+        return 1 if float(s) > 0 else 0
+    except Exception:
+        return 0
 
 
 def _as_optional_float(v):
@@ -338,7 +355,6 @@ class ControlBindRequest(BaseModel):
     aoScaleMin: Optional[float] = None
     aoScaleMax: Optional[float] = None
 
-    # ✅ Interlock fields - only used for toggle / push_no / push_nc
     interlockEnabled: Optional[bool] = False
     interlockDeviceId: Optional[str] = None
     interlockField: Optional[str] = None
@@ -502,7 +518,6 @@ def bind_control(
     row.ao_scale_min = ao_scale_min
     row.ao_scale_max = ao_scale_max
 
-    # ✅ Only toggle / push_no / push_nc store interlock
     row.interlock_enabled = interlock_enabled
     row.interlock_device_id = interlock_device_id if interlock_enabled else None
     row.interlock_field = interlock_field if interlock_enabled else None
@@ -824,10 +839,38 @@ def write_control_do(
             user_id=user.id if user else None,
             tenant_email=tenant_email,
         )
+
         if not interlock_device:
             raise HTTPException(
                 status_code=403,
                 detail="Interlock device not authorized.",
+            )
+
+        raw_di = getattr(interlock_device, interlock_field, 0)
+        di01 = _to01(raw_di)
+
+        interlock_active = di01 == 0 if interlock_type == "NC" else di01 == 1
+
+        # Your system mapping:
+        # UI ON  => DO 0
+        # UI OFF => DO 1
+        trying_to_turn_on = do_num is not None and int(req.value01 or 0) == 0
+
+        if interlock_active and trying_to_turn_on:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Blocked by interlock",
+                    "message": "This control cannot turn ON because the selected DI interlock is active.",
+                    "deviceId": device_id,
+                    "field": field,
+                    "requestedValue01": int(req.value01 or 0),
+                    "interlockDeviceId": interlock_device_id,
+                    "interlockField": interlock_field,
+                    "interlockType": interlock_type,
+                    "interlockDiValue": di01,
+                    "widgetType": widget_type,
+                },
             )
 
     if not NODE_RED_DO_WRITE_URL:
@@ -883,7 +926,6 @@ def write_control_do(
         "scale_max": getattr(row, "scale_max", None),
         "ao_scale_min": getattr(row, "ao_scale_min", None),
         "ao_scale_max": getattr(row, "ao_scale_max", None),
-        # ✅ Sent to Node-RED only as active config for toggle/push buttons
         "interlock_enabled": interlock_enabled,
         "interlock_device_id": interlock_device_id if interlock_enabled else None,
         "interlock_field": interlock_field if interlock_enabled else None,
