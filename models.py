@@ -840,6 +840,10 @@ class ControlBinding(Base):
     scale_max = Column(Float, nullable=True)
     ao_scale_min = Column(Float, nullable=True)
     ao_scale_max = Column(Float, nullable=True)
+    scale_min = Column(Float, nullable=True)
+    scale_max = Column(Float, nullable=True)
+    ao_scale_min = Column(Float, nullable=True)
+    ao_scale_max = Column(Float, nullable=True)
 
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
