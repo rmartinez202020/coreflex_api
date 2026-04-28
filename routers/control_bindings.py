@@ -12,15 +12,14 @@ from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field
 
 from database import get_db
-from auth_utils import get_current_user  # ✅ FIX (was auth_routes)
+from auth_utils import get_current_user
 from models import (
     ControlBinding,
     ZHC1921Device,
     ControlActionLock,
-    GatewayDeviceSeen,  # ✅ NEW
+    GatewayDeviceSeen,
 )
 
-# ✅ CF-1600 model import (safe optional import)
 try:
     from models import ZHC1661Device  # type: ignore
 except Exception:
@@ -29,21 +28,21 @@ except Exception:
 
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
 
-# ✅ now supports DO + AO
 ALLOWED_FIELDS = {"do1", "do2", "do3", "do4", "ao1", "ao2"}
 ALLOWED_TYPES = {"toggle", "push_no", "push_nc", "display_output"}
 
-# ✅ Frontend uses this to hold "Control Action in Progress" locally
+# ✅ Interlock ONLY applies to toggle and push buttons
+INTERLOCK_WIDGET_TYPES = {"toggle", "push_no", "push_nc"}
+ALLOWED_INTERLOCK_FIELDS = {"di1", "di2", "di3", "di4", "di5", "di6"}
+ALLOWED_INTERLOCK_TYPES = {"NO", "NC"}
+
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
 
-# ✅ Node-RED endpoint that will perform the actual DO/AO write
-# This is your MAIN Node-RED bridge endpoint
 NODE_RED_DO_WRITE_URL = os.getenv(
     "NODE_RED_DO_WRITE_URL",
     "http://98.90.225.131:1880/coreflex/command",
 ).strip()
 
-# ✅ Optional shared-key protection for backend -> Node-RED commands
 NODE_RED_COMMAND_KEY = os.getenv(
     "NODE_RED_COMMAND_KEY",
     "CFX_k29sLx92Jd8slQp4NzT7MartinezVx93LwQa2",
@@ -59,6 +58,13 @@ def get_current_user_optional(request: Request, db: Session = Depends(get_db)):
 
 def _as_str(v) -> str:
     return str(v or "").strip()
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v or "").strip().lower()
+    return s in {"1", "true", "yes", "on"}
 
 
 def _as_optional_float(v):
@@ -91,6 +97,23 @@ def _safe_json(res):
         return None
 
 
+def _normalize_widget_type(value: str) -> str:
+    widget_type = _as_str(value).lower()
+
+    if widget_type == "pushbuttonno":
+        return "push_no"
+    if widget_type == "pushbuttonnc":
+        return "push_nc"
+    if widget_type == "push_button":
+        return "push_no"
+
+    return widget_type
+
+
+def _supports_interlock(widget_type: str) -> bool:
+    return _normalize_widget_type(widget_type) in INTERLOCK_WIDGET_TYPES
+
+
 def _normalize_tenant_access(value: str) -> str:
     v = str(value or "").strip().lower()
     if not v:
@@ -108,15 +131,11 @@ def _normalize_tenant_access(value: str) -> str:
 
 def _check_tenant_control_access(request: Request):
     tenant_email = _as_str(request.headers.get("X-Tenant-Email"))
-    tenant_access = _normalize_tenant_access(
-        request.headers.get("X-Tenant-Access")
-    )
+    tenant_access = _normalize_tenant_access(request.headers.get("X-Tenant-Access"))
 
-    # ✅ Not a tenant/public request -> allow normal authenticated owner flow
     if not tenant_email:
         return
 
-    # ✅ Tenant/public request -> only read_control can write
     if tenant_access != "read_control":
         raise HTTPException(
             status_code=403,
@@ -130,11 +149,6 @@ def _post_to_node_red_wait(
     headers: dict,
     timeout_sec: float = 3.5,
 ):
-    """
-    Send control write to Node-RED and WAIT briefly for an ACK response.
-    - Never blocks forever (separate connect/read timeouts)
-    - If Node-RED is slow, returns pending=True
-    """
     try:
         connect_t = min(1.5, max(0.5, timeout_sec / 2))
         read_t = max(0.5, timeout_sec - connect_t)
@@ -192,9 +206,6 @@ def _is_ao_field(field: str) -> bool:
     return _as_str(field).lower() in {"ao1", "ao2"}
 
 
-# ===============================
-# ✅ Device authorization helpers
-# ===============================
 def _query_authorized_device(
     db: Session,
     model_cls,
@@ -207,7 +218,6 @@ def _query_authorized_device(
 
     q = db.query(model_cls).filter(model_cls.device_id == device_id)
 
-    # ✅ owner flow -> must be claimed by owner
     if not tenant_email and user_id is not None:
         q = q.filter(model_cls.claimed_by_user_id == user_id)
 
@@ -220,13 +230,9 @@ def _find_authorized_device(
     user_id: Optional[int] = None,
     tenant_email: str = "",
 ):
-    """
-    ✅ Support both CF-2000 (ZHC1921Device) and CF-1600 (ZHC1661Device)
-    """
     device_id = _as_str(device_id)
     tenant_email = _as_str(tenant_email).lower()
 
-    # ✅ first try CF-2000
     device = _query_authorized_device(
         db=db,
         model_cls=ZHC1921Device,
@@ -237,7 +243,6 @@ def _find_authorized_device(
     if device:
         return device
 
-    # ✅ then try CF-1600
     device = _query_authorized_device(
         db=db,
         model_cls=ZHC1661Device,
@@ -251,9 +256,6 @@ def _find_authorized_device(
     return None
 
 
-# ===============================
-# 🔒 Lock-table helpers
-# ===============================
 def _utc_now():
     return datetime.now(timezone.utc)
 
@@ -263,7 +265,6 @@ def _lock_key(device_id: str, field: str) -> str:
 
 
 def _cleanup_expired_locks(db: Session) -> None:
-    # Prevent stale locks if server crashes mid-write
     try:
         db.query(ControlActionLock).filter(
             ControlActionLock.expires_at <= _utc_now()
@@ -273,18 +274,10 @@ def _cleanup_expired_locks(db: Session) -> None:
         db.rollback()
 
 
-# ===============================
-# 🌐 Gateway-device-seen helpers
-# ===============================
 def _pick_gateway_seen_row(
     db: Session,
     device_id: str,
 ) -> Optional[GatewayDeviceSeen]:
-    """
-    Pick the best current GatewayDeviceSeen row for a device:
-    1) Prefer latest ONLINE row
-    2) Otherwise latest row of any status
-    """
     rows = (
         db.query(GatewayDeviceSeen)
         .filter(GatewayDeviceSeen.device_id == device_id)
@@ -317,6 +310,7 @@ def _serialize_gateway_seen_row(row: Optional[GatewayDeviceSeen]) -> dict:
         }
 
     last_seen = getattr(row, "last_seen", None)
+
     return {
         "gateway_id": _as_str(getattr(row, "gateway_id", None)) or None,
         "gateway_hostname": _as_str(getattr(row, "gateway_hostname", None)) or None,
@@ -329,37 +323,37 @@ def _serialize_gateway_seen_row(row: Optional[GatewayDeviceSeen]) -> dict:
     }
 
 
-# ===============================
-# 📦 Request Schemas
-# ===============================
 class ControlBindRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
-    dashboardName: str | None = None  # ✅ NEW: human-readable dashboard name
+    dashboardName: str | None = None
     widgetId: str = Field(..., min_length=1)
-    widgetType: str = Field(..., min_length=1)  # toggle | push_no | push_nc | display_output
+    widgetType: str = Field(..., min_length=1)
     title: str | None = None
 
     deviceId: str = Field(..., min_length=1)
-    field: str = Field(..., min_length=2)  # do1..do4 | ao1..ao2
+    field: str = Field(..., min_length=2)
 
-    # ✅ NEW: display_output scaling config
     scaleMin: Optional[float] = None
     scaleMax: Optional[float] = None
     aoScaleMin: Optional[float] = None
     aoScaleMax: Optional[float] = None
 
+    # ✅ Interlock fields - only used for toggle / push_no / push_nc
+    interlockEnabled: Optional[bool] = False
+    interlockDeviceId: Optional[str] = None
+    interlockField: Optional[str] = None
+    interlockType: Optional[str] = "NO"
+    interlockMode: Optional[str] = "block_when_active"
+
 
 class ControlWriteRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
     widgetId: str = Field(..., min_length=1)
-    field: Optional[str] = None  # optional frontend hint; binding row is source of truth
-    value01: Optional[int] = Field(None, ge=0, le=1)  # ✅ DO
-    value: Optional[float] = None  # ✅ AO
+    field: Optional[str] = None
+    value01: Optional[int] = Field(None, ge=0, le=1)
+    value: Optional[float] = None
 
 
-# ===============================
-# 🔒 Bind Control to DO/AO
-# ===============================
 @router.post("/bind")
 def bind_control(
     req: ControlBindRequest,
@@ -369,21 +363,14 @@ def bind_control(
     dashboard_id = req.dashboardId.strip()
     dashboard_name = (req.dashboardName or "").strip() or None
     widget_id = req.widgetId.strip()
-    widget_type = req.widgetType.strip().lower()
+    widget_type = _normalize_widget_type(req.widgetType)
     device_id = req.deviceId.strip()
     field = req.field.strip().lower()
 
-    # ✅ NEW scaling values
     scale_min = _as_optional_float(req.scaleMin)
     scale_max = _as_optional_float(req.scaleMax)
     ao_scale_min = _as_optional_float(req.aoScaleMin)
     ao_scale_max = _as_optional_float(req.aoScaleMax)
-
-    # ✅ Normalize frontend widget names to backend canonical types
-    if widget_type == "pushbuttonno":
-        widget_type = "push_no"
-    elif widget_type == "pushbuttonnc":
-        widget_type = "push_nc"
 
     if widget_type not in ALLOWED_TYPES:
         raise HTTPException(status_code=400, detail="Invalid widgetType")
@@ -391,14 +378,20 @@ def bind_control(
     if field not in ALLOWED_FIELDS:
         raise HTTPException(status_code=400, detail="Invalid control field")
 
-    # ✅ Only display_output should store scaling fields
+    supports_interlock = _supports_interlock(widget_type)
+
+    interlock_enabled = bool(req.interlockEnabled) if supports_interlock else False
+    interlock_device_id = _as_str(req.interlockDeviceId) if supports_interlock else ""
+    interlock_field = _as_str(req.interlockField).lower() if supports_interlock else ""
+    interlock_type = _as_str(req.interlockType).upper() if supports_interlock else "NO"
+    interlock_mode = _as_str(req.interlockMode) if supports_interlock else "block_when_active"
+
     if widget_type != "display_output":
         scale_min = None
         scale_max = None
         ao_scale_min = None
         ao_scale_max = None
 
-    # ✅ Optional validation when partially filled
     if (scale_min is None) != (scale_max is None):
         raise HTTPException(
             status_code=400,
@@ -411,7 +404,43 @@ def bind_control(
             detail="aoScaleMin and aoScaleMax must both be provided together",
         )
 
-    # ✅ Ensure user has this device CLAIMED (tenant isolation)
+    if interlock_enabled:
+        if not _is_do_field(field):
+            raise HTTPException(
+                status_code=400,
+                detail="Interlock is only allowed on DO controls.",
+            )
+
+        if not interlock_device_id:
+            raise HTTPException(
+                status_code=400,
+                detail="interlockDeviceId is required when interlock is enabled.",
+            )
+
+        if interlock_field not in ALLOWED_INTERLOCK_FIELDS:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid interlockField. Use di1..di6.",
+            )
+
+        if interlock_type not in ALLOWED_INTERLOCK_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid interlockType. Use NO or NC.",
+            )
+
+        interlock_device = _find_authorized_device(
+            db=db,
+            device_id=interlock_device_id,
+            user_id=user.id,
+            tenant_email="",
+        )
+        if not interlock_device:
+            raise HTTPException(
+                status_code=403,
+                detail="Interlock device not authorized.",
+            )
+
     device = _find_authorized_device(
         db=db,
         device_id=device_id,
@@ -421,9 +450,6 @@ def bind_control(
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
 
-    # ✅ GLOBAL uniqueness check across ALL dashboards
-    # Same user + same device + same field cannot be used by another widget,
-    # no matter which dashboard it is on.
     used = (
         db.query(ControlBinding)
         .filter(
@@ -447,7 +473,6 @@ def bind_control(
             },
         )
 
-    # ✅ Upsert by (user, dashboard, widget)
     row = (
         db.query(ControlBinding)
         .filter(
@@ -472,11 +497,17 @@ def bind_control(
     row.bind_device_id = device_id
     row.bind_field = field
 
-    # ✅ NEW persist scaling fields
     row.scale_min = scale_min
     row.scale_max = scale_max
     row.ao_scale_min = ao_scale_min
     row.ao_scale_max = ao_scale_max
+
+    # ✅ Only toggle / push_no / push_nc store interlock
+    row.interlock_enabled = interlock_enabled
+    row.interlock_device_id = interlock_device_id if interlock_enabled else None
+    row.interlock_field = interlock_field if interlock_enabled else None
+    row.interlock_type = interlock_type if interlock_enabled else "NO"
+    row.interlock_mode = interlock_mode if interlock_enabled else "block_when_active"
 
     try:
         db.commit()
@@ -517,12 +548,14 @@ def bind_control(
         "scaleMax": row.scale_max,
         "aoScaleMin": row.ao_scale_min,
         "aoScaleMax": row.ao_scale_max,
+        "interlockEnabled": bool(getattr(row, "interlock_enabled", False)),
+        "interlockDeviceId": getattr(row, "interlock_device_id", None),
+        "interlockField": getattr(row, "interlock_field", None),
+        "interlockType": getattr(row, "interlock_type", None),
+        "interlockMode": getattr(row, "interlock_mode", None),
     }
 
 
-# ===============================
-# 📡 Get Used Control Fields for Device (ALL dashboards)
-# ===============================
 @router.get("/used")
 def get_used_dos(
     deviceId: str = Query(...),
@@ -553,15 +586,17 @@ def get_used_dos(
             "scaleMax": getattr(r, "scale_max", None),
             "aoScaleMin": getattr(r, "ao_scale_min", None),
             "aoScaleMax": getattr(r, "ao_scale_max", None),
+            "interlockEnabled": bool(getattr(r, "interlock_enabled", False)),
+            "interlockDeviceId": getattr(r, "interlock_device_id", None),
+            "interlockField": getattr(r, "interlock_field", None),
+            "interlockType": getattr(r, "interlock_type", None),
+            "interlockMode": getattr(r, "interlock_mode", None),
         }
         for r in rows
         if r.bind_field
     ]
 
 
-# ===============================
-# 🗑️ Delete Control Binding Row
-# ===============================
 @router.delete("/")
 def delete_control_binding(
     widgetId: str = Query(..., min_length=1),
@@ -597,9 +632,6 @@ def delete_control_binding(
     return {"ok": True, "deleted": deleted, "dashboardId": dash_id, "widgetId": wid}
 
 
-# ===============================
-# 🕹️ Write DO / AO (PLAY MODE)
-# ===============================
 @router.post("/write")
 def write_control_do(
     req: ControlWriteRequest,
@@ -607,14 +639,12 @@ def write_control_do(
     db: Session = Depends(get_db),
     user=Depends(get_current_user_optional),
 ):
-    # 🔒 Tenant permission check
     _check_tenant_control_access(request)
 
     dash_id = req.dashboardId.strip()
     wid = req.widgetId.strip()
     tenant_email = _as_str(request.headers.get("X-Tenant-Email"))
 
-    # 1) resolve binding
     if tenant_email:
         row = (
             db.query(ControlBinding)
@@ -641,6 +671,7 @@ def write_control_do(
     if not row:
         raise HTTPException(status_code=404, detail="Control binding not found")
 
+    widget_type = _normalize_widget_type(getattr(row, "widget_type", ""))
     device_id = _as_str(row.bind_device_id)
     field = _as_str(row.bind_field).lower()
     req_field = _as_str(req.field).lower()
@@ -650,7 +681,6 @@ def write_control_do(
     if field not in ALLOWED_FIELDS:
         raise HTTPException(status_code=400, detail="Invalid bound control field")
 
-    # ✅ optional frontend field check for consistency
     if req_field and req_field != field:
         raise HTTPException(
             status_code=400,
@@ -661,7 +691,6 @@ def write_control_do(
             },
         )
 
-    # 2) tenant isolation / owner isolation
     device = _find_authorized_device(
         db=db,
         device_id=device_id,
@@ -672,7 +701,6 @@ def write_control_do(
     if not device:
         raise HTTPException(status_code=403, detail="Device not authorized")
 
-    # 2.5) ✅ find latest gateway/device-seen route info by serial/device_id
     gw_seen = _pick_gateway_seen_row(db, device_id)
     if not gw_seen:
         raise HTTPException(
@@ -686,7 +714,6 @@ def write_control_do(
 
     gw_info = _serialize_gateway_seen_row(gw_seen)
 
-    # Strong safety checks for bridge forwarding
     if not gw_info["gateway_tailscale_ip"]:
         raise HTTPException(
             status_code=409,
@@ -707,7 +734,6 @@ def write_control_do(
             },
         )
 
-    # 3) parse field + value by control type
     do_num = None
     ao_num = None
     value_bool = None
@@ -747,7 +773,63 @@ def write_control_do(
     else:
         raise HTTPException(status_code=400, detail="Unsupported control field")
 
-    # 4) forward to node-red bridge (WAIT for response, short)
+    interlock_supported = _supports_interlock(widget_type)
+    interlock_enabled = bool(getattr(row, "interlock_enabled", False)) and interlock_supported
+
+    interlock_device_id = None
+    interlock_field = None
+    interlock_type = "NO"
+    interlock_mode = "block_when_active"
+
+    if interlock_enabled:
+        interlock_device_id = _as_str(getattr(row, "interlock_device_id", ""))
+        interlock_field = _as_str(getattr(row, "interlock_field", "")).lower()
+        interlock_type = _as_str(getattr(row, "interlock_type", "NO")).upper()
+        interlock_mode = _as_str(getattr(row, "interlock_mode", "block_when_active"))
+
+        if not _is_do_field(field):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Invalid interlock configuration",
+                    "message": "Interlock is only allowed for DO controls.",
+                    "widgetType": widget_type,
+                    "field": field,
+                },
+            )
+
+        if not interlock_device_id or interlock_field not in ALLOWED_INTERLOCK_FIELDS:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Invalid interlock configuration",
+                    "message": "Interlock is enabled but deviceId or DI field is missing.",
+                    "widgetType": widget_type,
+                },
+            )
+
+        if interlock_type not in ALLOWED_INTERLOCK_TYPES:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Invalid interlock configuration",
+                    "message": "Interlock type must be NO or NC.",
+                    "widgetType": widget_type,
+                },
+            )
+
+        interlock_device = _find_authorized_device(
+            db=db,
+            device_id=interlock_device_id,
+            user_id=user.id if user else None,
+            tenant_email=tenant_email,
+        )
+        if not interlock_device:
+            raise HTTPException(
+                status_code=403,
+                detail="Interlock device not authorized.",
+            )
+
     if not NODE_RED_DO_WRITE_URL:
         _raise_node_red_not_configured()
 
@@ -755,10 +837,8 @@ def write_control_do(
     lk = _lock_key(device_id, field)
     expires_at = _utc_now() + timedelta(milliseconds=int(ACTUATION_HOLD_MS))
 
-    # ✅ cleanup stale locks first
     _cleanup_expired_locks(db)
 
-    # ✅ Try to acquire lock (DB for milliseconds)
     lock_row = ControlActionLock(
         lock_key=lk,
         device_id=device_id,
@@ -782,8 +862,6 @@ def write_control_do(
             },
         )
 
-    # ✅ Backend already knows the route from gateway_device_seen,
-    # so include the remaining bridge-forwarding information here.
     payload = {
         "request_id": request_id,
         "device_id": device_id,
@@ -798,21 +876,26 @@ def write_control_do(
         "field": field,
         "dashboard_id": dash_id,
         "widget_id": wid,
+        "widget_type": widget_type,
         "user_id": user.id if user else None,
         "tenant_email": tenant_email or None,
-        # ✅ NEW: include binding scaling info for downstream use if needed
         "scale_min": getattr(row, "scale_min", None),
         "scale_max": getattr(row, "scale_max", None),
         "ao_scale_min": getattr(row, "ao_scale_min", None),
         "ao_scale_max": getattr(row, "ao_scale_max", None),
+        # ✅ Sent to Node-RED only as active config for toggle/push buttons
+        "interlock_enabled": interlock_enabled,
+        "interlock_device_id": interlock_device_id if interlock_enabled else None,
+        "interlock_field": interlock_field if interlock_enabled else None,
+        "interlock_type": interlock_type if interlock_enabled else None,
+        "interlock_mode": interlock_mode if interlock_enabled else None,
     }
 
-    # ✅ branch by type for Node-RED
     if do_num is not None:
         payload.update(
             {
-                "command": "WRITE_DO",        # ✅ NEW (for Node-RED router)
-                "command_type": "do_write",   # ✅ keep this too
+                "command": "WRITE_DO",
+                "command_type": "do_write",
                 "do": do_num,
                 "value": value_bool,
                 "value01": 1 if value_bool else 0,
@@ -821,8 +904,8 @@ def write_control_do(
     elif ao_num is not None:
         payload.update(
             {
-                "command": "WRITE_AO",        # ✅ NEW (for Node-RED router)
-                "command_type": "ao_write",   # ✅ keep this too
+                "command": "WRITE_AO",
+                "command_type": "ao_write",
                 "ao": ao_num,
                 "value": value_num,
             }
@@ -852,6 +935,11 @@ def write_control_do(
         "scaleMax": getattr(row, "scale_max", None),
         "aoScaleMin": getattr(row, "ao_scale_min", None),
         "aoScaleMax": getattr(row, "ao_scale_max", None),
+        "interlockEnabled": interlock_enabled,
+        "interlockDeviceId": interlock_device_id if interlock_enabled else None,
+        "interlockField": interlock_field if interlock_enabled else None,
+        "interlockType": interlock_type if interlock_enabled else None,
+        "interlockMode": interlock_mode if interlock_enabled else None,
         **result,
     }
 
