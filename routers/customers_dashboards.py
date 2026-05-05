@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from sqlalchemy import func as sa_func
 from typing import Optional, List, Any, Dict
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import re
 import secrets
@@ -72,11 +72,19 @@ class TenantPublicSetPasswordRequest(BaseModel):
     new_password: str
 
 
+class TenantPublicSessionRequest(BaseModel):
+    dashboard_slug: str
+    public_launch_id: str
+    email: EmailStr
+    session_id: str
+
+
 class TenantPublicAuthOut(BaseModel):
     ok: bool
     tenant_name: str
     access_level: str
     must_change_password: bool
+    session_id: Optional[str] = None
 
 
 # =========================
@@ -93,9 +101,39 @@ PUBLIC_DASHBOARD_BASE_URL = (
     or "https://www.coreflexiiotsplatform.com/launchDashboard"
 )
 
+TENANT_DASHBOARD_SESSION_TIMEOUT_SECONDS = int(
+    os.getenv("TENANT_DASHBOARD_SESSION_TIMEOUT_SECONDS") or "120"
+)
+
 
 def _norm(s: Optional[str]) -> str:
     return (s or "").strip()
+
+
+def _now_utc() -> datetime:
+    return datetime.utcnow()
+
+
+def _is_active_session_fresh(last_seen_at: Optional[datetime]) -> bool:
+    if not last_seen_at:
+        return False
+
+    try:
+        age = _now_utc() - last_seen_at.replace(tzinfo=None)
+        return age <= timedelta(seconds=TENANT_DASHBOARD_SESSION_TIMEOUT_SECONDS)
+    except Exception:
+        return False
+
+
+def _get_request_user_agent(request: Optional[Request]) -> str:
+    try:
+        return _norm(request.headers.get("user-agent", ""))[:500]
+    except Exception:
+        return ""
+
+
+def _generate_session_id() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def _slugify_dashboard_name(name: str) -> str:
@@ -130,12 +168,6 @@ def _build_public_launch_url(row: CustomerDashboard) -> Optional[str]:
 
 
 def _get_owner_emails() -> set[str]:
-    """
-    Supports one or more owner emails via env:
-      PLATFORM_OWNER_EMAIL=roquemartinez_8@hotmail.com
-    or
-      PLATFORM_OWNER_EMAILS=a@x.com,b@y.com
-    """
     single = _norm(os.getenv("PLATFORM_OWNER_EMAIL"))
     multi = _norm(os.getenv("PLATFORM_OWNER_EMAILS"))
 
@@ -157,10 +189,6 @@ def _get_owner_emails() -> set[str]:
 
 
 def _require_customer_exists(db: Session, user_id: int, customer_name: str) -> None:
-    """
-    For now, "customers" come from distinct CustomerLocation.customer_name.
-    This prevents creating dashboards for random names.
-    """
     exists = (
         db.query(CustomerLocation.id)
         .filter(CustomerLocation.user_id == user_id)
@@ -175,9 +203,6 @@ def _require_customer_exists(db: Session, user_id: int, customer_name: str) -> N
 
 
 def _serialize_dashboard(row: CustomerDashboard) -> CustomerDashboardOut:
-    """
-    Safely normalize old/bad DB rows so response_model does not crash with 500.
-    """
     raw_layout = row.layout if isinstance(row.layout, dict) else DEFAULT_LAYOUT
 
     customer_name = _norm(getattr(row, "customer_name", ""))
@@ -212,11 +237,6 @@ def _assert_owner(current_user: User) -> None:
 
 
 def _ensure_public_fields(row: CustomerDashboard, db: Session) -> CustomerDashboard:
-    """
-    Backfill old rows if needed:
-    - non-main dashboards get slug/public id/enabled
-    - main dashboard names are always disabled
-    """
     changed = False
     dashboard_name = _norm(getattr(row, "dashboard_name", ""))
 
@@ -303,24 +323,113 @@ def _get_tenant_for_public_dashboard(
     if not tenant:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    has_access = (
-        db.query(CustomerDashboard.id)
-        .join(
-            TenantUserDashboardAccess,
-            TenantUserDashboardAccess.dashboard_id == CustomerDashboard.id,
-        )
-        .filter(TenantUserDashboardAccess.tenant_user_id == tenant.id)
-        .filter(CustomerDashboard.id == dashboard.id)
-        .first()
+    access_row = _get_tenant_dashboard_access_row(
+        db=db,
+        tenant_user_id=tenant.id,
+        dashboard_id=dashboard.id,
     )
 
-    if not has_access:
+    if not access_row:
         raise HTTPException(
             status_code=403,
             detail="This tenant user does not have access to this dashboard.",
         )
 
     return tenant
+
+
+def _get_tenant_dashboard_access_row(
+    db: Session,
+    tenant_user_id: int,
+    dashboard_id: int,
+) -> Optional[TenantUserDashboardAccess]:
+    return (
+        db.query(TenantUserDashboardAccess)
+        .filter(TenantUserDashboardAccess.tenant_user_id == tenant_user_id)
+        .filter(TenantUserDashboardAccess.dashboard_id == dashboard_id)
+        .first()
+    )
+
+
+def _claim_tenant_dashboard_session(
+    db: Session,
+    *,
+    tenant: TenantUser,
+    dashboard: CustomerDashboard,
+    request: Optional[Request] = None,
+) -> str:
+    access_row = _get_tenant_dashboard_access_row(
+        db=db,
+        tenant_user_id=tenant.id,
+        dashboard_id=dashboard.id,
+    )
+
+    if not access_row:
+        raise HTTPException(
+            status_code=403,
+            detail="This tenant user does not have access to this dashboard.",
+        )
+
+    existing_session_id = _norm(getattr(access_row, "active_session_id", ""))
+    last_seen_at = getattr(access_row, "active_session_last_seen_at", None)
+
+    if existing_session_id and _is_active_session_fresh(last_seen_at):
+        raise HTTPException(
+            status_code=409,
+            detail="This tenant user is already logged in to this dashboard. Please logout from the other session first.",
+        )
+
+    session_id = _generate_session_id()
+    now = _now_utc()
+
+    access_row.active_session_id = session_id
+    access_row.active_session_started_at = now
+    access_row.active_session_last_seen_at = now
+    access_row.active_session_user_agent = _get_request_user_agent(request)
+
+    db.add(access_row)
+    db.commit()
+    db.refresh(access_row)
+
+    return session_id
+
+
+def _verify_tenant_dashboard_session(
+    db: Session,
+    *,
+    dashboard_slug: str,
+    public_launch_id: str,
+    email: str,
+    session_id: str,
+) -> TenantUserDashboardAccess:
+    dashboard = _get_public_dashboard_or_404(
+        db=db,
+        dashboard_slug=dashboard_slug,
+        public_launch_id=public_launch_id,
+    )
+
+    tenant = _get_tenant_for_public_dashboard(
+        db=db,
+        dashboard=dashboard,
+        email=email,
+    )
+
+    access_row = _get_tenant_dashboard_access_row(
+        db=db,
+        tenant_user_id=tenant.id,
+        dashboard_id=dashboard.id,
+    )
+
+    if not access_row:
+        raise HTTPException(status_code=403, detail="Access not found.")
+
+    saved_session_id = _norm(getattr(access_row, "active_session_id", ""))
+    incoming_session_id = _norm(session_id)
+
+    if not incoming_session_id or saved_session_id != incoming_session_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+
+    return access_row
 
 
 def _verify_password(plain_password: str, password_hash: str) -> bool:
@@ -460,10 +569,12 @@ def get_public_customer_dashboard(
 
 # =========================
 # 🔐 TENANT LOGIN FOR PUBLIC DASHBOARD
+# ✅ Prevent same tenant-user from logging into same dashboard more than once
 # =========================
 @router.post("/tenant-access/login", response_model=TenantPublicAuthOut)
 def tenant_public_dashboard_login(
     body: TenantPublicLoginRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     dashboard = _get_public_dashboard_or_404(
@@ -482,21 +593,36 @@ def tenant_public_dashboard_login(
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     access_level = _norm(getattr(tenant, "access_level", "")) or "read"
+    must_change_password = bool(getattr(tenant, "must_change_password", False))
+
+    session_id = None
+
+    # Do NOT claim a dashboard session until password is valid and usable.
+    if not must_change_password:
+        session_id = _claim_tenant_dashboard_session(
+            db=db,
+            tenant=tenant,
+            dashboard=dashboard,
+            request=request,
+        )
 
     return TenantPublicAuthOut(
         ok=True,
         tenant_name=_norm(getattr(tenant, "full_name", "")) or _norm(body.email),
         access_level=access_level,
-        must_change_password=bool(getattr(tenant, "must_change_password", False)),
+        must_change_password=must_change_password,
+        session_id=session_id,
     )
 
 
 # =========================
 # 🔐 TENANT SET NEW PASSWORD FOR PUBLIC DASHBOARD
+# ✅ After password change, claim dashboard session too
 # =========================
 @router.post("/tenant-access/set-password", response_model=TenantPublicAuthOut)
 def tenant_public_dashboard_set_password(
     body: TenantPublicSetPasswordRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     dashboard = _get_public_dashboard_or_404(
@@ -533,7 +659,7 @@ def tenant_public_dashboard_set_password(
 
     tenant.password_hash = pwd_context.hash(new_password)
     tenant.must_change_password = False
-    tenant.updated_at = datetime.utcnow()
+    tenant.updated_at = _now_utc()
 
     db.add(tenant)
     db.commit()
@@ -541,12 +667,73 @@ def tenant_public_dashboard_set_password(
 
     access_level = _norm(getattr(tenant, "access_level", "")) or "read"
 
+    session_id = _claim_tenant_dashboard_session(
+        db=db,
+        tenant=tenant,
+        dashboard=dashboard,
+        request=request,
+    )
+
     return TenantPublicAuthOut(
         ok=True,
         tenant_name=_norm(getattr(tenant, "full_name", "")) or _norm(body.email),
         access_level=access_level,
         must_change_password=False,
+        session_id=session_id,
     )
+
+
+# =========================
+# 💓 TENANT DASHBOARD SESSION HEARTBEAT
+# Frontend will call this every few seconds/minutes
+# =========================
+@router.post("/tenant-access/session/heartbeat")
+def tenant_public_dashboard_session_heartbeat(
+    body: TenantPublicSessionRequest,
+    db: Session = Depends(get_db),
+):
+    access_row = _verify_tenant_dashboard_session(
+        db=db,
+        dashboard_slug=body.dashboard_slug,
+        public_launch_id=body.public_launch_id,
+        email=body.email,
+        session_id=body.session_id,
+    )
+
+    access_row.active_session_last_seen_at = _now_utc()
+
+    db.add(access_row)
+    db.commit()
+
+    return {"ok": True}
+
+
+# =========================
+# 🚪 TENANT DASHBOARD SESSION LOGOUT / RELEASE
+# Frontend will call this on logout/window close
+# =========================
+@router.post("/tenant-access/session/logout")
+def tenant_public_dashboard_session_logout(
+    body: TenantPublicSessionRequest,
+    db: Session = Depends(get_db),
+):
+    access_row = _verify_tenant_dashboard_session(
+        db=db,
+        dashboard_slug=body.dashboard_slug,
+        public_launch_id=body.public_launch_id,
+        email=body.email,
+        session_id=body.session_id,
+    )
+
+    access_row.active_session_id = None
+    access_row.active_session_started_at = None
+    access_row.active_session_last_seen_at = None
+    access_row.active_session_user_agent = None
+
+    db.add(access_row)
+    db.commit()
+
+    return {"ok": True}
 
 
 # =========================

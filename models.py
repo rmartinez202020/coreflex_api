@@ -790,6 +790,23 @@ class TenantUserDashboardAccess(Base):
         nullable=False,
     )
 
+        # ✅ Active public dashboard session lock
+    # Prevents the same tenant user from logging into the same dashboard twice
+    active_session_id = Column(String(255), nullable=True, index=True)
+
+    active_session_started_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    active_session_last_seen_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    active_session_user_agent = Column(String(500), nullable=True)
+
     __table_args__ = (
         UniqueConstraint(
             "tenant_user_id",
