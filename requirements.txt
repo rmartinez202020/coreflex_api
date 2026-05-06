@@ -13,3 +13,4 @@ python-multipart
 requests
 email-validator
 stripe
+redis

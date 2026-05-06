@@ -20,6 +20,9 @@ from database import Base, engine, get_db
 # ========================================
 from cloudinary_config import init_cloudinary  # noqa: E402
 
+# ✅ REDIS CLIENT TEST
+from utils.redis_client import redis_client  # noqa: E402
+
 # ✅ NEW: background counter tick (persistent counters)
 from routers.device_counters_tick import (  # noqa: E402
     start_device_counters_tick,
@@ -100,7 +103,7 @@ async def options_preflight_handler(full_path: str, request: Request):
 
 
 # ========================================
-# ✅ CREATE TABLES + INIT CLOUDINARY + START COUNTER TICK + ALARM ENGINE
+# ✅ CREATE TABLES + INIT CLOUDINARY + REDIS TEST + START COUNTER TICK + ALARM ENGINE
 # ========================================
 @app.on_event("startup")
 async def on_startup():
@@ -117,6 +120,13 @@ async def on_startup():
         print("✅ Cloudinary initialized on startup")
     except Exception as e:
         print("❌ Cloudinary init failed:", repr(e))
+
+    # ✅ Redis connection test
+    try:
+        redis_client.set("startup_test", "coreflex")
+        print("✅ Redis connected:", redis_client.get("startup_test"))
+    except Exception as e:
+        print("❌ Redis startup failed:", repr(e))
 
     # 3) ✅ Start persistent counter engine (keeps counting even if UI is closed)
     try:
@@ -399,8 +409,22 @@ from models import (  # noqa: E402
     CustomerDashboard,
 )
 from utils.zhc1921_live_cache import get_latest as get_latest_zhc1921  # noqa: E402
+from utils.zhc1661_live_cache import get_latest as get_latest_zhc1661  # noqa: E402
 
 OFFLINE_AFTER_SECONDS = int(os.getenv("COREFLEX_OFFLINE_AFTER_SECONDS") or "10")
+
+
+def _parse_cached_datetime(value) -> datetime | None:
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -411,8 +435,8 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _compute_online_status(last_seen: datetime | None) -> str:
-    ls = _as_utc(last_seen)
+def _compute_online_status(last_seen) -> str:
+    ls = _as_utc(_parse_cached_datetime(last_seen))
     if not ls:
         return "offline"
 
@@ -421,8 +445,8 @@ def _compute_online_status(last_seen: datetime | None) -> str:
     return "online" if age <= OFFLINE_AFTER_SECONDS else "offline"
 
 
-def _last_seen_iso(last_seen: datetime | None) -> str:
-    ls = _as_utc(last_seen)
+def _last_seen_iso(last_seen) -> str:
+    ls = _as_utc(_parse_cached_datetime(last_seen))
     return ls.isoformat() if ls else "—"
 
 
@@ -438,8 +462,7 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
     )
     for r in rows_1921:
         cached = get_latest_zhc1921(r.device_id) or {}
-        cache_ls = cached.get("last_seen")
-        last_seen = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+        last_seen = cached.get("last_seen") or r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
 
@@ -478,7 +501,8 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
         .all()
     )
     for r in rows_1661:
-        last_seen = r.last_seen
+        cached = get_latest_zhc1661(r.device_id) or {}
+        last_seen = cached.get("last_seen") or r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
 
@@ -492,12 +516,12 @@ def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
                 "online": online,
                 "is_online": online,
                 "lastSeen": _last_seen_iso(last_seen),
-                "ai1": r.ai1 if r.ai1 is not None else "",
-                "ai2": r.ai2 if r.ai2 is not None else "",
-                "ai3": r.ai3 if r.ai3 is not None else "",
-                "ai4": r.ai4 if r.ai4 is not None else "",
-                "ao1": r.ao1 if r.ao1 is not None else "",
-                "ao2": r.ao2 if r.ao2 is not None else "",
+                "ai1": cached.get("ai1", r.ai1 if r.ai1 is not None else ""),
+                "ai2": cached.get("ai2", r.ai2 if r.ai2 is not None else ""),
+                "ai3": cached.get("ai3", r.ai3 if r.ai3 is not None else ""),
+                "ai4": cached.get("ai4", r.ai4 if r.ai4 is not None else ""),
+                "ao1": cached.get("ao1", r.ao1 if r.ao1 is not None else ""),
+                "ao2": cached.get("ao2", r.ao2 if r.ao2 is not None else ""),
             }
         )
 
