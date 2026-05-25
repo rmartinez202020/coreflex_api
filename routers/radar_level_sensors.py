@@ -32,6 +32,10 @@ class AddSensorBody(BaseModel):
     raw_imei_bytes: str
 
 
+class ClaimSensorBody(BaseModel):
+    raw_imei_bytes: str
+
+
 class TelemetryBody(BaseModel):
     raw_imei_bytes: str
     height_mm: int | None = None
@@ -60,6 +64,9 @@ def row_to_dict(row):
     }
 
 
+# =====================================================
+# OWNER ROUTES
+# =====================================================
 @router.get("/sensors")
 def list_df572_sensors(
     db: Session = Depends(get_db),
@@ -165,6 +172,138 @@ def delete_df572_sensor(
     return {"ok": True, "raw_imei_bytes": imei, "deleted": True}
 
 
+# =====================================================
+# USER CLAIM ROUTES
+# =====================================================
+@router.get("/my-sensors")
+def my_df572_sensors(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rows = db.execute(
+        text("""
+            SELECT *
+            FROM radar_level_sensors_data
+            WHERE user_id = :uid
+            ORDER BY id ASC
+        """),
+        {"uid": current_user.id},
+    ).fetchall()
+
+    return [row_to_dict(r) for r in rows]
+
+
+@router.post("/claim")
+def claim_df572_sensor(
+    body: ClaimSensorBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    imei = normalize_imei(body.raw_imei_bytes)
+
+    row = db.execute(
+        text("""
+            SELECT id, user_id
+            FROM radar_level_sensors_data
+            WHERE raw_imei_bytes = :imei
+            LIMIT 1
+        """),
+        {"imei": imei},
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Sensor IMEI not found. Contact administrator.",
+        )
+
+    m = row._mapping
+    existing_user_id = m.get("user_id")
+
+    if existing_user_id is not None and int(existing_user_id) != int(current_user.id):
+        raise HTTPException(
+            status_code=409,
+            detail="Sensor already claimed by another user.",
+        )
+
+    db.execute(
+        text("""
+            UPDATE radar_level_sensors_data
+            SET
+                user_id = :uid,
+                user_claimed_at = NOW(),
+                updated_at = NOW()
+            WHERE raw_imei_bytes = :imei
+        """),
+        {
+            "uid": current_user.id,
+            "imei": imei,
+        },
+    )
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "claimed": True,
+        "raw_imei_bytes": imei,
+        "user_id": current_user.id,
+    }
+
+
+@router.delete("/unclaim/{imei}")
+def unclaim_df572_sensor(
+    imei: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    imei = normalize_imei(imei)
+
+    row = db.execute(
+        text("""
+            SELECT id, user_id
+            FROM radar_level_sensors_data
+            WHERE raw_imei_bytes = :imei
+            LIMIT 1
+        """),
+        {"imei": imei},
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Sensor not found")
+
+    m = row._mapping
+
+    if m.get("user_id") is None or int(m.get("user_id")) != int(current_user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not own this sensor",
+        )
+
+    db.execute(
+        text("""
+            UPDATE radar_level_sensors_data
+            SET
+                user_id = NULL,
+                user_claimed_at = NULL,
+                updated_at = NOW()
+            WHERE raw_imei_bytes = :imei
+        """),
+        {"imei": imei},
+    )
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "unclaimed": True,
+        "raw_imei_bytes": imei,
+    }
+
+
+# =====================================================
+# NODE-RED TELEMETRY ROUTE
+# =====================================================
 @router.post("/telemetry")
 def ingest_df572_telemetry(
     body: TelemetryBody,
