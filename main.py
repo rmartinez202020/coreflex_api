@@ -309,6 +309,13 @@ from routers.tp4000_devices import router as tp4000_router  # noqa: E402
 app.include_router(tp4000_router)
 
 # ========================================
+# ✅ RADAR LEVEL SENSOR ROUTES (DF572)
+# ========================================
+from routers.radar_level_sensors import router as radar_level_sensors_router  # noqa: E402
+
+app.include_router(radar_level_sensors_router)
+
+# ========================================
 # ✅ DEVICE COUNTERS ROUTES (PERSISTENT COUNTERS)
 # ========================================
 from routers.device_counters import router as device_counters_router  # noqa: E402

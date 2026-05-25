@@ -614,6 +614,63 @@ class TP4000Device(Base):
 
 
 # ===============================
+# 📡 RADAR LEVEL SENSORS TABLE (DF572)
+# Wireless radar level telemetry
+# ===============================
+class RadarLevelSensor(Base):
+    __tablename__ = "radar_level_sensors_data"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # sensor IMEI / unique identifier
+    raw_imei_bytes = Column(String(20), nullable=False, unique=True, index=True)
+
+    # optional owner link
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # when user claimed sensor
+    user_claimed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # telemetry
+    height_mm = Column(Integer, nullable=True)
+    temperature_c = Column(Numeric(5, 2), nullable=True)
+    battery_v = Column(Numeric(5, 2), nullable=True)
+
+    # timestamps
+    sensor_added_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    received_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User")
+
+# ===============================
 # 📊 MAIN DASHBOARD MODEL
 # ===============================
 class MainDashboard(Base):
