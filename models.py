@@ -669,6 +669,7 @@ class RadarLevelSensor(Base):
     )
 
     user = relationship("User")
+    
 
 # ===============================
 # 📊 MAIN DASHBOARD MODEL
