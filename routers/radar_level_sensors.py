@@ -47,8 +47,12 @@ def row_to_dict(row):
         "user_id": m.get("user_id"),
         "user_claimed_at": m.get("user_claimed_at"),
         "height_mm": m.get("height_mm"),
-        "temperature_c": float(m["temperature_c"]) if m.get("temperature_c") is not None else None,
-        "battery_v": float(m["battery_v"]) if m.get("battery_v") is not None else None,
+        "temperature_c": float(m["temperature_c"])
+        if m.get("temperature_c") is not None
+        else None,
+        "battery_v": float(m["battery_v"])
+        if m.get("battery_v") is not None
+        else None,
         "sensor_added_at": m.get("sensor_added_at"),
         "received_at": m.get("received_at"),
         "created_at": m.get("created_at"),
@@ -175,7 +179,11 @@ def ingest_df572_telemetry(
 
     row = db.execute(
         text("""
-            SELECT id
+            SELECT
+                id,
+                raw_imei_bytes,
+                user_id,
+                user_claimed_at
             FROM radar_level_sensors_data
             WHERE raw_imei_bytes = :imei
             LIMIT 1
@@ -186,7 +194,15 @@ def ingest_df572_telemetry(
     if not row:
         raise HTTPException(
             status_code=404,
-            detail="sensor IMEI not found. Add sensor first in admin device manager.",
+            detail="Sensor IMEI not authorized. Owner must add sensor first.",
+        )
+
+    m = row._mapping
+
+    if m.get("user_id") is None or m.get("user_claimed_at") is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Sensor exists but is not claimed by a user.",
         )
 
     db.execute(
@@ -213,5 +229,6 @@ def ingest_df572_telemetry(
     return {
         "ok": True,
         "raw_imei_bytes": imei,
+        "user_id": m.get("user_id"),
         "updated": True,
     }
