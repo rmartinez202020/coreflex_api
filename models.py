@@ -638,6 +638,19 @@ class RadarLevelSensor(Base):
 
     # telemetry
     height_mm = Column(Integer, nullable=True)
+
+    # Previous #1
+    height_2_mm = Column(Integer, nullable=True)
+    received_at_2 = Column(DateTime(timezone=True), nullable=True)
+
+    # Previous #2
+    height_3_mm = Column(Integer, nullable=True)
+    received_at_3 = Column(DateTime(timezone=True), nullable=True)
+
+    # Previous #3
+    height_4_mm = Column(Integer, nullable=True)
+    received_at_4 = Column(DateTime(timezone=True), nullable=True)
+
     temperature_c = Column(Numeric(5, 2), nullable=True)
     battery_v = Column(Numeric(5, 2), nullable=True)
 

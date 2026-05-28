@@ -50,15 +50,32 @@ def row_to_dict(row):
         "raw_imei_bytes": m.get("raw_imei_bytes"),
         "user_id": m.get("user_id"),
         "user_claimed_at": m.get("user_claimed_at"),
+
+        # Current
         "height_mm": m.get("height_mm"),
+        "received_at": m.get("received_at"),
+
+        # Previous #1
+        "height_2_mm": m.get("height_2_mm"),
+        "received_at_2": m.get("received_at_2"),
+
+        # Previous #2
+        "height_3_mm": m.get("height_3_mm"),
+        "received_at_3": m.get("received_at_3"),
+
+        # Previous #3
+        "height_4_mm": m.get("height_4_mm"),
+        "received_at_4": m.get("received_at_4"),
+
         "temperature_c": float(m["temperature_c"])
         if m.get("temperature_c") is not None
         else None,
+
         "battery_v": float(m["battery_v"])
         if m.get("battery_v") is not None
         else None,
+
         "sensor_added_at": m.get("sensor_added_at"),
-        "received_at": m.get("received_at"),
         "created_at": m.get("created_at"),
         "updated_at": m.get("updated_at"),
     }
@@ -348,11 +365,23 @@ def ingest_df572_telemetry(
         text("""
             UPDATE radar_level_sensors_data
             SET
+                -- Shift history down
+                height_4_mm = height_3_mm,
+                received_at_4 = received_at_3,
+
+                height_3_mm = height_2_mm,
+                received_at_3 = received_at_2,
+
+                height_2_mm = height_mm,
+                received_at_2 = received_at,
+
+                -- Save newest telemetry
                 height_mm = :height_mm,
                 temperature_c = :temperature_c,
                 battery_v = :battery_v,
                 received_at = NOW(),
                 updated_at = NOW()
+
             WHERE raw_imei_bytes = :imei
         """),
         {
