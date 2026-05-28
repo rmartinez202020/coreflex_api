@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 import os
 import threading
-import re
 
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
@@ -40,16 +39,22 @@ app = FastAPI(title="CoreFlex API", version="1.0.0")
 
 # ========================================
 # 🌍 CORS
+# ✅ Keep exact frontend origins
+# ✅ Keep regex too
+# ✅ Add explicit OPTIONS fallback below for stubborn preflight cases
 # ========================================
 ALLOWED_ORIGINS = [
+    # ✅ CURRENT LIVE FRONTEND
     "https://www.coreflexiiotsplatform.com",
     "https://coreflexiiotsplatform.com",
     "http://www.coreflexiiotsplatform.com",
     "http://coreflexiiotsplatform.com",
+    # ✅ optional older/alternate spelling support
     "https://www.coreflexiotsplatform.com",
     "https://coreflexiotsplatform.com",
     "http://www.coreflexiotsplatform.com",
     "http://coreflexiotsplatform.com",
+    # ✅ local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
@@ -66,13 +71,19 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-
+# ========================================
+# ✅ EXPLICIT OPTIONS FALLBACK
+# Helps if browser preflight is still stubborn on some routes/proxies
+# ========================================
 @app.options("/{full_path:path}")
 async def options_preflight_handler(full_path: str, request: Request):
     origin = request.headers.get("origin", "")
     allow_origin = origin if origin in ALLOWED_ORIGINS else ""
 
+    # allow regex match too
     if not allow_origin:
+        import re
+
         if re.match(r"^https?://(www\.)?coreflexi{1,2}otsplatform\.com$", origin):
             allow_origin = origin
 
@@ -91,31 +102,39 @@ async def options_preflight_handler(full_path: str, request: Request):
     return Response(status_code=200, headers=headers)
 
 
+# ========================================
+# ✅ CREATE TABLES + INIT CLOUDINARY + REDIS TEST + START COUNTER TICK + ALARM ENGINE
+# ========================================
 @app.on_event("startup")
 async def on_startup():
+    # 1) Ensure DB tables
     try:
         Base.metadata.create_all(bind=engine)
         print("✅ DB tables ensured on startup")
     except Exception as e:
         print("❌ Startup create_all failed:", repr(e))
 
+    # 2) Init Cloudinary (reads Render env vars)
     try:
         init_cloudinary()
         print("✅ Cloudinary initialized on startup")
     except Exception as e:
         print("❌ Cloudinary init failed:", repr(e))
 
+    # ✅ Redis connection test
     try:
         redis_client.set("startup_test", "coreflex")
         print("✅ Redis connected:", redis_client.get("startup_test"))
     except Exception as e:
         print("❌ Redis startup failed:", repr(e))
 
+    # 3) ✅ Start persistent counter engine (keeps counting even if UI is closed)
     try:
         start_device_counters_tick()
     except Exception as e:
         print("❌ start_device_counters_tick failed:", repr(e))
 
+    # 4) ✅ Start alarm engine background loop
     try:
         alarm_thread = threading.Thread(
             target=alarm_engine_loop,
@@ -128,6 +147,9 @@ async def on_startup():
         print("❌ alarm_engine_loop failed to start:", repr(e))
 
 
+# ========================================
+# ✅ STOP BACKGROUND TASKS ON SHUTDOWN
+# ========================================
 @app.on_event("shutdown")
 async def on_shutdown():
     try:
@@ -136,6 +158,9 @@ async def on_shutdown():
         print("❌ stop_device_counters_tick failed:", repr(e))
 
 
+# ========================================
+# ✅ GLOBAL ERROR HANDLER (so you SEE real errors)
+# ========================================
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     print("❌ Unhandled error:", repr(exc))
@@ -149,123 +174,220 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
+# ========================================
+# 🔐 AUTH ROUTES
+# ========================================
 from auth_routes import router as auth_router  # noqa: E402
 
 app.include_router(auth_router)
 
+# ========================================
+# 📊 MAIN DASHBOARD ROUTES
+# ========================================
 from routers.main_dashboard import router as main_dashboard_router  # noqa: E402
 
 app.include_router(main_dashboard_router)
 
+# ========================================
+# 🧩 CUSTOMER DASHBOARDS ROUTES
+# ========================================
 from routers.customers_dashboards import router as customers_dashboards_router  # noqa: E402
 
 app.include_router(customers_dashboards_router)
 
+# ========================================
+# 👤 USER PROFILE ROUTES
+# ========================================
 from routers.user_profile import router as user_profile_router  # noqa: E402
 
 app.include_router(user_profile_router)
 
+# ========================================
+# 📍 CUSTOMER LOCATIONS ROUTES
+# ========================================
 from routers.customer_locations import router as customer_locations_router  # noqa: E402
 
 app.include_router(customer_locations_router)
 
+# ========================================
+# 👥 TENANT USERS ROUTES
+# ✅ IMPORTANT: this was missing, so /tenant-users was not being registered
+# ========================================
 from routers.tenant_users import router as tenant_users_router  # noqa: E402
 
 app.include_router(tenant_users_router)
 
+# ========================================
+# 💳 USER SUBSCRIPTIONS ROUTES
+# ========================================
 from routers.user_subscriptions import router as user_subscriptions_router  # noqa: E402
 
 app.include_router(user_subscriptions_router)
 
+# ========================================
+# 💳 ADMIN SUBSCRIPTIONS ROUTES
+# Owner/admin can view and edit all user subscription rows
+# ========================================
 from routers.admin_subscriptions import router as admin_subscriptions_router  # noqa: E402
 
 app.include_router(admin_subscriptions_router)
 
+# ========================================
+# 💳 USER BILLING ROUTES
+# Stripe payment-intent route for Proceed to Payment modal
+# ========================================
 from routers.billing import router as billing_router  # noqa: E402
 
 app.include_router(billing_router)
 
+# ========================================
+# ✅ SUBSCRIPTION AGREEMENTS ROUTES
+# Separate from billing; stores permanent agreement acceptance history
+# ========================================
 from routers.subscription_agreements import (  # noqa: E402
     router as subscription_agreements_router,
 )
 
 app.include_router(subscription_agreements_router)
 
+# ========================================
+# 💳 ADMIN BILLING ROUTES
+# Stripe billing plans / addons sync
+# ========================================
 from routers.billing_admin import router as billing_admin_router  # noqa: E402
 
 app.include_router(billing_admin_router)
 
+# ========================================
+# 🖼 IMAGES ROUTES (Cloudinary Image Library)
+# ========================================
 from routers.images import router as images_router  # noqa: E402
 
 app.include_router(images_router)
 
+# ========================================
+# ✅ DEVICE REGISTRY ROUTES
+# Central table for:
+# - device_id
+# - device_model
+# - device_mac
+# ========================================
 from routers.device_registry import router as device_registry_router  # noqa: E402
 
 app.include_router(device_registry_router)
 
+# ========================================
+# ✅ GATEWAY DEVICE SEEN ROUTES
+# Receives gateway heartbeat / device-seen JSON
+# Only stores rows when MAC exists in device_registry
+# ========================================
 from routers.gateway_device_seen import (  # noqa: E402
     router as gateway_device_seen_router,
 )
 
 app.include_router(gateway_device_seen_router)
 
+# ========================================
+# ✅ ZHC1921 DEVICES ROUTES (CF-2000)
+# ========================================
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
 
 app.include_router(zhc1921_router)
 
+# ========================================
+# ✅ ZHC1661 DEVICES ROUTES (CF-1600)
+# ========================================
 from routers.zhc1661_devices import router as zhc1661_router  # noqa: E402
 
 app.include_router(zhc1661_router)
 
+# ========================================
+# ✅ TP-4000 DEVICES ROUTES
+# ========================================
 from routers.tp4000_devices import router as tp4000_router  # noqa: E402
 
 app.include_router(tp4000_router)
 
+# ========================================
+# ✅ RADAR LEVEL SENSOR ROUTES (DF572)
+# ========================================
 from routers.radar_level_sensors import router as radar_level_sensors_router  # noqa: E402
 
 app.include_router(radar_level_sensors_router)
 
+# ========================================
+# ✅ DEVICE COUNTERS ROUTES (PERSISTENT COUNTERS)
+# ========================================
 from routers.device_counters import router as device_counters_router  # noqa: E402
 
 app.include_router(device_counters_router)
 
+# ========================================
+# ✅ CONTROL BINDINGS ROUTES (DO UNIQUE PER DASHBOARD)
+# ========================================
 from routers.control_bindings import router as control_bindings_router  # noqa: E402
 
 app.include_router(control_bindings_router)
 
+# ========================================
+# ✅ NODE-RED GRAPHICS ROUTES + HELPERS
+# endpoints:
+#   GET /node-red/ping
+# (helpers used internally to start streams from Apply route)
+# ========================================
 from routers.node_red_graphics import router as node_red_graphics_router  # noqa: E402
 
 app.include_router(node_red_graphics_router)
 
+# ========================================
+# ✅ GRAPHIC DISPLAY BINDINGS ROUTES
+# ========================================
 from routers.graphic_display_bindings import (  # noqa: E402
     router as graphic_display_bindings_router,
 )
 
 app.include_router(graphic_display_bindings_router)
 
+# ========================================
+# ✅ ALARM LOG WINDOWS ROUTES
+# ========================================
 from routers.alarm_log_windows import router as alarm_log_windows_router  # noqa: E402
 
 app.include_router(alarm_log_windows_router)
 
+# ========================================
+# ✅ ALARM DEFINITIONS ROUTES
+# ========================================
 from routers.alarm_definitions import router as alarm_definitions_router  # noqa: E402
 
 app.include_router(alarm_definitions_router)
 
+# ========================================
+# ✅ ALARM HISTORY ROUTES
+# ========================================
 from routers.alarm_history import router as alarm_history_router  # noqa: E402
 
 app.include_router(alarm_history_router)
 
-
+# ========================================
+# ❤️ HEALTH CHECK
+# ========================================
 @app.get("/health")
 def health():
     return {"ok": True, "status": "API running"}
 
 
+# ========================================
+# 🧪 CORS TEST ENDPOINT
+# ========================================
 @app.get("/cors-test")
 def cors_test():
     return {"ok": True, "message": "CORS working"}
 
 
+# ========================================
+# 📡 TEMP SENSOR ENDPOINT
+# ========================================
 class SensorUpdate(BaseModel):
     imei: str
     level: float
@@ -280,14 +402,14 @@ def update_sensor(data: SensorUpdate):
 
 
 # ========================================
-# ✅ /devices + /tenant-access/devices
+# ✅ /devices (FRONTEND COMPAT)
+# Return the current user's CLAIMED devices (ZHC1921 + ZHC1661 + TP4000)
 # ========================================
 from auth_utils import get_current_user  # noqa: E402
 from models import (  # noqa: E402
     ZHC1921Device,
     ZHC1661Device,
     TP4000Device,
-    RadarLevelSensor,
     User,
     TenantUser,
     TenantUserDashboardAccess,
@@ -335,121 +457,7 @@ def _last_seen_iso(last_seen) -> str:
     return ls.isoformat() if ls else "—"
 
 
-def _normalize_public_model(raw) -> str:
-    v = str(raw or "").strip().lower()
-
-    if v in {"zhc1921", "cf-2000", "cf2000"}:
-        return "zhc1921"
-
-    if v in {"zhc1661", "cf-1600", "cf1600"}:
-        return "zhc1661"
-
-    if v in {"tp4000", "tp-4000"}:
-        return "tp4000"
-
-    if v in {"cfr100", "cf-r100", "cf_r100", "radar-level", "radar_level"}:
-        return "cfr100"
-
-    return v
-
-
-def _normalize_public_device_id(value) -> str:
-    return re.sub(r"\D", "", str(value or "").strip())
-
-
-def _extract_dashboard_objects(layout):
-    if not isinstance(layout, dict):
-        return []
-
-    objects = (
-        layout.get("canvas", {}).get("objects")
-        or layout.get("objects")
-        or layout.get("droppedTanks")
-        or []
-    )
-
-    return objects if isinstance(objects, list) else []
-
-
-def _extract_bound_devices_from_dashboard_layout(layout):
-    wanted = {
-        "zhc1921": set(),
-        "zhc1661": set(),
-        "tp4000": set(),
-        "cfr100": set(),
-    }
-
-    objects = _extract_dashboard_objects(layout)
-
-    for obj in objects:
-        if not isinstance(obj, dict):
-            continue
-
-        props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
-        tag = props.get("tag") or obj.get("tag") or None
-
-        model = ""
-        device_id = ""
-
-        if isinstance(tag, dict):
-            model = _normalize_public_model(tag.get("model"))
-            device_id = _normalize_public_device_id(
-                tag.get("deviceId") or tag.get("device_id") or ""
-            )
-
-        if not model or not device_id:
-            model = _normalize_public_model(
-                obj.get("bindModel")
-                or props.get("bindModel")
-                or obj.get("bind_model")
-                or props.get("bind_model")
-                or obj.get("deviceModel")
-                or props.get("deviceModel")
-                or obj.get("device_model")
-                or props.get("device_model")
-                or ""
-            )
-
-            device_id = _normalize_public_device_id(
-                obj.get("bindDeviceId")
-                or props.get("bindDeviceId")
-                or obj.get("bind_device_id")
-                or props.get("bind_device_id")
-                or obj.get("bindImei")
-                or props.get("bindImei")
-                or obj.get("unitId")
-                or props.get("unitId")
-                or obj.get("raw_imei_bytes")
-                or props.get("raw_imei_bytes")
-                or ""
-            )
-
-        if model and device_id:
-            if model not in wanted:
-                wanted[model] = set()
-            wanted[model].add(device_id)
-
-    return wanted
-
-
-def _device_allowed(wanted: dict | None, model_key: str, device_id: str) -> bool:
-    if wanted is None:
-        return True
-
-    model = _normalize_public_model(model_key)
-    did = _normalize_public_device_id(device_id)
-
-    if not model or not did:
-        return False
-
-    return did in wanted.get(model, set())
-
-
-def _append_claimed_devices_for_owner(
-    db: Session,
-    owner_user_id: int,
-    wanted: dict | None = None,
-):
+def _append_claimed_devices_for_owner(db: Session, owner_user_id: int):
     out = []
 
     # ---- ZHC1921 (CF-2000) ----
@@ -459,11 +467,7 @@ def _append_claimed_devices_for_owner(
         .order_by(ZHC1921Device.id.asc())
         .all()
     )
-
     for r in rows_1921:
-        if not _device_allowed(wanted, "zhc1921", r.device_id):
-            continue
-
         cached = get_latest_zhc1921(r.device_id) or {}
         last_seen = cached.get("last_seen") or r.last_seen
         status = _compute_online_status(last_seen)
@@ -472,11 +476,7 @@ def _append_claimed_devices_for_owner(
         out.append(
             {
                 "model": "ZHC1921",
-                "deviceModel": "ZHC1921",
-                "device_model": "zhc1921",
-                "bindModel": "zhc1921",
                 "deviceId": r.device_id,
-                "device_id": r.device_id,
                 "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
                 "ownedBy": r.claimed_by_email or "—",
                 "status": status,
@@ -489,12 +489,6 @@ def _append_claimed_devices_for_owner(
                 "in4": int(cached.get("di4", r.di4 or 0) or 0),
                 "in5": int(cached.get("di5", getattr(r, "di5", 0) or 0) or 0),
                 "in6": int(cached.get("di6", getattr(r, "di6", 0) or 0) or 0),
-                "di1": int(cached.get("di1", r.di1 or 0) or 0),
-                "di2": int(cached.get("di2", r.di2 or 0) or 0),
-                "di3": int(cached.get("di3", r.di3 or 0) or 0),
-                "di4": int(cached.get("di4", r.di4 or 0) or 0),
-                "di5": int(cached.get("di5", getattr(r, "di5", 0) or 0) or 0),
-                "di6": int(cached.get("di6", getattr(r, "di6", 0) or 0) or 0),
                 "do1": int(cached.get("do1", r.do1 or 0) or 0),
                 "do2": int(cached.get("do2", r.do2 or 0) or 0),
                 "do3": int(cached.get("do3", r.do3 or 0) or 0),
@@ -513,11 +507,7 @@ def _append_claimed_devices_for_owner(
         .order_by(ZHC1661Device.id.asc())
         .all()
     )
-
     for r in rows_1661:
-        if not _device_allowed(wanted, "zhc1661", r.device_id):
-            continue
-
         cached = get_latest_zhc1661(r.device_id) or {}
         last_seen = cached.get("last_seen") or r.last_seen
         status = _compute_online_status(last_seen)
@@ -526,11 +516,7 @@ def _append_claimed_devices_for_owner(
         out.append(
             {
                 "model": "ZHC1661",
-                "deviceModel": "ZHC1661",
-                "device_model": "zhc1661",
-                "bindModel": "zhc1661",
                 "deviceId": r.device_id,
-                "device_id": r.device_id,
                 "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
                 "ownedBy": r.claimed_by_email or "—",
                 "status": status,
@@ -553,11 +539,7 @@ def _append_claimed_devices_for_owner(
         .order_by(TP4000Device.id.asc())
         .all()
     )
-
     for r in rows_tp4000:
-        if not _device_allowed(wanted, "tp4000", r.device_id):
-            continue
-
         last_seen = r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
@@ -565,11 +547,7 @@ def _append_claimed_devices_for_owner(
         out.append(
             {
                 "model": "TP4000",
-                "deviceModel": "TP4000",
-                "device_model": "tp4000",
-                "bindModel": "tp4000",
                 "deviceId": r.device_id,
-                "device_id": r.device_id,
                 "addedAt": r.claimed_at.isoformat() if r.claimed_at else "—",
                 "ownedBy": r.claimed_by_email or "—",
                 "status": status,
@@ -587,67 +565,15 @@ def _append_claimed_devices_for_owner(
             }
         )
 
-    # ---- CFR100 / Radar Level Sensor ----
-    rows_radar = (
-        db.query(RadarLevelSensor)
-        .filter(RadarLevelSensor.user_id == owner_user_id)
-        .order_by(RadarLevelSensor.id.asc())
-        .all()
-    )
-
-    for r in rows_radar:
-        imei = _normalize_public_device_id(r.raw_imei_bytes)
-
-        if not _device_allowed(wanted, "cfr100", imei):
-            continue
-
-        status = _compute_online_status(r.received_at)
-        online = status == "online"
-
-        temperature_c = (
-            float(r.temperature_c) if r.temperature_c is not None else None
-        )
-        battery_v = float(r.battery_v) if r.battery_v is not None else None
-
-        out.append(
-            {
-                "model": "cfr100",
-                "deviceModel": "CFR100",
-                "device_model": "cfr100",
-                "bindModel": "cfr100",
-                "deviceId": imei,
-                "device_id": imei,
-                "raw_imei_bytes": imei,
-                "imei": imei,
-                "status": status,
-                "online": online,
-                "is_online": online,
-                "lastSeen": _last_seen_iso(r.received_at),
-                "received_at": r.received_at.isoformat() if r.received_at else None,
-                "height_mm": r.height_mm,
-                "height": r.height_mm,
-                "temperature_c": temperature_c,
-                "temperature": temperature_c,
-                "battery_v": battery_v,
-                "battery": battery_v,
-                "user_claimed_at": (
-                    r.user_claimed_at.isoformat() if r.user_claimed_at else None
-                ),
-                "sensor_added_at": (
-                    r.sensor_added_at.isoformat() if r.sensor_added_at else None
-                ),
-            }
-        )
-
     return out
 
 
-def _resolve_public_tenant_dashboard(
+def _resolve_public_tenant_owner_user_id(
     db: Session,
     dashboard_slug: str,
     public_launch_id: str,
     tenant_email: str,
-) -> CustomerDashboard:
+) -> int:
     clean_slug = str(dashboard_slug or "").strip()
     clean_public_id = str(public_launch_id or "").strip()
     clean_email = str(tenant_email or "").strip().lower()
@@ -665,7 +591,6 @@ def _resolve_public_tenant_dashboard(
         .filter(CustomerDashboard.is_public_launch_enabled.is_(True))
         .first()
     )
-
     if not dashboard:
         raise HTTPException(status_code=404, detail="Public dashboard not found.")
 
@@ -677,7 +602,6 @@ def _resolve_public_tenant_dashboard(
         .filter(TenantUser.is_active.is_(True))
         .first()
     )
-
     if not tenant:
         raise HTTPException(
             status_code=403,
@@ -690,28 +614,12 @@ def _resolve_public_tenant_dashboard(
         .filter(TenantUserDashboardAccess.dashboard_id == dashboard.id)
         .first()
     )
-
     if not has_access:
         raise HTTPException(
             status_code=403,
             detail="Tenant user not authorized for this dashboard.",
         )
 
-    return dashboard
-
-
-def _resolve_public_tenant_owner_user_id(
-    db: Session,
-    dashboard_slug: str,
-    public_launch_id: str,
-    tenant_email: str,
-) -> int:
-    dashboard = _resolve_public_tenant_dashboard(
-        db=db,
-        dashboard_slug=dashboard_slug,
-        public_launch_id=public_launch_id,
-        tenant_email=tenant_email,
-    )
     return dashboard.user_id
 
 
@@ -730,17 +638,10 @@ def list_tenant_public_devices(
     tenant_email: str,
     db: Session = Depends(get_db),
 ):
-    dashboard = _resolve_public_tenant_dashboard(
+    owner_user_id = _resolve_public_tenant_owner_user_id(
         db=db,
         dashboard_slug=dashboard_slug,
         public_launch_id=public_launch_id,
         tenant_email=tenant_email,
     )
-
-    wanted = _extract_bound_devices_from_dashboard_layout(dashboard.layout)
-
-    return _append_claimed_devices_for_owner(
-        db=db,
-        owner_user_id=dashboard.user_id,
-        wanted=wanted,
-    )
+    return _append_claimed_devices_for_owner(db, owner_user_id)
