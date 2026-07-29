@@ -1,9 +1,7 @@
 # routers/control_bindings.py
 import os
 import uuid
-import json
-import socket
-
+import requests
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -39,28 +37,14 @@ ALLOWED_INTERLOCK_TYPES = {"NO", "NC"}
 
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
 
-# Existing Node-RED HTTP endpoints continue using this URL.
-NODE_RED_BASE_URL = os.getenv(
-    "NODE_RED_BASE_URL",
-    "http://98.90.225.131:1880",
+NODE_RED_DO_WRITE_URL = os.getenv(
+    "NODE_RED_DO_WRITE_URL",
+    "http://98.90.225.131:1880/coreflex/command",
 ).strip()
-
-# Raw TCP control-command receiver exposed by the backend Node-RED instance.
-NODE_RED_COMMAND_HOST = os.getenv(
-    "NODE_RED_COMMAND_HOST",
-    "98.90.225.131",
-).strip()
-
-try:
-    NODE_RED_COMMAND_PORT = int(
-        os.getenv("NODE_RED_COMMAND_PORT", "9100")
-    )
-except (TypeError, ValueError):
-    NODE_RED_COMMAND_PORT = 9100
 
 NODE_RED_COMMAND_KEY = os.getenv(
     "NODE_RED_COMMAND_KEY",
-    "",
+    "CFX_k29sLx92Jd8slQp4NzT7MartinezVx93LwQa2",
 ).strip()
 
 
@@ -109,127 +93,25 @@ def _as_optional_float(v):
         raise HTTPException(status_code=400, detail="Invalid numeric scaling value")
 
 
-def _send_to_node_red_tcp(
-    payload: dict,
-    timeout_sec: float = 3.5,
-):
-    if not NODE_RED_COMMAND_HOST:
-        error = "NODE_RED_COMMAND_HOST is not configured"
-        print(f"[TCP COMMAND] ERROR: {error}", flush=True)
-        return {
-            "ok": False,
-            "nodeRedOk": False,
-            "pending": False,
-            "status": 500,
-            "error": error,
-        }
-
-    if not NODE_RED_COMMAND_KEY:
-        error = "NODE_RED_COMMAND_KEY is not configured"
-        print(f"[TCP COMMAND] ERROR: {error}", flush=True)
-        return {
-            "ok": False,
-            "nodeRedOk": False,
-            "pending": False,
-            "status": 500,
-            "error": error,
-        }
-
-    tcp_payload = {
-        **payload,
-        "api_key": NODE_RED_COMMAND_KEY,
-    }
-
-    # One JSON command per line. Configure the Node-RED TCP In node to
-    # emit a String message delimited by \n.
-    message = json.dumps(
-        tcp_payload,
-        separators=(",", ":"),
-        default=str,
-    ) + "\n"
-    encoded_message = message.encode("utf-8")
-
-    print(
-        "[TCP COMMAND] CONNECTING "
-        f"host={NODE_RED_COMMAND_HOST} "
-        f"port={NODE_RED_COMMAND_PORT} "
-        f"request_id={payload.get('request_id')}",
-        flush=True,
+def _raise_node_red_not_configured():
+    raise HTTPException(
+        status_code=500,
+        detail="NODE_RED_DO_WRITE_URL not configured on server",
     )
 
+
+def _node_red_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    if NODE_RED_COMMAND_KEY:
+        headers["X-COMMAND-KEY"] = NODE_RED_COMMAND_KEY
+    return headers
+
+
+def _safe_json(res):
     try:
-        with socket.create_connection(
-            (NODE_RED_COMMAND_HOST, NODE_RED_COMMAND_PORT),
-            timeout=timeout_sec,
-        ) as sock:
-            sock.settimeout(timeout_sec)
-            sock.sendall(encoded_message)
-
-        print(
-            "[TCP COMMAND] SENT SUCCESSFULLY "
-            f"bytes={len(encoded_message)} "
-            f"request_id={payload.get('request_id')}",
-            flush=True,
-        )
-
-        return {
-            "ok": True,
-            "nodeRedOk": True,
-            "pending": False,
-            "status": 200,
-            "data": {
-                "transport": "tcp",
-                "host": NODE_RED_COMMAND_HOST,
-                "port": NODE_RED_COMMAND_PORT,
-                "bytesSent": len(encoded_message),
-            },
-        }
-
-    except socket.timeout as e:
-        print(f"[TCP COMMAND] TIMEOUT: {e!r}", flush=True)
-        return {
-            "ok": False,
-            "nodeRedOk": False,
-            "pending": False,
-            "status": 504,
-            "error": (
-                "Node-RED TCP timeout connecting to "
-                f"{NODE_RED_COMMAND_HOST}:{NODE_RED_COMMAND_PORT}"
-            ),
-        }
-    except ConnectionRefusedError as e:
-        print(f"[TCP COMMAND] CONNECTION REFUSED: {e!r}", flush=True)
-        return {
-            "ok": False,
-            "nodeRedOk": False,
-            "pending": False,
-            "status": 502,
-            "error": (
-                "Node-RED TCP connection refused at "
-                f"{NODE_RED_COMMAND_HOST}:{NODE_RED_COMMAND_PORT}"
-            ),
-        }
-    except OSError as e:
-        print(f"[TCP COMMAND] OS ERROR: {e!r}", flush=True)
-        return {
-            "ok": False,
-            "nodeRedOk": False,
-            "pending": False,
-            "status": 502,
-            "error": (
-                "Node-RED TCP unreachable at "
-                f"{NODE_RED_COMMAND_HOST}:{NODE_RED_COMMAND_PORT}: {repr(e)}"
-            ),
-        }
-    except Exception as e:
-        print(f"[TCP COMMAND] UNEXPECTED ERROR: {e!r}", flush=True)
-        return {
-            "ok": False,
-            "nodeRedOk": False,
-            "pending": False,
-            "status": 500,
-            "error": f"Unexpected TCP command error: {repr(e)}",
-        }
+        return res.json()
+    except Exception:
+        return None
 
 
 def _normalize_widget_type(value: str) -> str:
@@ -276,6 +158,61 @@ def _check_tenant_control_access(request: Request):
             status_code=403,
             detail="This tenant has read-only access.",
         )
+
+
+def _post_to_node_red_wait(
+    url: str,
+    payload: dict,
+    headers: dict,
+    timeout_sec: float = 3.5,
+):
+    try:
+        connect_t = min(1.5, max(0.5, timeout_sec / 2))
+        read_t = max(0.5, timeout_sec - connect_t)
+
+        r = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(connect_t, read_t),
+        )
+
+        data = _safe_json(r)
+        text_body = (r.text or "").strip()
+
+        if 200 <= r.status_code < 300:
+            return {
+                "ok": True,
+                "nodeRedOk": True,
+                "pending": False,
+                "status": r.status_code,
+                "data": data if data is not None else {"raw": text_body},
+            }
+
+        return {
+            "ok": False,
+            "nodeRedOk": False,
+            "pending": False,
+            "status": r.status_code,
+            "error": data if data is not None else (text_body or "Node-RED write failed"),
+        }
+
+    except requests.Timeout:
+        return {
+            "ok": True,
+            "nodeRedOk": False,
+            "pending": True,
+            "status": 504,
+            "warning": "Node-RED timeout (pending)",
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "nodeRedOk": False,
+            "pending": False,
+            "status": 502,
+            "error": f"Node-RED unreachable: {repr(e)}",
+        }
 
 
 def _is_do_field(field: str) -> bool:
@@ -936,6 +873,9 @@ def write_control_do(
                 },
             )
 
+    if not NODE_RED_DO_WRITE_URL:
+        _raise_node_red_not_configured()
+
     request_id = str(uuid.uuid4())
     lk = _lock_key(device_id, field)
     expires_at = _utc_now() + timedelta(milliseconds=int(ACTUATION_HOLD_MS))
@@ -1013,30 +953,12 @@ def write_control_do(
             }
         )
 
-    result = _send_to_node_red_tcp(
+    result = _post_to_node_red_wait(
+        NODE_RED_DO_WRITE_URL,
         payload,
+        _node_red_headers(),
         timeout_sec=3.5,
     )
-
-    print(
-        "[CONTROL WRITE] TCP RESULT =",
-        result,
-        flush=True,
-    )
-
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=int(result.get("status") or 502),
-            detail={
-                "error": result.get(
-                    "error",
-                    "Failed to send command to Node-RED",
-                ),
-                "nodeRedHost": NODE_RED_COMMAND_HOST,
-                "nodeRedPort": NODE_RED_COMMAND_PORT,
-                "requestId": request_id,
-            },
-        )
 
     response = {
         "requestId": request_id,
