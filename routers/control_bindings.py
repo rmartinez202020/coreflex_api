@@ -4,7 +4,6 @@ import uuid
 import json
 import socket
 
-from urllib.parse import urlparse
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -40,29 +39,24 @@ ALLOWED_INTERLOCK_TYPES = {"NO", "NC"}
 
 ACTUATION_HOLD_MS = int(os.getenv("ACTUATION_HOLD_MS", "10000"))
 
-# Raw TCP command receiver exposed by the backend Node-RED instance.
-# NODE_RED_BASE_URL remains supported so the existing Render variable
-# (for example http://98.90.225.131:9100) can be reused.
+# Existing Node-RED HTTP endpoints continue using this URL.
 NODE_RED_BASE_URL = os.getenv(
     "NODE_RED_BASE_URL",
-    "http://98.90.225.131:9100",
+    "http://98.90.225.131:1880",
 ).strip()
 
-_PARSED_NODE_RED_BASE_URL = urlparse(
-    NODE_RED_BASE_URL if "://" in NODE_RED_BASE_URL else f"tcp://{NODE_RED_BASE_URL}"
-)
-
+# Raw TCP control-command receiver exposed by the backend Node-RED instance.
 NODE_RED_COMMAND_HOST = os.getenv(
     "NODE_RED_COMMAND_HOST",
-    _PARSED_NODE_RED_BASE_URL.hostname or "98.90.225.131",
+    "98.90.225.131",
 ).strip()
 
-NODE_RED_COMMAND_PORT = int(
-    os.getenv(
-        "NODE_RED_COMMAND_PORT",
-        str(_PARSED_NODE_RED_BASE_URL.port or 9100),
+try:
+    NODE_RED_COMMAND_PORT = int(
+        os.getenv("NODE_RED_COMMAND_PORT", "9100")
     )
-)
+except (TypeError, ValueError):
+    NODE_RED_COMMAND_PORT = 9100
 
 NODE_RED_COMMAND_KEY = os.getenv(
     "NODE_RED_COMMAND_KEY",
@@ -120,21 +114,25 @@ def _send_to_node_red_tcp(
     timeout_sec: float = 3.5,
 ):
     if not NODE_RED_COMMAND_HOST:
+        error = "NODE_RED_COMMAND_HOST is not configured"
+        print(f"[TCP COMMAND] ERROR: {error}", flush=True)
         return {
             "ok": False,
             "nodeRedOk": False,
             "pending": False,
             "status": 500,
-            "error": "NODE_RED_COMMAND_HOST is not configured",
+            "error": error,
         }
 
     if not NODE_RED_COMMAND_KEY:
+        error = "NODE_RED_COMMAND_KEY is not configured"
+        print(f"[TCP COMMAND] ERROR: {error}", flush=True)
         return {
             "ok": False,
             "nodeRedOk": False,
             "pending": False,
             "status": 500,
-            "error": "NODE_RED_COMMAND_KEY is not configured",
+            "error": error,
         }
 
     tcp_payload = {
@@ -143,12 +141,21 @@ def _send_to_node_red_tcp(
     }
 
     # One JSON command per line. Configure the Node-RED TCP In node to
-    # split messages on the newline delimiter.
+    # emit a String message delimited by \n.
     message = json.dumps(
         tcp_payload,
         separators=(",", ":"),
         default=str,
     ) + "\n"
+    encoded_message = message.encode("utf-8")
+
+    print(
+        "[TCP COMMAND] CONNECTING "
+        f"host={NODE_RED_COMMAND_HOST} "
+        f"port={NODE_RED_COMMAND_PORT} "
+        f"request_id={payload.get('request_id')}",
+        flush=True,
+    )
 
     try:
         with socket.create_connection(
@@ -156,7 +163,14 @@ def _send_to_node_red_tcp(
             timeout=timeout_sec,
         ) as sock:
             sock.settimeout(timeout_sec)
-            sock.sendall(message.encode("utf-8"))
+            sock.sendall(encoded_message)
+
+        print(
+            "[TCP COMMAND] SENT SUCCESSFULLY "
+            f"bytes={len(encoded_message)} "
+            f"request_id={payload.get('request_id')}",
+            flush=True,
+        )
 
         return {
             "ok": True,
@@ -167,10 +181,12 @@ def _send_to_node_red_tcp(
                 "transport": "tcp",
                 "host": NODE_RED_COMMAND_HOST,
                 "port": NODE_RED_COMMAND_PORT,
+                "bytesSent": len(encoded_message),
             },
         }
 
-    except socket.timeout:
+    except socket.timeout as e:
+        print(f"[TCP COMMAND] TIMEOUT: {e!r}", flush=True)
         return {
             "ok": False,
             "nodeRedOk": False,
@@ -181,7 +197,8 @@ def _send_to_node_red_tcp(
                 f"{NODE_RED_COMMAND_HOST}:{NODE_RED_COMMAND_PORT}"
             ),
         }
-    except ConnectionRefusedError:
+    except ConnectionRefusedError as e:
+        print(f"[TCP COMMAND] CONNECTION REFUSED: {e!r}", flush=True)
         return {
             "ok": False,
             "nodeRedOk": False,
@@ -193,6 +210,7 @@ def _send_to_node_red_tcp(
             ),
         }
     except OSError as e:
+        print(f"[TCP COMMAND] OS ERROR: {e!r}", flush=True)
         return {
             "ok": False,
             "nodeRedOk": False,
@@ -204,6 +222,7 @@ def _send_to_node_red_tcp(
             ),
         }
     except Exception as e:
+        print(f"[TCP COMMAND] UNEXPECTED ERROR: {e!r}", flush=True)
         return {
             "ok": False,
             "nodeRedOk": False,
@@ -211,6 +230,7 @@ def _send_to_node_red_tcp(
             "status": 500,
             "error": f"Unexpected TCP command error: {repr(e)}",
         }
+
 
 def _normalize_widget_type(value: str) -> str:
     widget_type = _as_str(value).lower()
@@ -997,6 +1017,26 @@ def write_control_do(
         payload,
         timeout_sec=3.5,
     )
+
+    print(
+        "[CONTROL WRITE] TCP RESULT =",
+        result,
+        flush=True,
+    )
+
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=int(result.get("status") or 502),
+            detail={
+                "error": result.get(
+                    "error",
+                    "Failed to send command to Node-RED",
+                ),
+                "nodeRedHost": NODE_RED_COMMAND_HOST,
+                "nodeRedPort": NODE_RED_COMMAND_PORT,
+                "requestId": request_id,
+            },
+        )
 
     response = {
         "requestId": request_id,
