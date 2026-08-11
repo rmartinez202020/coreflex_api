@@ -78,6 +78,19 @@ VALID_LOG_STATUSES = {
 
 
 # ============================================================
+# OFFICIAL ACTOR TYPES
+# ============================================================
+
+LOG_ACTOR_OWNER = "OWNER"
+LOG_ACTOR_TENANT = "TENANT"
+
+VALID_LOG_ACTOR_TYPES = {
+    LOG_ACTOR_OWNER,
+    LOG_ACTOR_TENANT,
+}
+
+
+# ============================================================
 # INTERNAL HELPERS
 # ============================================================
 
@@ -131,6 +144,15 @@ def _normalize_status(status: str) -> str:
     return value
 
 
+def _normalize_actor_type(actor_type: str | None) -> str:
+    value = str(actor_type or LOG_ACTOR_OWNER).strip().upper()
+
+    if value not in VALID_LOG_ACTOR_TYPES:
+        raise ValueError(f"Invalid log actor_type: {actor_type!r}")
+
+    return value
+
+
 def _get_logs_write_url() -> str | None:
     """
     Build the Node-RED Logs endpoint from the existing
@@ -165,6 +187,14 @@ def send_log(
     status: str = LOG_STATUS_SUCCESS,
     message: str | None = None,
 
+    # Actor identity
+    # OWNER  -> normal CoreFlex account user
+    # TENANT -> tenant user acting under the owner's account
+    actor_type: str = LOG_ACTOR_OWNER,
+    tenant_user_id: int | None = None,
+    tenant_email: str | None = None,
+    tenant_name: str | None = None,
+
     # Optional context
     customer_id: int | None = None,
     dashboard_id: int | str | None = None,
@@ -186,11 +216,24 @@ def send_log(
     """
     Send one CoreFlex audit log to Node-RED.
 
+    IMPORTANT OWNERSHIP RULE:
+    -------------------------
+    `user_id` and `user_email` identify the CoreFlex OWNER whose
+    log file will store the event.
+
+    For tenant activity:
+      - user_id/user_email = the owning CoreFlex user
+      - actor_type = "TENANT"
+      - tenant_user_id / tenant_email / tenant_name identify the actor
+
+    This guarantees that tenant activity is stored under the owner's
+    logs and never becomes a separate cross-user log namespace.
+
     IMPORTANT SECURITY RULE:
     ------------------------
     `user_id` must come from trusted backend context:
       - current_user.id from JWT, or
-      - a User row already resolved by the backend.
+      - an owner User row already resolved by the backend.
 
     Never trust a browser-provided user_id as the owner of a log.
 
@@ -205,7 +248,7 @@ def send_log(
         False -> log could not be sent
     """
 
-    # A log must always belong to a real CoreFlex user.
+    # A log must always belong to a real CoreFlex owner user.
     clean_user_id = _clean_optional_int(user_id)
     clean_user_email = _clean_optional_text(user_email)
 
@@ -220,6 +263,7 @@ def send_log(
     try:
         clean_category = _normalize_category(category)
         clean_status = _normalize_status(status)
+        clean_actor_type = _normalize_actor_type(actor_type)
     except ValueError as exc:
         print(f"⚠️ LOG ENGINE: {exc}")
         return False
@@ -228,6 +272,26 @@ def send_log(
     if not clean_action:
         print("⚠️ LOG ENGINE: skipped log because action is missing")
         return False
+
+    # Tenant actor validation.
+    clean_tenant_user_id = _clean_optional_int(tenant_user_id)
+    clean_tenant_email = _clean_optional_text(tenant_email)
+    clean_tenant_name = _clean_optional_text(tenant_name)
+
+    if clean_actor_type == LOG_ACTOR_TENANT:
+        if clean_tenant_user_id is None:
+            print(
+                "⚠️ LOG ENGINE: skipped tenant log because "
+                "tenant_user_id is missing/invalid"
+            )
+            return False
+
+        if not clean_tenant_email:
+            print(
+                "⚠️ LOG ENGINE: skipped tenant log because "
+                "tenant_email is missing"
+            )
+            return False
 
     logs_write_url = _get_logs_write_url()
     if not logs_write_url:
@@ -241,6 +305,24 @@ def send_log(
         # Ownership
         "user_id": clean_user_id,
         "user_email": clean_user_email,
+
+        # Actor identity
+        "actor_type": clean_actor_type,
+        "tenant_user_id": (
+            clean_tenant_user_id
+            if clean_actor_type == LOG_ACTOR_TENANT
+            else None
+        ),
+        "tenant_email": (
+            clean_tenant_email
+            if clean_actor_type == LOG_ACTOR_TENANT
+            else None
+        ),
+        "tenant_name": (
+            clean_tenant_name
+            if clean_actor_type == LOG_ACTOR_TENANT
+            else None
+        ),
 
         # Core event
         "timestamp": _clean_optional_text(timestamp) or _utc_timestamp(),
