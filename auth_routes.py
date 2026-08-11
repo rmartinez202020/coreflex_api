@@ -25,6 +25,12 @@ from auth_utils import (
 )
 from jwt_handler import create_access_token
 from utils.email_service import send_reset_code_email
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_SECURITY,
+    LOG_STATUS_SUCCESS,
+    LOG_STATUS_FAILED,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -285,6 +291,24 @@ def login(
         user = db.query(User).filter(User.email == clean_email).first()
 
         if not user or not verify_password(body.password, user.hashed_password):
+            # LOGS & ACTIVITY
+            # SECURITY -> LOGIN FAILED
+            #
+            # Only store the failed login under a CoreFlex user when
+            # the account actually exists. Unknown email addresses do
+            # not have a valid user_id/log folder.
+            if user:
+                send_log(
+                    user_id=user.id,
+                    user_email=user.email,
+                    category=LOG_CATEGORY_SECURITY,
+                    action="LOGIN_FAILED",
+                    status=LOG_STATUS_FAILED,
+                    message="Login failed: invalid credentials",
+                    ip_address=_get_request_ip(request),
+                    user_agent=_get_request_user_agent(request),
+                )
+
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
         live_sessions = _get_live_active_sessions_for_user(db, user.id)
@@ -344,6 +368,19 @@ def login(
         )
 
         db.commit()
+
+        # LOGS & ACTIVITY
+        # SECURITY -> LOGIN SUCCESS
+        send_log(
+            user_id=user.id,
+            user_email=user.email,
+            category=LOG_CATEGORY_SECURITY,
+            action="LOGIN_SUCCESS",
+            status=LOG_STATUS_SUCCESS,
+            message="User login successful",
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
 
         return {
             "access_token": token,
