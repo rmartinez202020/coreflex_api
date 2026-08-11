@@ -18,6 +18,13 @@ from models import (
 )
 from auth_utils import get_current_user
 from passlib.context import CryptContext
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_SECURITY,
+    LOG_STATUS_SUCCESS,
+    LOG_STATUS_FAILED,
+    LOG_ACTOR_TENANT,
+)
 
 router = APIRouter(prefix="/customers-dashboards", tags=["Customer Dashboards"])
 
@@ -130,6 +137,20 @@ def _get_request_user_agent(request: Optional[Request]) -> str:
         return _norm(request.headers.get("user-agent", ""))[:500]
     except Exception:
         return ""
+
+
+def _get_request_ip(request: Optional[Request]) -> str | None:
+    try:
+        forwarded = _norm(request.headers.get("x-forwarded-for", ""))
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+
+        if request.client and request.client.host:
+            return _norm(str(request.client.host)) or None
+    except Exception:
+        pass
+
+    return None
 
 
 def _generate_session_id() -> str:
@@ -589,7 +610,39 @@ def tenant_public_dashboard_login(
         body.email,
     )
 
+    # Resolve the CoreFlex owner from the trusted dashboard ownership.
+    # Tenant activity is always written under this owner's logs.
+    owner = (
+        db.query(User)
+        .filter(User.id == dashboard.user_id)
+        .first()
+    )
+
+    tenant_name = (
+        _norm(getattr(tenant, "full_name", ""))
+        or _norm(body.email)
+    )
+
     if not _verify_password(body.password, tenant.password_hash):
+        # LOGS & ACTIVITY
+        # SECURITY -> TENANT LOGIN FAILED
+        if owner:
+            send_log(
+                user_id=owner.id,
+                user_email=owner.email,
+                actor_type=LOG_ACTOR_TENANT,
+                tenant_user_id=tenant.id,
+                tenant_email=tenant.email,
+                tenant_name=tenant_name,
+                category=LOG_CATEGORY_SECURITY,
+                action="LOGIN_FAILED",
+                status=LOG_STATUS_FAILED,
+                message="Tenant login failed: invalid credentials",
+                dashboard_id=dashboard.id,
+                ip_address=_get_request_ip(request),
+                user_agent=_get_request_user_agent(request),
+            )
+
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     access_level = _norm(getattr(tenant, "access_level", "")) or "read"
@@ -606,9 +659,28 @@ def tenant_public_dashboard_login(
             request=request,
         )
 
+    # LOGS & ACTIVITY
+    # SECURITY -> TENANT LOGIN SUCCESS
+    if owner:
+        send_log(
+            user_id=owner.id,
+            user_email=owner.email,
+            actor_type=LOG_ACTOR_TENANT,
+            tenant_user_id=tenant.id,
+            tenant_email=tenant.email,
+            tenant_name=tenant_name,
+            category=LOG_CATEGORY_SECURITY,
+            action="LOGIN_SUCCESS",
+            status=LOG_STATUS_SUCCESS,
+            message="Tenant login successful",
+            dashboard_id=dashboard.id,
+            ip_address=_get_request_ip(request),
+            user_agent=_get_request_user_agent(request),
+        )
+
     return TenantPublicAuthOut(
         ok=True,
-        tenant_name=_norm(getattr(tenant, "full_name", "")) or _norm(body.email),
+        tenant_name=tenant_name,
         access_level=access_level,
         must_change_password=must_change_password,
         session_id=session_id,
