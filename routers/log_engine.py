@@ -22,18 +22,23 @@ from typing import Any
 #   POST /coreflex/logs/write
 #
 # Required environment variable:
-#   COREFLEX_LOGS_WRITE_URL
+#   NODE_RED_BASE_URL
 #
 # Example:
-#   http://<node-red-host>:1880/coreflex/logs/write
+#   NODE_RED_BASE_URL=http://98.90.225.131:1880
+#
+# The Log Engine automatically appends:
+#   /coreflex/logs/write
 #
 # Optional environment variable:
 #   COREFLEX_LOGS_API_KEY
 # ============================================================
 
 
-LOGS_WRITE_URL_ENV = "COREFLEX_LOGS_WRITE_URL"
+NODE_RED_BASE_URL_ENV = "NODE_RED_BASE_URL"
 LOGS_API_KEY_ENV = "COREFLEX_LOGS_API_KEY"
+
+LOGS_WRITE_PATH = "/coreflex/logs/write"
 
 DEFAULT_TIMEOUT_SECONDS = 3.0
 
@@ -126,6 +131,27 @@ def _normalize_status(status: str) -> str:
     return value
 
 
+def _get_logs_write_url() -> str | None:
+    """
+    Build the Node-RED Logs endpoint from the existing
+    NODE_RED_BASE_URL environment variable.
+
+    Example:
+        NODE_RED_BASE_URL=http://98.90.225.131:1880
+
+    Result:
+        http://98.90.225.131:1880/coreflex/logs/write
+    """
+    node_red_base_url = _clean_optional_text(
+        os.getenv(NODE_RED_BASE_URL_ENV)
+    )
+
+    if not node_red_base_url:
+        return None
+
+    return f"{node_red_base_url.rstrip('/')}{LOGS_WRITE_PATH}"
+
+
 # ============================================================
 # PUBLIC LOG FUNCTION
 # ============================================================
@@ -203,10 +229,10 @@ def send_log(
         print("⚠️ LOG ENGINE: skipped log because action is missing")
         return False
 
-    logs_write_url = _clean_optional_text(os.getenv(LOGS_WRITE_URL_ENV))
+    logs_write_url = _get_logs_write_url()
     if not logs_write_url:
         print(
-            f"⚠️ LOG ENGINE: {LOGS_WRITE_URL_ENV} is not configured; "
+            f"⚠️ LOG ENGINE: {NODE_RED_BASE_URL_ENV} is not configured; "
             "log was not sent"
         )
         return False
