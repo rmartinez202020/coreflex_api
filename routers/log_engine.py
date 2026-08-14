@@ -39,6 +39,7 @@ NODE_RED_BASE_URL_ENV = "NODE_RED_BASE_URL"
 LOGS_API_KEY_ENV = "COREFLEX_LOGS_API_KEY"
 
 LOGS_WRITE_PATH = "/coreflex/logs/write"
+LOGS_READ_PATH = "/coreflex/logs/read"
 
 DEFAULT_TIMEOUT_SECONDS = 3.0
 
@@ -153,17 +154,7 @@ def _normalize_actor_type(actor_type: str | None) -> str:
     return value
 
 
-def _get_logs_write_url() -> str | None:
-    """
-    Build the Node-RED Logs endpoint from the existing
-    NODE_RED_BASE_URL environment variable.
-
-    Example:
-        NODE_RED_BASE_URL=http://98.90.225.131:1880
-
-    Result:
-        http://98.90.225.131:1880/coreflex/logs/write
-    """
+def _get_node_red_url(path: str) -> str | None:
     node_red_base_url = _clean_optional_text(
         os.getenv(NODE_RED_BASE_URL_ENV)
     )
@@ -171,7 +162,30 @@ def _get_logs_write_url() -> str | None:
     if not node_red_base_url:
         return None
 
-    return f"{node_red_base_url.rstrip('/')}{LOGS_WRITE_PATH}"
+    clean_path = "/" + str(path or "").lstrip("/")
+    return f"{node_red_base_url.rstrip('/')}{clean_path}"
+
+
+def _get_logs_write_url() -> str | None:
+    return _get_node_red_url(LOGS_WRITE_PATH)
+
+
+def _get_logs_read_url() -> str | None:
+    return _get_node_red_url(LOGS_READ_PATH)
+
+
+def _normalize_read_date(date_value: str | None) -> str:
+    if date_value is None or not str(date_value).strip():
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    clean_date = str(date_value).strip()
+
+    try:
+        parsed = datetime.strptime(clean_date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("Invalid log date. Expected YYYY-MM-DD") from exc
+
+    return parsed.strftime("%Y-%m-%d")
 
 
 # ============================================================
@@ -406,3 +420,157 @@ def send_log(
     except Exception as exc:
         print("⚠️ LOG ENGINE ERROR:", exc)
         return False
+
+
+# ============================================================
+# PUBLIC LOG READ FUNCTION
+# ============================================================
+
+def read_logs(
+    *,
+    user_id: int,
+    date: str | None = None,
+) -> dict[str, Any]:
+    """
+    Read one CoreFlex owner's daily audit log through Node-RED.
+
+    SECURITY RULE:
+    `user_id` must come from trusted backend context such as
+    current_user.id resolved from the JWT.
+    """
+
+    clean_user_id = _clean_optional_int(user_id)
+
+    if clean_user_id is None or clean_user_id <= 0:
+        return {
+            "ok": False,
+            "error": "Invalid or missing user_id",
+            "logs": [],
+        }
+
+    try:
+        clean_date = _normalize_read_date(date)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "logs": [],
+        }
+
+    logs_read_url = _get_logs_read_url()
+
+    if not logs_read_url:
+        return {
+            "ok": False,
+            "error": f"{NODE_RED_BASE_URL_ENV} is not configured",
+            "logs": [],
+        }
+
+    payload = {
+        "user_id": clean_user_id,
+        "date": clean_date,
+    }
+
+    try:
+        body = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "CoreFlex-Log-Engine/1.0",
+        }
+
+        api_key = _clean_optional_text(os.getenv(LOGS_API_KEY_ENV))
+        if api_key:
+            headers["X-CoreFlex-Logs-Key"] = api_key
+
+        request = urllib.request.Request(
+            logs_read_url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+        ) as response:
+            status_code = int(getattr(response, "status", 0) or 0)
+            raw_response = response.read().decode("utf-8", errors="replace")
+
+        if not (200 <= status_code < 300):
+            return {
+                "ok": False,
+                "error": f"Node-RED returned unexpected status {status_code}",
+                "status_code": status_code,
+                "logs": [],
+            }
+
+        try:
+            result = json.loads(raw_response or "{}")
+        except json.JSONDecodeError:
+            return {
+                "ok": False,
+                "error": "Node-RED returned invalid JSON",
+                "status_code": status_code,
+                "logs": [],
+            }
+
+        if not isinstance(result, dict):
+            return {
+                "ok": False,
+                "error": "Node-RED returned an invalid response object",
+                "status_code": status_code,
+                "logs": [],
+            }
+
+        if not isinstance(result.get("logs"), list):
+            result["logs"] = []
+
+        result.setdefault("ok", True)
+        result.setdefault("user_id", clean_user_id)
+        result.setdefault("date", clean_date)
+        result.setdefault("count", len(result["logs"]))
+
+        return result
+
+    except urllib.error.HTTPError as exc:
+        detail = None
+
+        try:
+            raw_error = exc.read().decode("utf-8", errors="replace")
+            if raw_error:
+                try:
+                    detail = json.loads(raw_error)
+                except json.JSONDecodeError:
+                    detail = raw_error
+        except Exception:
+            detail = None
+
+        return {
+            "ok": False,
+            "error": "Node-RED logs read HTTP error",
+            "status_code": getattr(exc, "code", None),
+            "detail": detail,
+            "logs": [],
+        }
+
+    except urllib.error.URLError as exc:
+        return {
+            "ok": False,
+            "error": "Unable to reach Node-RED logs reader",
+            "detail": str(getattr(exc, "reason", exc)),
+            "logs": [],
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "Unexpected Log Engine read error",
+            "detail": str(exc),
+            "logs": [],
+        }
