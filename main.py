@@ -283,6 +283,7 @@ def update_sensor(data: SensorUpdate):
 # ✅ /devices + /tenant-access/devices
 # ========================================
 from auth_utils import get_current_user  # noqa: E402
+from routers.log_engine import read_logs  # noqa: E402
 from models import (  # noqa: E402
     ZHC1921Device,
     ZHC1661Device,
@@ -297,6 +298,50 @@ from utils.zhc1921_live_cache import get_latest as get_latest_zhc1921  # noqa: E
 from utils.zhc1661_live_cache import get_latest as get_latest_zhc1661  # noqa: E402
 
 OFFLINE_AFTER_SECONDS = int(os.getenv("COREFLEX_OFFLINE_AFTER_SECONDS") or "10")
+
+
+# ========================================
+# ✅ LOGS & ACTIVITY READ
+# ========================================
+class LogsReadRequest(BaseModel):
+    date: str | None = None
+
+
+@app.post("/logs/read")
+def read_current_user_logs(
+    body: LogsReadRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Read the authenticated CoreFlex owner's audit logs.
+
+    Security:
+    - The frontend does NOT send user_id.
+    - user_id comes only from the verified JWT/current_user.
+    - Tenant activity is already stored under the owning user's folder.
+    """
+    result = read_logs(
+        user_id=current_user.id,
+        date=body.date,
+    )
+
+    if not result.get("ok"):
+        status_code = result.get("status_code")
+
+        # Preserve a client-side date validation error as 400.
+        if result.get("error") == "Invalid log date. Expected YYYY-MM-DD":
+            raise HTTPException(
+                status_code=400,
+                detail=result,
+            )
+
+        # Node-RED/read-side failures are upstream service failures.
+        raise HTTPException(
+            status_code=502 if not status_code else int(status_code),
+            detail=result,
+        )
+
+    return result
 
 
 def _parse_cached_datetime(value) -> datetime | None:
