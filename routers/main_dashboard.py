@@ -1,12 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from datetime import datetime
 
 from database import get_db
 from models import User, MainDashboard
 from auth_utils import get_current_user
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_DASHBOARD,
+    LOG_STATUS_SUCCESS,
+)
 
 router = APIRouter(
     prefix="/dashboard",
@@ -25,11 +30,38 @@ class MainDashboardSaveRequest(BaseModel):
 
 
 # =========================
+# 🔧 Request Helpers
+# =========================
+def _get_request_user_agent(request: Request) -> str:
+    try:
+        return str(request.headers.get("user-agent", "") or "").strip()[:500]
+    except Exception:
+        return ""
+
+
+def _get_request_ip(request: Request) -> str | None:
+    try:
+        forwarded = str(request.headers.get("x-forwarded-for", "") or "").strip()
+
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+
+        if request.client and request.client.host:
+            return str(request.client.host).strip() or None
+
+    except Exception:
+        pass
+
+    return None
+
+
+# =========================
 # 💾 SAVE MAIN DASHBOARD
 # =========================
 @router.post("/main")
 def save_main_dashboard(
     payload: MainDashboardSaveRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -61,6 +93,32 @@ def save_main_dashboard(
             db.add(record)
 
         db.commit()
+
+        # =====================================================
+        # LOGS & ACTIVITY
+        # DASHBOARD -> MAIN DASHBOARD SAVE
+        #
+        # The Main Dashboard is always available, so we log
+        # only SAVE activity here. We do not create separate
+        # CREATE or DELETE events for the Main Dashboard.
+        # =====================================================
+        send_log(
+            user_id=current_user.id,
+            user_email=current_user.email,
+            category=LOG_CATEGORY_DASHBOARD,
+            action="DASHBOARD_SAVE",
+            status=LOG_STATUS_SUCCESS,
+            message="Main Dashboard saved",
+            dashboard_id="main",
+            field="dashboard",
+            new_value={
+                "dashboard_id": "main",
+                "dashboard_name": "Main Dashboard",
+                "dashboard_type": "MAIN",
+            },
+            ip_address=_get_request_ip(request),
+            user_agent=_get_request_user_agent(request),
+        )
 
         return {
             "success": True,
