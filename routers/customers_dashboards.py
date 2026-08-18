@@ -21,6 +21,7 @@ from passlib.context import CryptContext
 from routers.log_engine import (
     send_log,
     LOG_CATEGORY_SECURITY,
+    LOG_CATEGORY_DASHBOARD,
     LOG_STATUS_SUCCESS,
     LOG_STATUS_FAILED,
     LOG_ACTOR_TENANT,
@@ -485,6 +486,7 @@ def list_customers(
 @router.post("/", response_model=CustomerDashboardOut, include_in_schema=False)
 def create_customer_dashboard(
     body: CustomerDashboardCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -513,6 +515,30 @@ def create_customer_dashboard(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    # LOGS & ACTIVITY
+    # DASHBOARD -> CREATE
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DASHBOARD,
+        action="DASHBOARD_CREATE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Dashboard created: {row.dashboard_name} "
+            f"| Customer: {row.customer_name}"
+        ),
+        dashboard_id=row.id,
+        field="dashboard",
+        new_value={
+            "dashboard_id": row.id,
+            "dashboard_name": row.dashboard_name,
+            "customer_name": row.customer_name,
+        },
+        ip_address=_get_request_ip(request),
+        user_agent=_get_request_user_agent(request),
+    )
+
     return _serialize_dashboard(row)
 
 
@@ -838,6 +864,7 @@ def get_customer_dashboard(
 def save_customer_dashboard(
     dashboard_id: int,
     body: CustomerDashboardSave,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -868,6 +895,30 @@ def save_customer_dashboard(
 
     db.commit()
     db.refresh(row)
+
+    # LOGS & ACTIVITY
+    # DASHBOARD -> SAVE
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DASHBOARD,
+        action="DASHBOARD_SAVE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Dashboard saved: {row.dashboard_name} "
+            f"| Customer: {row.customer_name}"
+        ),
+        dashboard_id=row.id,
+        field="dashboard",
+        new_value={
+            "dashboard_id": row.id,
+            "dashboard_name": row.dashboard_name,
+            "customer_name": row.customer_name,
+        },
+        ip_address=_get_request_ip(request),
+        user_agent=_get_request_user_agent(request),
+    )
+
     return _serialize_dashboard(row)
 
 
@@ -877,6 +928,7 @@ def save_customer_dashboard(
 @router.delete("/{dashboard_id}")
 def delete_customer_dashboard(
     dashboard_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -893,9 +945,33 @@ def delete_customer_dashboard(
         )
 
     deleted_name = row.dashboard_name
+    deleted_customer_name = row.customer_name
 
     db.delete(row)
     db.commit()
+
+    # LOGS & ACTIVITY
+    # DASHBOARD -> DELETE
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DASHBOARD,
+        action="DASHBOARD_DELETE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Dashboard deleted: {deleted_name} "
+            f"| Customer: {deleted_customer_name}"
+        ),
+        dashboard_id=dashboard_id,
+        field="dashboard",
+        old_value={
+            "dashboard_id": dashboard_id,
+            "dashboard_name": deleted_name,
+            "customer_name": deleted_customer_name,
+        },
+        ip_address=_get_request_ip(request),
+        user_agent=_get_request_user_agent(request),
+    )
 
     return {
         "ok": True,
