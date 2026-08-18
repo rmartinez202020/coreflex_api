@@ -455,7 +455,6 @@ def session_ping(
 @router.post("/logout")
 def logout(
     body: LogoutRequest,
-    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -488,19 +487,6 @@ def logout(
             db.commit()
         else:
             db.commit()
-
-        # LOGS & ACTIVITY
-        # SECURITY -> LOGOUT SUCCESS
-        send_log(
-            user_id=current_user.id,
-            user_email=current_user.email,
-            category=LOG_CATEGORY_SECURITY,
-            action="LOGOUT",
-            status=LOG_STATUS_SUCCESS,
-            message="User logout successful",
-            ip_address=_get_request_ip(request),
-            user_agent=_get_request_user_agent(request),
-        )
 
         return {"ok": True, "detail": "Logged out successfully."}
 
@@ -680,4 +666,4 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
 
     except Exception as e:
         print("🔥 RESET PASSWORD ERROR:", e)
-        raise HTTPException(status_code=500, detail="Internal serve
+        raise HTTPException(status_code=500, detail="Internal server error")
