@@ -10,6 +10,12 @@ from database import get_db
 from models import User
 from auth_utils import get_current_user
 
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_DEVICE,
+    LOG_STATUS_SUCCESS,
+)
+
 router = APIRouter(prefix="/radar-level", tags=["Radar Level Sensors DF572"])
 
 OWNER_EMAILS = {"roquemartinez_8@hotmail.com"}
@@ -229,6 +235,27 @@ def claim_df572_sensor(
     ).fetchone()
 
     if not row:
+        # =====================================================
+        # LOGS & ACTIVITY
+        # DEVICE -> DEVICE_ID_INCORRECT
+        # =====================================================
+        send_log(
+            user_id=current_user.id,
+            user_email=current_user.email,
+            category=LOG_CATEGORY_DEVICE,
+            action="DEVICE_ID_INCORRECT",
+            status="FAILED",
+            message=f"Incorrect Device ID: {imei}",
+            device_id=imei,
+            field="device_id",
+            new_value={
+                "device_id": imei,
+                "device_model": "cf-r100",
+                "identifier_type": "IMEI",
+                "reason": "Sensor IMEI not found. Contact administrator.",
+            },
+        )
+
         raise HTTPException(
             status_code=404,
             detail="Sensor IMEI not found. Contact administrator.",
@@ -259,6 +286,28 @@ def claim_df572_sensor(
     )
 
     db.commit()
+
+    # =====================================================
+    # LOGS & ACTIVITY
+    # DEVICE -> DEVICE_ID_ADDED
+    # =====================================================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DEVICE,
+        action="DEVICE_ID_ADDED",
+        status=LOG_STATUS_SUCCESS,
+        message=f"Device ID added: {imei}",
+        device_id=imei,
+        field="device_id",
+        new_value={
+            "device_id": imei,
+            "device_model": "cf-r100",
+            "identifier_type": "IMEI",
+            "claimed_by_user_id": current_user.id,
+            "claimed_by_email": (current_user.email or "").lower().strip(),
+        },
+    )
 
     return {
         "ok": True,
@@ -310,6 +359,29 @@ def unclaim_df572_sensor(
     )
 
     db.commit()
+
+    # =====================================================
+    # LOGS & ACTIVITY
+    # DEVICE -> DEVICE_ID_DELETED
+    # =====================================================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DEVICE,
+        action="DEVICE_ID_DELETED",
+        status=LOG_STATUS_SUCCESS,
+        message=f"Device ID deleted: {imei}",
+        device_id=imei,
+        field="device_id",
+        old_value={
+            "device_id": imei,
+            "device_model": "cf-r100",
+            "identifier_type": "IMEI",
+            "claimed_by_user_id": current_user.id,
+            "claimed_by_email": (current_user.email or "").lower().strip(),
+        },
+        new_value=None,
+    )
 
     return {
         "ok": True,
