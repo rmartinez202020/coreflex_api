@@ -15,6 +15,13 @@ from auth_utils import get_current_user
 # ✅ NEW: in-memory live telemetry cache
 from utils.zhc1921_live_cache import set_latest, get_latest
 
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_DEVICE,
+    LOG_STATUS_SUCCESS,
+    LOG_STATUS_FAILED,
+)
+
 router = APIRouter(prefix="/zhc1921", tags=["ZHC1921 Devices"])
 
 # ✅ Offline timeout window (seconds)
@@ -385,6 +392,22 @@ def claim_zhc1921_device(
         .first()
     )
     if not row:
+        send_log(
+            user_id=current_user.id,
+            user_email=current_user.email,
+            category=LOG_CATEGORY_DEVICE,
+            action="DEVICE_ID_INCORRECT",
+            status=LOG_STATUS_FAILED,
+            message=f"Incorrect Device ID: {device_id}",
+            device_id=device_id,
+            field="device_id",
+            new_value={
+                "device_id": device_id,
+                "device_model": "zhc1921",
+                "reason": "device_id not found (not authorized yet)",
+            },
+        )
+
         raise HTTPException(
             status_code=404,
             detail="device_id not found (not authorized yet)",
@@ -414,6 +437,24 @@ def claim_zhc1921_device(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DEVICE,
+        action="DEVICE_ID_ADDED",
+        status=LOG_STATUS_SUCCESS,
+        message=f"Device ID added: {device_id}",
+        device_id=device_id,
+        field="device_id",
+        new_value={
+            "device_id": device_id,
+            "device_model": "zhc1921",
+            "claimed_by_user_id": current_user.id,
+            "claimed_by_email": (current_user.email or "").lower().strip(),
+            "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+        },
+    )
 
     return {
         "ok": True,
@@ -457,6 +498,24 @@ def unclaim_zhc1921_device(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DEVICE,
+        action="DEVICE_ID_DELETED",
+        status=LOG_STATUS_SUCCESS,
+        message=f"Device ID deleted: {device_id}",
+        device_id=device_id,
+        field="device_id",
+        old_value={
+            "device_id": device_id,
+            "device_model": "zhc1921",
+            "claimed_by_user_id": current_user.id,
+            "claimed_by_email": (current_user.email or "").lower().strip(),
+        },
+        new_value=None,
+    )
 
     return {"ok": True, "device_id": device_id, "claimed": False}
 
