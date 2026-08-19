@@ -11,6 +11,13 @@ from auth_utils import get_current_user
 # ✅ backend geocoder helpers
 from utils import geocode_address, build_address_string
 
+# ✅ Logs & Activity
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_USER,
+    LOG_STATUS_SUCCESS,
+)
+
 router = APIRouter(prefix="/customer-locations", tags=["Customer Locations"])
 
 
@@ -147,6 +154,26 @@ def _maybe_geocode(row: CustomerLocation, force: bool = False) -> None:
         # keep any existing lat/lng
 
 
+def _customer_log_value(row: CustomerLocation) -> dict:
+    """
+    Snapshot customer/location information for Logs & Activity.
+    """
+    return {
+        "customer_location_id": row.id,
+        "customer_name": _norm(row.customer_name),
+        "site_name": _norm(row.site_name),
+        "street": _norm(row.street),
+        "city": _norm(row.city),
+        "state": _norm(row.state),
+        "zip": _norm(row.zip),
+        "country": _norm(row.country),
+        "notes": row.notes,
+        "lat": row.lat,
+        "lng": row.lng,
+        "geocode_status": row.geocode_status,
+    }
+
+
 # =========================
 # ✅ LIST (current user only)
 # Support both /customer-locations and /customer-locations/
@@ -186,6 +213,26 @@ def create_customer_location(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    # =========================
+    # 📝 LOGS & ACTIVITY
+    # USER -> CUSTOMER_CREATE
+    # =========================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_USER,
+        action="CUSTOMER_CREATE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Customer created: {_norm(row.customer_name)}"
+            f" | Site: {_norm(row.site_name)}"
+        ),
+        customer_id=row.id,
+        field="customer_location",
+        new_value=_customer_log_value(row),
+    )
+
     return row
 
 
@@ -208,6 +255,9 @@ def update_customer_location(
     if not row:
         raise HTTPException(status_code=404, detail="Customer location not found")
 
+    # Preserve full OLD customer/location information before changing anything.
+    old_value = _customer_log_value(row)
+
     addr_changed = _address_changed(row, body)
     _apply_body(row, body)
 
@@ -219,6 +269,27 @@ def update_customer_location(
 
     db.commit()
     db.refresh(row)
+
+    # =========================
+    # 📝 LOGS & ACTIVITY
+    # USER -> CUSTOMER_UPDATE
+    # =========================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_USER,
+        action="CUSTOMER_UPDATE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Customer updated: {_norm(row.customer_name)}"
+            f" | Site: {_norm(row.site_name)}"
+        ),
+        customer_id=row.id,
+        field="customer_location",
+        old_value=old_value,
+        new_value=_customer_log_value(row),
+    )
+
     return row
 
 
@@ -240,6 +311,32 @@ def delete_customer_location(
     if not row:
         raise HTTPException(status_code=404, detail="Customer location not found")
 
+    # Preserve customer/location information BEFORE deleting the row.
+    deleted_value = _customer_log_value(row)
+    deleted_customer_name = _norm(row.customer_name)
+    deleted_site_name = _norm(row.site_name)
+
     db.delete(row)
     db.commit()
+
+    # =========================
+    # 📝 LOGS & ACTIVITY
+    # USER -> CUSTOMER_DELETE
+    # =========================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_USER,
+        action="CUSTOMER_DELETE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Customer deleted: {deleted_customer_name}"
+            f" | Site: {deleted_site_name}"
+        ),
+        customer_id=location_id,
+        field="customer_location",
+        old_value=deleted_value,
+        new_value=None,
+    )
+
     return {"ok": True, "deleted_id": location_id}
