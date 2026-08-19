@@ -21,6 +21,12 @@ from routers.billing_webhook_helpers import (
     _process_checkout_session_completed,
     _process_payment_intent_succeeded,
 )
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_BILLING,
+    LOG_STATUS_SUCCESS,
+    LOG_STATUS_FAILED,
+)
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
 router.include_router(billing_checkout_router)
@@ -106,6 +112,196 @@ def _get_cancel_benefits_expire_date(sub_row):
         return _ensure_utc(current_period_end)
 
     return None
+
+
+def _clean_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _iso_or_none(value):
+    if not value:
+        return None
+    try:
+        return value.isoformat()
+    except Exception:
+        return str(value)
+
+
+def _subscription_log_value(sub_row):
+    if not sub_row:
+        return None
+
+    return {
+        "user_id": getattr(sub_row, "user_id", None),
+        "plan_key": _clean_text(getattr(sub_row, "plan_key", None)) or None,
+        "billing_type": _clean_text(getattr(sub_row, "billing_type", None)) or None,
+        "subscription_status": _clean_text(
+            getattr(sub_row, "subscription_status", None)
+        ) or None,
+        "is_active": bool(getattr(sub_row, "is_active", False)),
+        "cancel_at_period_end": bool(
+            getattr(sub_row, "cancel_at_period_end", False)
+        ),
+        "active_date": _iso_or_none(getattr(sub_row, "active_date", None)),
+        "renewal_date": _iso_or_none(getattr(sub_row, "renewal_date", None)),
+        "current_period_start": _iso_or_none(
+            getattr(sub_row, "current_period_start", None)
+        ),
+        "current_period_end": _iso_or_none(
+            getattr(sub_row, "current_period_end", None)
+        ),
+        "device_limit": getattr(sub_row, "device_limit", None),
+        "tenants_users_limit": getattr(sub_row, "tenants_users_limit", None),
+        "stripe_customer_id": _clean_text(
+            getattr(sub_row, "stripe_customer_id", None)
+        ) or None,
+        "stripe_subscription_id": _clean_text(
+            getattr(sub_row, "stripe_subscription_id", None)
+        ) or None,
+        "stripe_price_id": _clean_text(
+            getattr(sub_row, "stripe_price_id", None)
+        ) or None,
+        "last_invoice_id": _clean_text(
+            getattr(sub_row, "last_invoice_id", None)
+        ) or None,
+    }
+
+
+def _stripe_metadata(obj) -> dict:
+    try:
+        raw = getattr(obj, "metadata", None)
+        if raw is None:
+            return {}
+        return dict(raw)
+    except Exception:
+        return {}
+
+
+def _metadata_user_id(obj):
+    metadata = _stripe_metadata(obj)
+    raw = metadata.get("user_id") or metadata.get("uid")
+    try:
+        value = int(str(raw).strip())
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def _find_subscription_row(
+    db: Session,
+    *,
+    user_id=None,
+    subscription_id: str = "",
+    customer_id: str = "",
+):
+    if user_id:
+        try:
+            row = (
+                db.query(UserSubscription)
+                .filter(UserSubscription.user_id == int(user_id))
+                .first()
+            )
+            if row:
+                return row
+        except Exception:
+            pass
+
+    subscription_id = _clean_text(subscription_id)
+    if subscription_id:
+        row = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.stripe_subscription_id == subscription_id)
+            .first()
+        )
+        if row:
+            return row
+
+    customer_id = _clean_text(customer_id)
+    if customer_id:
+        row = (
+            db.query(UserSubscription)
+            .filter(UserSubscription.stripe_customer_id == customer_id)
+            .first()
+        )
+        if row:
+            return row
+
+    return None
+
+
+def _find_user(db: Session, user_id):
+    try:
+        uid = int(user_id)
+    except Exception:
+        return None
+
+    if uid <= 0:
+        return None
+
+    return db.query(User).filter(User.id == uid).first()
+
+
+def _amount_details(obj, *field_names):
+    amount_cents = None
+
+    for field_name in field_names:
+        try:
+            value = getattr(obj, field_name, None)
+            if value is not None:
+                amount_cents = int(value)
+                break
+        except Exception:
+            continue
+
+    currency = _clean_text(getattr(obj, "currency", None)).upper() or None
+
+    return {
+        "amount_cents": amount_cents,
+        "amount": (
+            round(amount_cents / 100.0, 2)
+            if amount_cents is not None
+            else None
+        ),
+        "currency": currency,
+    }
+
+
+def _send_billing_log(
+    db: Session,
+    *,
+    user_id,
+    action: str,
+    status: str,
+    message: str,
+    old_value=None,
+    new_value=None,
+):
+    """
+    Resolve the trusted CoreFlex User row, then write one BILLING audit log.
+
+    send_log() is intentionally non-blocking for the primary billing action:
+    if Node-RED is unavailable, the billing/payment operation still succeeds.
+    """
+    user = _find_user(db, user_id)
+    if not user:
+        print(
+            "⚠️ BILLING LOG SKIPPED: could not resolve CoreFlex user",
+            user_id,
+            action,
+        )
+        return False
+
+    return send_log(
+        user_id=user.id,
+        user_email=user.email,
+        category=LOG_CATEGORY_BILLING,
+        action=action,
+        status=status,
+        message=message,
+        field="billing",
+        old_value=old_value,
+        new_value=new_value,
+    )
 
 
 def _update_user_subscription_from_stripe_subscription(
@@ -239,12 +435,36 @@ def _process_invoice_payment_failed(db: Session, invoice_obj):
         print("   customer_id:", customer_id)
         return {"ok": True, "ignored": True, "reason": "subscription_row_not_found"}
 
+    old_value = _subscription_log_value(sub_row)
+
     sub_row.subscription_status = "past_due"
     sub_row.last_invoice_id = invoice_id or None
     sub_row.is_active = False
 
     db.commit()
     db.refresh(sub_row)
+
+    amount_info = _amount_details(invoice_obj, "amount_due", "amount_remaining")
+
+    _send_billing_log(
+        db,
+        user_id=sub_row.user_id,
+        action="PAYMENT_FAILED",
+        status=LOG_STATUS_FAILED,
+        message=(
+            f"Payment failed"
+            f" | Plan: {_clean_text(getattr(sub_row, 'plan_key', None)) or 'unknown'}"
+            f" | Invoice: {invoice_id or 'unknown'}"
+        ),
+        old_value=old_value,
+        new_value={
+            **(_subscription_log_value(sub_row) or {}),
+            **amount_info,
+            "invoice_id": invoice_id or None,
+            "stripe_subscription_id": subscription_id or None,
+            "stripe_customer_id": customer_id or None,
+        },
+    )
 
     print("⚠️ invoice.payment_failed updated user_subscriptions")
     print("   user_id:", sub_row.user_id)
@@ -374,6 +594,25 @@ def cancel_subscription(
         getattr(stripe_subscription, "current_period_end", None)
     )
 
+    _send_billing_log(
+        db,
+        user_id=current_user.id,
+        action="SUBSCRIPTION_CANCEL",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Subscription cancellation scheduled"
+            f" | Plan: {_clean_text(getattr(sub_row, 'plan_key', None)) or 'unknown'}"
+        ),
+        old_value={
+            "stripe_subscription_id": stripe_subscription_id,
+            "cancel_at_period_end": False,
+        },
+        new_value={
+            **(_subscription_log_value(sub_row) or {}),
+            "benefits_expire_date": _iso_or_none(sub_row.renewal_date),
+        },
+    )
+
     return {
         "ok": True,
         "message": "Subscription will cancel at the end of the current billing period.",
@@ -472,6 +711,22 @@ def reactivate_subscription(
         getattr(stripe_subscription, "current_period_end", None)
     )
 
+    _send_billing_log(
+        db,
+        user_id=current_user.id,
+        action="SUBSCRIPTION_REACTIVATE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Subscription reactivated"
+            f" | Plan: {_clean_text(getattr(sub_row, 'plan_key', None)) or 'unknown'}"
+        ),
+        old_value={
+            "stripe_subscription_id": stripe_subscription_id,
+            "cancel_at_period_end": True,
+        },
+        new_value=_subscription_log_value(sub_row),
+    )
+
     return {
         "ok": True,
         "message": "Subscription reactivated successfully. Your plan will continue to renew normally.",
@@ -541,6 +796,57 @@ async def stripe_webhook(
                 result=return_value,
             )
 
+            if not bool((return_value or {}).get("ignored")) and not bool(
+                (return_value or {}).get("alreadyApplied")
+            ):
+                session_user_id = _metadata_user_id(data_object)
+                session_customer_id = _clean_text(
+                    getattr(data_object, "customer", None)
+                )
+                session_subscription_id = _clean_text(
+                    getattr(data_object, "subscription", None)
+                )
+
+                sub_row_for_log = _find_subscription_row(
+                    db,
+                    user_id=session_user_id,
+                    subscription_id=session_subscription_id,
+                    customer_id=session_customer_id,
+                )
+
+                resolved_user_id = (
+                    getattr(sub_row_for_log, "user_id", None)
+                    if sub_row_for_log
+                    else session_user_id
+                )
+
+                amount_info = _amount_details(data_object, "amount_total")
+
+                _send_billing_log(
+                    db,
+                    user_id=resolved_user_id,
+                    action="SUBSCRIPTION_PURCHASE",
+                    status=LOG_STATUS_SUCCESS,
+                    message=(
+                        f"Subscription purchase completed"
+                        f" | Plan: "
+                        f"{_clean_text(getattr(sub_row_for_log, 'plan_key', None)) or 'unknown'}"
+                    ),
+                    new_value={
+                        **(_subscription_log_value(sub_row_for_log) or {}),
+                        **amount_info,
+                        "stripe_event_id": event_id or None,
+                        "checkout_session_id": _clean_text(
+                            getattr(data_object, "id", None)
+                        ) or None,
+                        "stripe_customer_id": session_customer_id or None,
+                        "stripe_subscription_id": session_subscription_id or None,
+                        "payment_status": _clean_text(
+                            getattr(data_object, "payment_status", None)
+                        ) or None,
+                    },
+                )
+
         elif event_type == "payment_intent.succeeded":
             return_value = _process_payment_intent_succeeded(
                 db=db,
@@ -552,9 +858,69 @@ async def stripe_webhook(
                 result=return_value,
             )
 
+            if not bool((return_value or {}).get("ignored")) and not bool(
+                (return_value or {}).get("alreadyApplied")
+            ):
+                intent_user_id = _metadata_user_id(data_object)
+                intent_customer_id = _clean_text(
+                    getattr(data_object, "customer", None)
+                )
+
+                sub_row_for_log = _find_subscription_row(
+                    db,
+                    user_id=intent_user_id,
+                    customer_id=intent_customer_id,
+                )
+
+                resolved_user_id = (
+                    getattr(sub_row_for_log, "user_id", None)
+                    if sub_row_for_log
+                    else intent_user_id
+                )
+
+                amount_info = _amount_details(
+                    data_object,
+                    "amount_received",
+                    "amount",
+                )
+
+                _send_billing_log(
+                    db,
+                    user_id=resolved_user_id,
+                    action="PAYMENT_SUCCESS",
+                    status=LOG_STATUS_SUCCESS,
+                    message=(
+                        f"Stripe payment confirmed"
+                        f" | Plan: "
+                        f"{_clean_text(getattr(sub_row_for_log, 'plan_key', None)) or 'unknown'}"
+                    ),
+                    new_value={
+                        **(_subscription_log_value(sub_row_for_log) or {}),
+                        **amount_info,
+                        "stripe_event_id": event_id or None,
+                        "payment_intent_id": _clean_text(
+                            getattr(data_object, "id", None)
+                        ) or None,
+                        "stripe_customer_id": intent_customer_id or None,
+                    },
+                )
+
         elif event_type in {"invoice.payment_succeeded", "invoice_payment.paid"}:
             invoice_obj = data_object
             subscription_id = str(getattr(invoice_obj, "subscription", "") or "").strip()
+            invoice_id = _clean_text(getattr(invoice_obj, "id", None))
+            invoice_customer_id = _clean_text(getattr(invoice_obj, "customer", None))
+
+            pre_invoice_sub_row = _find_subscription_row(
+                db,
+                subscription_id=subscription_id,
+                customer_id=invoice_customer_id,
+            )
+            previous_invoice_id = (
+                _clean_text(getattr(pre_invoice_sub_row, "last_invoice_id", None))
+                if pre_invoice_sub_row
+                else ""
+            )
 
             if not subscription_id:
                 print("ℹ️ invoice paid event ignored because subscription_id is missing")
@@ -584,6 +950,45 @@ async def stripe_webhook(
                 result=return_value,
             )
 
+            if (
+                subscription_id
+                and not bool((return_value or {}).get("ignored"))
+                and (not invoice_id or previous_invoice_id != invoice_id)
+            ):
+                sub_row_for_log = _find_subscription_row(
+                    db,
+                    user_id=(return_value or {}).get("user_id"),
+                    subscription_id=subscription_id,
+                    customer_id=invoice_customer_id,
+                )
+
+                amount_info = _amount_details(
+                    invoice_obj,
+                    "amount_paid",
+                    "amount_due",
+                )
+
+                _send_billing_log(
+                    db,
+                    user_id=getattr(sub_row_for_log, "user_id", None),
+                    action="PAYMENT_SUCCESS",
+                    status=LOG_STATUS_SUCCESS,
+                    message=(
+                        f"Recurring payment received"
+                        f" | Plan: "
+                        f"{_clean_text(getattr(sub_row_for_log, 'plan_key', None)) or 'unknown'}"
+                        f" | Invoice: {invoice_id or 'unknown'}"
+                    ),
+                    new_value={
+                        **(_subscription_log_value(sub_row_for_log) or {}),
+                        **amount_info,
+                        "stripe_event_id": event_id or None,
+                        "invoice_id": invoice_id or None,
+                        "stripe_subscription_id": subscription_id or None,
+                        "stripe_customer_id": invoice_customer_id or None,
+                    },
+                )
+
         elif event_type == "invoice.payment_failed":
             return_value = _process_invoice_payment_failed(
                 db=db,
@@ -596,6 +1001,20 @@ async def stripe_webhook(
             )
 
         elif event_type == "customer.subscription.updated":
+            updated_subscription_id = _clean_text(
+                getattr(data_object, "id", None)
+            )
+            updated_customer_id = _clean_text(
+                getattr(data_object, "customer", None)
+            )
+
+            before_sub_row = _find_subscription_row(
+                db,
+                subscription_id=updated_subscription_id,
+                customer_id=updated_customer_id,
+            )
+            before_value = _subscription_log_value(before_sub_row)
+
             return_value = _update_user_subscription_from_stripe_subscription(
                 db=db,
                 stripe_subscription_obj=data_object,
@@ -605,6 +1024,35 @@ async def stripe_webhook(
                 event_id=event_id,
                 result=return_value,
             )
+
+            after_sub_row = _find_subscription_row(
+                db,
+                user_id=(return_value or {}).get("user_id"),
+                subscription_id=updated_subscription_id,
+                customer_id=updated_customer_id,
+            )
+            after_value = _subscription_log_value(after_sub_row)
+
+            if (
+                not bool((return_value or {}).get("ignored"))
+                and before_value != after_value
+            ):
+                _send_billing_log(
+                    db,
+                    user_id=getattr(after_sub_row, "user_id", None),
+                    action="SUBSCRIPTION_UPDATE",
+                    status=LOG_STATUS_SUCCESS,
+                    message=(
+                        f"Stripe subscription updated"
+                        f" | Plan: "
+                        f"{_clean_text(getattr(after_sub_row, 'plan_key', None)) or 'unknown'}"
+                    ),
+                    old_value=before_value,
+                    new_value={
+                        **(after_value or {}),
+                        "stripe_event_id": event_id or None,
+                    },
+                )
 
         elif event_type == "customer.subscription.deleted":
             stripe_subscription_obj = data_object
@@ -709,6 +1157,9 @@ async def stripe_webhook(
                         print("   old_device_limit:", sub_row.device_limit)
                         print("   old_tenants_users_limit:", sub_row.tenants_users_limit)
 
+                        ended_user_id = sub_row.user_id
+                        ended_old_value = _subscription_log_value(sub_row)
+
                         sub_row.plan_key = "free"
                         sub_row.device_limit = 1
                         sub_row.tenants_users_limit = 1
@@ -730,6 +1181,25 @@ async def stripe_webhook(
                         print("   new_plan_key:", sub_row.plan_key)
                         print("   new_device_limit:", sub_row.device_limit)
                         print("   new_tenants_users_limit:", sub_row.tenants_users_limit)
+
+                        _send_billing_log(
+                            db,
+                            user_id=ended_user_id,
+                            action="SUBSCRIPTION_ENDED",
+                            status=LOG_STATUS_SUCCESS,
+                            message=(
+                                f"Subscription ended"
+                                f" | Previous plan: "
+                                f"{_clean_text((ended_old_value or {}).get('plan_key')) or 'unknown'}"
+                                f" | Account moved to Free"
+                            ),
+                            old_value=ended_old_value,
+                            new_value={
+                                **(_subscription_log_value(sub_row) or {}),
+                                "stripe_event_id": event_id or None,
+                                "deleted_subscription_id": deleted_subscription_id or None,
+                            },
+                        )
 
                         return_value = {
                             "ok": True,
