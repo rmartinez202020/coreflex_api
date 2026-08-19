@@ -1,3 +1,6 @@
+
+
+
 # routers/tenant_users.py
 import os
 from datetime import datetime, timezone
@@ -21,6 +24,11 @@ from models import (
 )
 from auth_utils import get_current_user
 from utils.email_service import send_tenant_credentials_email
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_USER,
+    LOG_STATUS_SUCCESS,
+)
 
 router = APIRouter(prefix="/tenant-users", tags=["Tenant Users"])
 
@@ -393,6 +401,33 @@ def create_tenant_user(
     if not email_sent:
         print("❌ Tenant credentials email failed to send")
 
+    # =========================
+    # 📝 LOGS & ACTIVITY
+    # USER -> TENANT_CREATE
+    # =========================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_USER,
+        action="TENANT_CREATE",
+        status=LOG_STATUS_SUCCESS,
+        message=f"Tenant created: {new_user.email}",
+        field="tenant_user",
+        new_value={
+            "tenant_user_id": new_user.id,
+            "tenant_name": _norm(new_user.full_name),
+            "tenant_email": _norm(new_user.email),
+            "customer_name": _norm(new_user.customer_name),
+            "access_level": _norm(new_user.access_level),
+            "is_active": bool(new_user.is_active),
+            "dashboard_ids": [row.id for row in dashboard_rows],
+            "dashboard_names": [
+                _norm(getattr(row, "dashboard_name", ""))
+                for row in dashboard_rows
+            ],
+        },
+    )
+
     return _serialize_tenant_user(new_user)
 
 
@@ -467,6 +502,26 @@ def update_tenant_user(
         dashboard_ids=dashboard_ids,
     )
 
+    old_dashboard_rows = [
+        access_row.dashboard
+        for access_row in (row.dashboard_access or [])
+        if access_row.dashboard is not None
+    ]
+
+    old_value = {
+        "tenant_user_id": row.id,
+        "tenant_name": _norm(row.full_name),
+        "tenant_email": _norm(row.email),
+        "customer_name": _norm(row.customer_name),
+        "access_level": _norm(row.access_level),
+        "is_active": bool(row.is_active),
+        "dashboard_ids": [dash.id for dash in old_dashboard_rows],
+        "dashboard_names": [
+            _norm(getattr(dash, "dashboard_name", ""))
+            for dash in old_dashboard_rows
+        ],
+    }
+
     row.full_name = full_name
     row.customer_name = customer_name
     row.access_level = access
@@ -480,6 +535,34 @@ def update_tenant_user(
 
     db.commit()
     db.refresh(row)
+
+    # =========================
+    # 📝 LOGS & ACTIVITY
+    # USER -> TENANT_UPDATE
+    # =========================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_USER,
+        action="TENANT_UPDATE",
+        status=LOG_STATUS_SUCCESS,
+        message=f"Tenant updated: {row.email}",
+        field="tenant_user",
+        old_value=old_value,
+        new_value={
+            "tenant_user_id": row.id,
+            "tenant_name": _norm(row.full_name),
+            "tenant_email": _norm(row.email),
+            "customer_name": _norm(row.customer_name),
+            "access_level": _norm(row.access_level),
+            "is_active": bool(row.is_active),
+            "dashboard_ids": [dash.id for dash in dashboard_rows],
+            "dashboard_names": [
+                _norm(getattr(dash, "dashboard_name", ""))
+                for dash in dashboard_rows
+            ],
+        },
+    )
 
     return _serialize_tenant_user(row)
 
