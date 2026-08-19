@@ -1,6 +1,3 @@
-
-
-
 # routers/tenant_users.py
 import os
 from datetime import datetime, timezone
@@ -578,11 +575,50 @@ def delete_tenant_user(
 ):
     row = _get_tenant_user_owned_by_admin(db, tenant_user_id, current_user.id)
 
+    # Preserve tenant information BEFORE deleting the database row.
+    deleted_dashboard_rows = [
+        access_row.dashboard
+        for access_row in (row.dashboard_access or [])
+        if access_row.dashboard is not None
+    ]
+
+    deleted_value = {
+        "tenant_user_id": row.id,
+        "tenant_name": _norm(row.full_name),
+        "tenant_email": _norm(row.email),
+        "customer_name": _norm(row.customer_name),
+        "access_level": _norm(row.access_level),
+        "is_active": bool(row.is_active),
+        "dashboard_ids": [dash.id for dash in deleted_dashboard_rows],
+        "dashboard_names": [
+            _norm(getattr(dash, "dashboard_name", ""))
+            for dash in deleted_dashboard_rows
+        ],
+    }
+
+    deleted_email = _norm(row.email)
+
     db.query(TenantUserDashboardAccess).filter(
         TenantUserDashboardAccess.tenant_user_id == row.id
     ).delete()
 
     db.delete(row)
     db.commit()
+
+    # =========================
+    # 📝 LOGS & ACTIVITY
+    # USER -> TENANT_DELETE
+    # =========================
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_USER,
+        action="TENANT_DELETE",
+        status=LOG_STATUS_SUCCESS,
+        message=f"Tenant deleted: {deleted_email}",
+        field="tenant_user",
+        old_value=deleted_value,
+        new_value=None,
+    )
 
     return {"ok": True, "detail": "Tenant user deleted successfully."}
