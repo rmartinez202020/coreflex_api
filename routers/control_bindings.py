@@ -1233,6 +1233,7 @@ def write_control_do(
         "interlockDeviceId": interlock_device_id if interlock_enabled else None,
         "interlockField": interlock_field if interlock_enabled else None,
         "interlockType": interlock_type if interlock_enabled else None,
+        
         "interlockMode": interlock_mode if interlock_enabled else None,
         **result,
     }
