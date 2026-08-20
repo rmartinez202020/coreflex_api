@@ -18,12 +18,23 @@ from models import (
     ZHC1921Device,
     ControlActionLock,
     GatewayDeviceSeen,
+    User,
+    TenantUser,
 )
 
 try:
     from models import ZHC1661Device  # type: ignore
 except Exception:
     ZHC1661Device = None
+
+from routers.log_engine import (
+    send_log,
+    LOG_CATEGORY_CONTROL,
+    LOG_STATUS_SUCCESS,
+    LOG_STATUS_FAILED,
+    LOG_ACTOR_OWNER,
+    LOG_ACTOR_TENANT,
+)
 
 
 router = APIRouter(prefix="/control-bindings", tags=["Control Bindings"])
@@ -311,6 +322,159 @@ def _pick_gateway_seen_row(
             return row
 
     return rows[0]
+
+
+def _resolve_control_log_actor(
+    db: Session,
+    *,
+    binding: ControlBinding,
+    authenticated_user,
+    tenant_email: str,
+):
+    owner_user_id = int(binding.user_id)
+
+    owner = (
+        db.query(User)
+        .filter(User.id == owner_user_id)
+        .first()
+    )
+
+    if not owner:
+        return None
+
+    clean_tenant_email = _as_str(tenant_email).lower()
+
+    if clean_tenant_email:
+        tenant = (
+            db.query(TenantUser)
+            .filter(TenantUser.owner_user_id == owner_user_id)
+            .filter(TenantUser.email == clean_tenant_email)
+            .first()
+        )
+
+        if not tenant:
+            return None
+
+        return {
+            "user_id": owner.id,
+            "user_email": owner.email,
+            "actor_type": LOG_ACTOR_TENANT,
+            "tenant_user_id": tenant.id,
+            "tenant_email": tenant.email,
+            "tenant_name": _as_str(getattr(tenant, "full_name", None)) or None,
+        }
+
+    if authenticated_user:
+        return {
+            "user_id": owner.id,
+            "user_email": owner.email,
+            "actor_type": LOG_ACTOR_OWNER,
+            "tenant_user_id": None,
+            "tenant_email": None,
+            "tenant_name": None,
+        }
+
+    return None
+
+
+def _write_control_action_log(
+    db: Session,
+    *,
+    binding: ControlBinding,
+    authenticated_user,
+    tenant_email: str,
+    device_id: str,
+    field: str,
+    widget_type: str,
+    dashboard_id: str,
+    gateway_id: str | None,
+    request_id: str,
+    requested_value,
+    result: dict,
+):
+    normalized_widget_type = _normalize_widget_type(widget_type)
+
+    if normalized_widget_type == "toggle":
+        action = "CONTROL_TOGGLE"
+        state_text = "UNKNOWN" if requested_value is None else ("ON" if int(requested_value) == 1 else "OFF")
+        message = (
+            f"Toggle {state_text}: "
+            f"{_as_str(getattr(binding, 'title', None)) or field.upper()}"
+            f" | Device: {device_id}"
+            f" | Field: {field.upper()}"
+        )
+    elif normalized_widget_type in {"push_no", "push_nc"}:
+        action = "CONTROL_PUSH_BUTTON"
+        state_text = "ACTION" if requested_value is None else ("PRESSED" if int(requested_value) == 1 else "RELEASED")
+        message = (
+            f"Push button {state_text}: "
+            f"{_as_str(getattr(binding, 'title', None)) or field.upper()}"
+            f" | Device: {device_id}"
+            f" | Field: {field.upper()}"
+        )
+    else:
+        return False
+
+    actor = _resolve_control_log_actor(
+        db,
+        binding=binding,
+        authenticated_user=authenticated_user,
+        tenant_email=tenant_email,
+    )
+
+    if not actor:
+        print(
+            "⚠️ CONTROL LOG SKIPPED: could not resolve owner/tenant actor",
+            {
+                "dashboard_id": dashboard_id,
+                "widget_id": getattr(binding, "widget_id", None),
+                "device_id": device_id,
+                "tenant_email": tenant_email or None,
+            },
+        )
+        return False
+
+    result_ok = bool((result or {}).get("ok"))
+    node_red_ok = bool((result or {}).get("nodeRedOk"))
+    pending = bool((result or {}).get("pending"))
+    log_status = LOG_STATUS_SUCCESS if result_ok else LOG_STATUS_FAILED
+
+    if not result_ok:
+        message = f"{message} | FAILED"
+    elif pending:
+        message = f"{message} | PENDING"
+    elif node_red_ok:
+        message = f"{message} | SUCCESS"
+
+    send_log(
+        user_id=actor["user_id"],
+        user_email=actor["user_email"],
+        category=LOG_CATEGORY_CONTROL,
+        action=action,
+        status=log_status,
+        message=message,
+        actor_type=actor["actor_type"],
+        tenant_user_id=actor["tenant_user_id"],
+        tenant_email=actor["tenant_email"],
+        tenant_name=actor["tenant_name"],
+        dashboard_id=dashboard_id,
+        device_id=device_id,
+        gateway_id=gateway_id,
+        field=field,
+        old_value=None,
+        new_value={
+            "request_id": request_id,
+            "widget_id": _as_str(getattr(binding, "widget_id", None)) or None,
+            "widget_title": _as_str(getattr(binding, "title", None)) or None,
+            "widget_type": normalized_widget_type,
+            "requested_value01": requested_value,
+            "node_red_ok": node_red_ok,
+            "pending": pending,
+            "http_status": (result or {}).get("status"),
+        },
+    )
+
+    return True
 
 
 def _serialize_gateway_seen_row(row: Optional[GatewayDeviceSeen]) -> dict:
