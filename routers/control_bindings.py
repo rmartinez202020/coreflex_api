@@ -13,11 +13,20 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from auth_utils import get_current_user
+from log_engine import (
+    send_log,
+    LOG_CATEGORY_CONTROL,
+    LOG_STATUS_SUCCESS,
+    LOG_STATUS_FAILED,
+    LOG_ACTOR_OWNER,
+    LOG_ACTOR_TENANT,
+)
 from models import (
     ControlBinding,
     ZHC1921Device,
     ControlActionLock,
     GatewayDeviceSeen,
+    User,
 )
 
 try:
@@ -338,6 +347,199 @@ def _serialize_gateway_seen_row(row: Optional[GatewayDeviceSeen]) -> dict:
         "gateway_status": _as_str(getattr(row, "status", None)).lower() or None,
         "gateway_last_seen": last_seen.isoformat() if last_seen else None,
     }
+
+
+def _request_ip(request: Request) -> str | None:
+    try:
+        forwarded = _as_str(request.headers.get("X-Forwarded-For"))
+        if forwarded:
+            return forwarded.split(",")[0].strip() or None
+
+        real_ip = _as_str(request.headers.get("X-Real-IP"))
+        if real_ip:
+            return real_ip
+
+        if request.client and request.client.host:
+            return _as_str(request.client.host) or None
+    except Exception:
+        pass
+
+    return None
+
+
+def _request_user_agent(request: Request) -> str | None:
+    value = _as_str(request.headers.get("User-Agent"))
+    return value or None
+
+
+def _resolve_control_log_actor(
+    db: Session,
+    request: Request,
+    row: ControlBinding,
+    user,
+) -> dict | None:
+    """
+    Resolve the trusted OWNER namespace plus the real actor.
+
+    OWNER:
+      - owner comes from the authenticated JWT user.
+
+    TENANT:
+      - owner comes from ControlBinding.user_id (trusted DB row)
+      - tenant identity comes from request headers already used by this route.
+    """
+    tenant_email = _as_str(request.headers.get("X-Tenant-Email"))
+
+    if not tenant_email:
+        if not user:
+            return None
+
+        return {
+            "user_id": int(user.id),
+            "user_email": _as_str(getattr(user, "email", "")),
+            "actor_type": LOG_ACTOR_OWNER,
+            "tenant_user_id": None,
+            "tenant_email": None,
+            "tenant_name": None,
+        }
+
+    owner_id = getattr(row, "user_id", None)
+    if owner_id is None:
+        return None
+
+    owner = db.query(User).filter(User.id == owner_id).first()
+    if not owner:
+        return None
+
+    # The write route currently receives tenant identity through headers.
+    # Accept the common header variants without changing frontend behavior.
+    tenant_user_id_raw = (
+        request.headers.get("X-Tenant-User-Id")
+        or request.headers.get("X-Tenant-User-ID")
+        or request.headers.get("X-Tenant-Id")
+    )
+    tenant_name = (
+        _as_str(request.headers.get("X-Tenant-Name"))
+        or _as_str(request.headers.get("X-Tenant-User-Name"))
+        or None
+    )
+
+    try:
+        tenant_user_id = int(tenant_user_id_raw) if tenant_user_id_raw not in (None, "") else None
+    except Exception:
+        tenant_user_id = None
+
+    # send_log requires tenant_user_id for TENANT actors.
+    # If the current tenant request does not include it, do not manufacture one.
+    if tenant_user_id is None:
+        return None
+
+    return {
+        "user_id": int(owner.id),
+        "user_email": _as_str(getattr(owner, "email", "")),
+        "actor_type": LOG_ACTOR_TENANT,
+        "tenant_user_id": tenant_user_id,
+        "tenant_email": tenant_email,
+        "tenant_name": tenant_name,
+    }
+
+
+def _send_control_audit_log(
+    *,
+    db: Session,
+    request: Request,
+    row: ControlBinding,
+    user,
+    device_id: str,
+    dashboard_id: str,
+    field: str,
+    widget_type: str,
+    requested_value,
+    result: dict,
+) -> None:
+    """
+    Log a completed control write attempt without ever interrupting control.
+
+    A successful Node-RED acknowledgement => SUCCESS.
+    A definite Node-RED rejection/unreachable result => FAILED.
+    A timeout marked pending is not logged here as success/failure because the
+    final device outcome is unknown.
+    """
+    try:
+        if result.get("pending") is True:
+            return
+
+        actor = _resolve_control_log_actor(db, request, row, user)
+        if not actor:
+            print("⚠️ CONTROL LOG: actor/owner identity could not be resolved")
+            return
+
+        ok = bool(result.get("ok")) and bool(result.get("nodeRedOk"))
+        status = LOG_STATUS_SUCCESS if ok else LOG_STATUS_FAILED
+
+        normalized_type = _normalize_widget_type(widget_type)
+
+        if normalized_type == "toggle":
+            action = "TOGGLE_CONTROL"
+        elif normalized_type == "push_no":
+            action = "PUSH_BUTTON_NO"
+        elif normalized_type == "push_nc":
+            action = "PUSH_BUTTON_NC"
+        elif normalized_type == "display_output":
+            action = "ANALOG_OUTPUT_WRITE"
+        else:
+            action = "CONTROL_WRITE"
+
+        title = _as_str(getattr(row, "title", ""))
+        actor_label = (
+            actor.get("tenant_email")
+            if actor["actor_type"] == LOG_ACTOR_TENANT
+            else actor.get("user_email")
+        )
+
+        if ok:
+            message = (
+                f"Control command sent: {action} | "
+                f"Device: {device_id} | Field: {field.upper()} | "
+                f"Value: {requested_value}"
+            )
+        else:
+            error_detail = result.get("error") or result.get("warning") or "Control write failed"
+            message = (
+                f"Control command failed: {action} | "
+                f"Device: {device_id} | Field: {field.upper()} | "
+                f"Value: {requested_value} | Error: {error_detail}"
+            )
+
+        if title:
+            message += f" | Widget: {title}"
+
+        if actor_label:
+            message += f" | Actor: {actor_label}"
+
+        send_log(
+            user_id=actor["user_id"],
+            user_email=actor["user_email"],
+            category=LOG_CATEGORY_CONTROL,
+            action=action,
+            status=status,
+            message=message,
+            actor_type=actor["actor_type"],
+            tenant_user_id=actor["tenant_user_id"],
+            tenant_email=actor["tenant_email"],
+            tenant_name=actor["tenant_name"],
+            dashboard_id=dashboard_id,
+            device_id=device_id,
+            gateway_id=result.get("gateway_id"),
+            field=field,
+            old_value=None,
+            new_value=requested_value,
+            ip_address=_request_ip(request),
+            user_agent=_request_user_agent(request),
+        )
+    except Exception as exc:
+        # Audit logging must never break the actual control action.
+        print("⚠️ CONTROL LOG ERROR:", repr(exc))
 
 
 class ControlBindRequest(BaseModel):
@@ -958,6 +1160,28 @@ def write_control_do(
         payload,
         _node_red_headers(),
         timeout_sec=3.5,
+    )
+
+    requested_log_value = (
+        int(req.value01)
+        if do_num is not None and req.value01 is not None
+        else value_num
+    )
+
+    _send_control_audit_log(
+        db=db,
+        request=request,
+        row=row,
+        user=user,
+        device_id=device_id,
+        dashboard_id=dash_id,
+        field=field,
+        widget_type=widget_type,
+        requested_value=requested_log_value,
+        result={
+            **result,
+            "gateway_id": gw_info["gateway_id"],
+        },
     )
 
     response = {
