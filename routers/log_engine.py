@@ -42,6 +42,7 @@ LOGS_WRITE_PATH = "/coreflex/logs/write"
 LOGS_READ_PATH = "/coreflex/logs/read"
 
 DEFAULT_TIMEOUT_SECONDS = 3.0
+LOGS_READ_TIMEOUT_SECONDS = 15.0
 
 
 # ============================================================
@@ -499,7 +500,7 @@ def read_logs(
 
         with urllib.request.urlopen(
             request,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
+            timeout=LOGS_READ_TIMEOUT_SECONDS,
         ) as response:
             status_code = int(getattr(response, "status", 0) or 0)
             raw_response = response.read().decode("utf-8", errors="replace")
