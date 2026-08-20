@@ -195,6 +195,10 @@ from routers.billing_admin import router as billing_admin_router  # noqa: E402
 
 app.include_router(billing_admin_router)
 
+from routers.logs_admin import router as logs_admin_router  # noqa: E402
+
+app.include_router(logs_admin_router)
+
 from routers.images import router as images_router  # noqa: E402
 
 app.include_router(images_router)
