@@ -27,6 +27,7 @@ from models import (
     ControlActionLock,
     GatewayDeviceSeen,
     User,
+    TenantUser,
 )
 
 try:
@@ -382,14 +383,18 @@ def _resolve_control_log_actor(
     Resolve the trusted OWNER namespace plus the real actor.
 
     OWNER:
-      - owner comes from the authenticated JWT user.
+      - owner comes from authenticated JWT user.
 
     TENANT:
-      - owner comes from ControlBinding.user_id (trusted DB row)
-      - tenant identity comes from request headers already used by this route.
+      - owner comes from ControlBinding.user_id
+      - tenant is resolved from DB using owner_user_id + X-Tenant-Email
+      - frontend does NOT need to send tenant_user_id
     """
-    tenant_email = _as_str(request.headers.get("X-Tenant-Email"))
+    tenant_email = _as_str(request.headers.get("X-Tenant-Email")).lower()
 
+    # ---------------------------------------------------------
+    # OWNER
+    # ---------------------------------------------------------
     if not tenant_email:
         if not user:
             return None
@@ -403,44 +408,44 @@ def _resolve_control_log_actor(
             "tenant_name": None,
         }
 
+    # ---------------------------------------------------------
+    # TENANT
+    # ---------------------------------------------------------
     owner_id = getattr(row, "user_id", None)
     if owner_id is None:
         return None
 
-    owner = db.query(User).filter(User.id == owner_id).first()
+    owner = (
+        db.query(User)
+        .filter(User.id == int(owner_id))
+        .first()
+    )
     if not owner:
         return None
 
-    # The write route currently receives tenant identity through headers.
-    # Accept the common header variants without changing frontend behavior.
-    tenant_user_id_raw = (
-        request.headers.get("X-Tenant-User-Id")
-        or request.headers.get("X-Tenant-User-ID")
-        or request.headers.get("X-Tenant-Id")
+    tenant = (
+        db.query(TenantUser)
+        .filter(TenantUser.owner_user_id == int(owner_id))
+        .filter(TenantUser.email.ilike(tenant_email))
+        .first()
     )
-    tenant_name = (
-        _as_str(request.headers.get("X-Tenant-Name"))
-        or _as_str(request.headers.get("X-Tenant-User-Name"))
-        or None
-    )
-
-    try:
-        tenant_user_id = int(tenant_user_id_raw) if tenant_user_id_raw not in (None, "") else None
-    except Exception:
-        tenant_user_id = None
-
-    # send_log requires tenant_user_id for TENANT actors.
-    # If the current tenant request does not include it, do not manufacture one.
-    if tenant_user_id is None:
+    if not tenant:
+        print(
+            "⚠️ CONTROL LOG: tenant could not be resolved",
+            {
+                "owner_user_id": owner_id,
+                "tenant_email": tenant_email,
+            },
+        )
         return None
 
     return {
         "user_id": int(owner.id),
         "user_email": _as_str(getattr(owner, "email", "")),
         "actor_type": LOG_ACTOR_TENANT,
-        "tenant_user_id": tenant_user_id,
-        "tenant_email": tenant_email,
-        "tenant_name": tenant_name,
+        "tenant_user_id": int(tenant.id),
+        "tenant_email": _as_str(getattr(tenant, "email", "")),
+        "tenant_name": _as_str(getattr(tenant, "full_name", "")) or None,
     }
 
 
@@ -458,24 +463,24 @@ def _send_control_audit_log(
     result: dict,
 ) -> None:
     """
-    Log a completed control write attempt without ever interrupting control.
+    Log every owner/tenant control-button action after the backend accepts
+    and attempts the write.
 
-    A successful Node-RED acknowledgement => SUCCESS.
-    A definite Node-RED rejection/unreachable result => FAILED.
-    A timeout marked pending is not logged here as success/failure because the
-    final device outcome is unknown.
+    IMPORTANT:
+    - pending=True is still logged because the user DID press the control.
+    - logging never interrupts the actual control command.
     """
     try:
-        if result.get("pending") is True:
-            return
-
         actor = _resolve_control_log_actor(db, request, row, user)
         if not actor:
             print("⚠️ CONTROL LOG: actor/owner identity could not be resolved")
             return
 
-        ok = bool(result.get("ok")) and bool(result.get("nodeRedOk"))
-        status = LOG_STATUS_SUCCESS if ok else LOG_STATUS_FAILED
+        accepted = bool(result.get("ok"))
+        node_red_ok = bool(result.get("nodeRedOk"))
+        pending = bool(result.get("pending"))
+
+        status = LOG_STATUS_SUCCESS if accepted else LOG_STATUS_FAILED
 
         normalized_type = _normalize_widget_type(widget_type)
 
@@ -491,33 +496,33 @@ def _send_control_audit_log(
             action = "CONTROL_WRITE"
 
         title = _as_str(getattr(row, "title", ""))
-        actor_label = (
-            actor.get("tenant_email")
-            if actor["actor_type"] == LOG_ACTOR_TENANT
-            else actor.get("user_email")
-        )
 
-        if ok:
-            message = (
-                f"Control command sent: {action} | "
-                f"Device: {device_id} | Field: {field.upper()} | "
-                f"Value: {requested_value}"
-            )
+        if normalized_type == "toggle":
+            state_text = "ON" if int(requested_value or 0) == 1 else "OFF"
+            message = f"Toggle {state_text}"
+        elif normalized_type in {"push_no", "push_nc"}:
+            state_text = "PRESSED" if int(requested_value or 0) == 1 else "RELEASED"
+            message = f"Push button {state_text}"
         else:
-            error_detail = result.get("error") or result.get("warning") or "Control write failed"
-            message = (
-                f"Control command failed: {action} | "
-                f"Device: {device_id} | Field: {field.upper()} | "
-                f"Value: {requested_value} | Error: {error_detail}"
-            )
+            message = f"Control value {requested_value}"
+
+        message += (
+            f" | Device: {device_id}"
+            f" | Field: {field.upper()}"
+        )
 
         if title:
             message += f" | Widget: {title}"
 
-        if actor_label:
-            message += f" | Actor: {actor_label}"
+        if pending:
+            message += " | Command pending"
+        elif node_red_ok:
+            message += " | Node-RED confirmed"
+        elif not accepted:
+            error_detail = result.get("error") or result.get("warning") or "Control write failed"
+            message += f" | FAILED: {error_detail}"
 
-        send_log(
+        sent = send_log(
             user_id=actor["user_id"],
             user_email=actor["user_email"],
             category=LOG_CATEGORY_CONTROL,
@@ -533,10 +538,33 @@ def _send_control_audit_log(
             gateway_id=result.get("gateway_id"),
             field=field,
             old_value=None,
-            new_value=requested_value,
+            new_value={
+                "requested_value": requested_value,
+                "widget_type": normalized_type,
+                "widget_id": _as_str(getattr(row, "widget_id", "")) or None,
+                "widget_title": title or None,
+                "node_red_ok": node_red_ok,
+                "pending": pending,
+                "http_status": result.get("status"),
+            },
             ip_address=_request_ip(request),
             user_agent=_request_user_agent(request),
         )
+
+        print(
+            "✅ CONTROL LOG ATTEMPT:",
+            {
+                "sent": sent,
+                "actor_type": actor["actor_type"],
+                "action": action,
+                "device_id": device_id,
+                "field": field,
+                "value": requested_value,
+                "pending": pending,
+                "node_red_ok": node_red_ok,
+            },
+        )
+
     except Exception as exc:
         # Audit logging must never break the actual control action.
         print("⚠️ CONTROL LOG ERROR:", repr(exc))
