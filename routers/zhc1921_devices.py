@@ -18,7 +18,9 @@ from utils.zhc1921_live_cache import set_latest, get_latest
 from routers.log_engine import (
     send_log,
     LOG_CATEGORY_DEVICE,
+    LOG_CATEGORY_SYSTEM,
     LOG_STATUS_SUCCESS,
+    LOG_STATUS_WARNING,
     LOG_STATUS_FAILED,
 )
 
@@ -118,6 +120,110 @@ def _compute_online_status(last_seen: datetime | None) -> str:
     return "online" if age <= OFFLINE_AFTER_SECONDS else "offline"
 
 
+def _effective_last_seen(r: ZHC1921Device) -> datetime | None:
+    """
+    Prefer the in-memory telemetry cache last_seen when available.
+    Fall back to the database last_seen value.
+    """
+    cached = get_latest(r.device_id) or {}
+    cache_ls = cached.get("last_seen")
+    return cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+
+
+def _send_device_system_transition_log(
+    r: ZHC1921Device,
+    *,
+    old_status: str,
+    new_status: str,
+) -> None:
+    """
+    Write one SYSTEM log for a real ONLINE/OFFLINE transition.
+
+    The log belongs to the CoreFlex owner who claimed the device.
+    Unclaimed devices are not written into any user's log namespace.
+    """
+    owner_user_id = getattr(r, "claimed_by_user_id", None)
+    owner_email = (getattr(r, "claimed_by_email", None) or "").strip().lower()
+
+    if not owner_user_id or not owner_email:
+        return
+
+    device_id = str(r.device_id or "").strip()
+
+    if new_status == "offline":
+        send_log(
+            user_id=owner_user_id,
+            user_email=owner_email,
+            category=LOG_CATEGORY_SYSTEM,
+            action="DEVICE_OFFLINE",
+            status=LOG_STATUS_WARNING,
+            message=f"CF-2000 | Device: {device_id} | Device communication lost",
+            device_id=device_id,
+            field="status",
+            old_value=old_status,
+            new_value=new_status,
+        )
+        return
+
+    if new_status == "online":
+        send_log(
+            user_id=owner_user_id,
+            user_email=owner_email,
+            category=LOG_CATEGORY_SYSTEM,
+            action="DEVICE_ONLINE",
+            status=LOG_STATUS_SUCCESS,
+            message=f"CF-2000 | Device: {device_id} | Device communication restored",
+            device_id=device_id,
+            field="status",
+            old_value=old_status,
+            new_value=new_status,
+        )
+
+
+def _sync_device_system_status(
+    db: Session,
+    r: ZHC1921Device,
+    *,
+    commit: bool = True,
+) -> str:
+    """
+    Compare the persisted status with the status derived from last_seen.
+
+    IMPORTANT:
+    - Logs only real online <-> offline transitions.
+    - Persists the new status so repeated frontend polling does NOT create
+      duplicate logs every few seconds.
+    - If the stored status is blank/unknown, initialize it silently.
+    """
+    calculated_status = _compute_online_status(_effective_last_seen(r))
+
+    previous_status = str(getattr(r, "status", "") or "").strip().lower()
+
+    if previous_status not in {"online", "offline"}:
+        r.status = calculated_status
+        db.add(r)
+        if commit:
+            db.commit()
+        return calculated_status
+
+    if previous_status == calculated_status:
+        return calculated_status
+
+    _send_device_system_transition_log(
+        r,
+        old_status=previous_status,
+        new_status=calculated_status,
+    )
+
+    r.status = calculated_status
+    db.add(r)
+
+    if commit:
+        db.commit()
+
+    return calculated_status
+
+
 def to_row_for_table(r: ZHC1921Device):
     """
     ✅ Shape matches your frontend table columns.
@@ -131,8 +237,7 @@ def to_row_for_table(r: ZHC1921Device):
     cached = get_latest(r.device_id) or {}
 
     # prefer cache last_seen if present, else DB last_seen
-    cache_ls = cached.get("last_seen")
-    ls = cache_ls if isinstance(cache_ls, datetime) else r.last_seen
+    ls = _effective_last_seen(r)
 
     status = _compute_online_status(ls)
     online = status == "online"
@@ -226,6 +331,11 @@ def ingest_zhc1921_telemetry(
             detail="device_id not found (not authorized yet)",
         )
 
+    # ✅ Capture persisted state BEFORE fresh telemetry changes it.
+    # If the device had previously been marked offline, this telemetry packet
+    # represents the offline -> online transition.
+    previous_status = str(row.status or "").strip().lower()
+
     # ✅ last_seen (authoritative signal)
     parsed = _parse_iso_dt(body.last_seen)
     if parsed is not None:
@@ -234,8 +344,8 @@ def ingest_zhc1921_telemetry(
         # DB-time; still fine because status is derived from last_seen age later
         row.last_seen = func.now()
 
-    # ✅ Store status too (optional). UI will still derive status from last_seen age.
-    row.status = (body.status or "online").strip().lower()
+    # Fresh telemetry means this device is online now.
+    row.status = "online"
 
     # ✅ DI / DO bits (ZHC1921 DI=6)
     row.di1 = _coerce_bit(body.di1)
@@ -261,7 +371,7 @@ def ingest_zhc1921_telemetry(
         device_id,
         {
             "device_id": device_id,
-            "status": (body.status or "online").strip().lower(),
+            "status": "online",
             "last_seen": parsed,
             "di1": _coerce_bit(body.di1),
             "di2": _coerce_bit(body.di2),
@@ -283,6 +393,16 @@ def ingest_zhc1921_telemetry(
     db.add(row)
     db.commit()
 
+    # ✅ SYSTEM transition log: DEVICE_OFFLINE -> DEVICE_ONLINE
+    # Only log when the device was explicitly persisted as offline.
+    # Blank/unknown initial state is initialized silently.
+    if previous_status == "offline":
+        _send_device_system_transition_log(
+            row,
+            old_status="offline",
+            new_status="online",
+        )
+
     return {"ok": True, "device_id": device_id, "updated": True}
 
 
@@ -298,6 +418,21 @@ def list_zhc1921_devices(
         raise HTTPException(status_code=403, detail="Owner only")
 
     rows = db.query(ZHC1921Device).order_by(ZHC1921Device.id.asc()).all()
+
+    # ✅ Detect and persist ONLINE/OFFLINE transitions.
+    # Commit once after scanning all rows so repeated polling does not
+    # generate duplicate SYSTEM logs.
+    changed = False
+    for r in rows:
+        before = str(r.status or "").strip().lower()
+        calculated = _sync_device_system_status(db, r, commit=False)
+        after = str(r.status or "").strip().lower()
+        if before != after and calculated == after:
+            changed = True
+
+    if changed:
+        db.commit()
+
     return [to_row_for_table(r) for r in rows]
 
 
@@ -548,6 +683,18 @@ def list_my_zhc1921_devices(
             .order_by(ZHC1921Device.id.asc())
             .all()
         )
+
+        changed = False
+        for r in rows:
+            before = str(r.status or "").strip().lower()
+            calculated = _sync_device_system_status(db, r, commit=False)
+            after = str(r.status or "").strip().lower()
+            if before != after and calculated == after:
+                changed = True
+
+        if changed:
+            db.commit()
+
         return [to_row_for_table(r) for r in rows]
 
     # ✅ PUBLIC / TENANT FLOW
@@ -575,6 +722,18 @@ def list_my_zhc1921_devices(
             .order_by(ZHC1921Device.id.asc())
             .all()
         )
+
+        changed = False
+        for r in rows:
+            before = str(r.status or "").strip().lower()
+            calculated = _sync_device_system_status(db, r, commit=False)
+            after = str(r.status or "").strip().lower()
+            if before != after and calculated == after:
+                changed = True
+
+        if changed:
+            db.commit()
+
         return [to_row_for_table(r) for r in rows]
 
     raise HTTPException(status_code=401, detail="Unauthorized")
