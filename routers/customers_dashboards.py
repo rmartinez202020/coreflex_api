@@ -857,6 +857,64 @@ def get_customer_dashboard(
 
 
 # =========================
+# ♻️ RESTORE ONE DASHBOARD
+# Manual Restore Project action only
+# =========================
+@router.post("/{dashboard_id}/restore", response_model=CustomerDashboardOut)
+def restore_customer_dashboard(
+    dashboard_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Manual restore endpoint for one customer dashboard.
+
+    IMPORTANT:
+    - This route is only for the explicit Restore Project action.
+    - Normal GET /customers-dashboards/{dashboard_id} remains for
+      ordinary load/refresh/auto-restore.
+    - The restore log is stored only under the authenticated current_user.
+    """
+    row = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.id == dashboard_id)
+        .filter(CustomerDashboard.user_id == current_user.id)
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+
+    row = _ensure_public_fields(row, db)
+
+    # LOGS & ACTIVITY
+    # DASHBOARD -> RESTORE
+    send_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        category=LOG_CATEGORY_DASHBOARD,
+        action="DASHBOARD_RESTORE",
+        status=LOG_STATUS_SUCCESS,
+        message=(
+            f"Dashboard restored: {row.dashboard_name} "
+            f"| Customer: {row.customer_name}"
+        ),
+        dashboard_id=row.id,
+        field="dashboard",
+        new_value={
+            "dashboard_id": row.id,
+            "dashboard_name": row.dashboard_name,
+            "customer_name": row.customer_name,
+        },
+        ip_address=_get_request_ip(request),
+        user_agent=_get_request_user_agent(request),
+    )
+
+    return _serialize_dashboard(row)
+
+
+# =========================
 # ✅ SAVE (update layout)
 # App will POST full payload into `layout`
 # =========================

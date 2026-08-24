@@ -69,7 +69,6 @@ def save_main_dashboard(
     Saves ONE main dashboard per user_id (MainDashboard.user_id is PK).
     """
     try:
-        # ✅ DEBUG: confirm backend is using the correct authenticated user
         print("✅ SAVE /dashboard/main USER:", current_user.id, current_user.email)
 
         record = (
@@ -82,7 +81,6 @@ def save_main_dashboard(
 
         if record:
             record.layout = dashboard_data
-            # 🔥 Always store UTC
             record.updated_at = datetime.utcnow()
         else:
             record = MainDashboard(
@@ -94,14 +92,6 @@ def save_main_dashboard(
 
         db.commit()
 
-        # =====================================================
-        # LOGS & ACTIVITY
-        # DASHBOARD -> MAIN DASHBOARD SAVE
-        #
-        # The Main Dashboard is always available, so we log
-        # only SAVE activity here. We do not create separate
-        # CREATE or DELETE events for the Main Dashboard.
-        # =====================================================
         send_log(
             user_id=current_user.id,
             user_email=current_user.email,
@@ -122,7 +112,6 @@ def save_main_dashboard(
 
         return {
             "success": True,
-            # ✅ DEBUG: echo back who we saved for
             "user_id": current_user.id,
             "email": current_user.email,
         }
@@ -130,6 +119,79 @@ def save_main_dashboard(
     except Exception as e:
         print("❌ SAVE MAIN DASHBOARD ERROR:", e)
         raise HTTPException(status_code=500, detail="Failed to save dashboard")
+
+
+# =========================
+# ♻️ RESTORE MAIN DASHBOARD
+# =========================
+@router.post("/main/restore")
+def restore_main_dashboard(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Manual restore endpoint for the authenticated user's Main Dashboard.
+
+    This route is only for the explicit Restore Project action.
+    Normal GET /dashboard/main remains for load/refresh/auto-restore.
+    """
+    try:
+        print(
+            "♻️ RESTORE /dashboard/main/restore USER:",
+            current_user.id,
+            current_user.email,
+        )
+
+        record = (
+            db.query(MainDashboard)
+            .filter(MainDashboard.user_id == current_user.id)
+            .first()
+        )
+
+        if not record:
+            return {
+                "success": False,
+                "user_id": current_user.id,
+                "email": current_user.email,
+                "layout": None,
+                "updated_at": None,
+                "message": "No saved Main Dashboard found",
+            }
+
+        send_log(
+            user_id=current_user.id,
+            user_email=current_user.email,
+            category=LOG_CATEGORY_DASHBOARD,
+            action="DASHBOARD_RESTORE",
+            status=LOG_STATUS_SUCCESS,
+            message="Main Dashboard restored",
+            dashboard_id="main",
+            field="dashboard",
+            new_value={
+                "dashboard_id": "main",
+                "dashboard_name": "Main Dashboard",
+                "dashboard_type": "MAIN",
+            },
+            ip_address=_get_request_ip(request),
+            user_agent=_get_request_user_agent(request),
+        )
+
+        return {
+            "success": True,
+            "user_id": current_user.id,
+            "email": current_user.email,
+            "layout": record.layout,
+            "updated_at": (
+                record.updated_at.isoformat()
+                if record.updated_at
+                else None
+            ),
+        }
+
+    except Exception as e:
+        print("❌ RESTORE MAIN DASHBOARD ERROR:", e)
+        raise HTTPException(status_code=500, detail="Failed to restore dashboard")
 
 
 # =========================
@@ -143,7 +205,6 @@ def load_main_dashboard(
     """
     Loads the authenticated user's main dashboard.
     """
-    # ✅ DEBUG: confirm backend is using the correct authenticated user
     print("✅ LOAD /dashboard/main USER:", current_user.id, current_user.email)
 
     record = (
@@ -154,7 +215,6 @@ def load_main_dashboard(
 
     if not record:
         return {
-            # ✅ DEBUG: echo back who we tried to load for
             "user_id": current_user.id,
             "email": current_user.email,
             "layout": None,
@@ -162,12 +222,8 @@ def load_main_dashboard(
         }
 
     return {
-        # ✅ DEBUG: echo back who we loaded for
         "user_id": current_user.id,
         "email": current_user.email,
-
-        # existing payload
         "layout": record.layout,
-        # 🔥 Send ISO string → frontend converts to user's local time
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }
