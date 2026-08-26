@@ -672,9 +672,30 @@ def _append_claimed_devices_for_owner(
                 "online": online,
                 "is_online": online,
                 "lastSeen": _last_seen_iso(r.received_at),
+
+                # Current reading
                 "received_at": r.received_at.isoformat() if r.received_at else None,
                 "height_mm": r.height_mm,
                 "height": r.height_mm,
+
+                # Previous reading #1
+                "height_2_mm": r.height_2_mm,
+                "received_at_2": (
+                    r.received_at_2.isoformat() if r.received_at_2 else None
+                ),
+
+                # Previous reading #2
+                "height_3_mm": r.height_3_mm,
+                "received_at_3": (
+                    r.received_at_3.isoformat() if r.received_at_3 else None
+                ),
+
+                # Previous reading #3
+                "height_4_mm": r.height_4_mm,
+                "received_at_4": (
+                    r.received_at_4.isoformat() if r.received_at_4 else None
+                ),
+
                 "temperature_c": temperature_c,
                 "temperature": temperature_c,
                 "battery_v": battery_v,
