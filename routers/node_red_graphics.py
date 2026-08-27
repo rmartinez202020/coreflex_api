@@ -317,8 +317,6 @@ def stop_graphic_stream(
         "dashId": resolved_dash_id,
         "dashFolder": resolved_dash_folder,
         "widgetId": str(widget_id or "").strip(),
-        "timeUnit": str(time_unit or "hours").strip(),
-        "windowSize": max(1, int(window_size or 1)),
     }
 
     _dbg(
@@ -379,6 +377,8 @@ def _get_graphic_history_once(
         "dashId": resolved_dash_id,
         "dashFolder": resolved_dash_folder,
         "widgetId": str(widget_id or "").strip(),
+        "timeUnit": str(time_unit or "hours").strip(),
+        "windowSize": max(1, int(window_size or 1)),
     }
 
     _dbg(
