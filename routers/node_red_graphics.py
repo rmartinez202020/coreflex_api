@@ -317,6 +317,8 @@ def stop_graphic_stream(
         "dashId": resolved_dash_id,
         "dashFolder": resolved_dash_folder,
         "widgetId": str(widget_id or "").strip(),
+        "timeUnit": str(time_unit or "hours").strip(),
+        "windowSize": max(1, int(window_size or 1)),
     }
 
     _dbg(
@@ -362,6 +364,8 @@ def _get_graphic_history_once(
     user_id: int,
     dash_id: str,
     widget_id: str,
+    time_unit: str = "hours",
+    window_size: int = 1,
     dash_folder: str = "",
 ) -> dict:
     resolved_dash_id, resolved_dash_folder = _resolve_dash_identity(
@@ -464,6 +468,8 @@ def get_graphic_history(
     user_id: int,
     dash_id: str,
     widget_id: str,
+    time_unit: str = "hours",
+    window_size: int = 1,
     dash_folder: str = "",
 ) -> dict:
     requested_dash, requested_folder = _resolve_dash_identity(
@@ -480,6 +486,8 @@ def get_graphic_history(
         dash_id=requested_dash,
         dash_folder=requested_folder,
         widget_id=widget_id,
+        time_unit=time_unit,
+        window_size=window_size,
         node_red_key_present=bool(NODE_RED_KEY),
     )
 
@@ -498,10 +506,14 @@ def get_graphic_history(
         dash_id=requested_dash,
         dash_folder=requested_folder,
         widget_id=widget_id,
+        time_unit=time_unit,
+        window_size=window_size,
     )
 
     result["requestedDashId"] = requested_dash
     result["requestedDashFolder"] = requested_folder
+    result["requestedTimeUnit"] = str(time_unit or "hours").strip()
+    result["requestedWindowSize"] = max(1, int(window_size or 1))
     result["resolvedByFallback"] = False
 
     return result

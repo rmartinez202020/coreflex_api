@@ -275,6 +275,8 @@ def _resolve_graphic_binding_for_request(
             current_user_id=current_user.id,
             dashboard_id=dash,
             widget_id=wid,
+            time_unit=row.time_unit,
+            window_size=row.window_size,
             found=bool(row),
         )
         return row, owner_user_id, dash
