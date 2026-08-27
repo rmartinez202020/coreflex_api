@@ -710,10 +710,21 @@ def get_graphic_display_history(
     try:
         from routers.node_red_graphics import get_graphic_history
 
+        _dbg(
+            "HISTORY WINDOW SENT TO NODE-RED",
+            owner_user_id=owner_user_id,
+            dashboard_id=binding_dash,
+            widget_id=wid,
+            time_unit=row.time_unit,
+            window_size=row.window_size,
+        )
+
         data = get_graphic_history(
             user_id=owner_user_id,
             dash_id=binding_dash,
             widget_id=wid,
+            time_unit=row.time_unit,
+            window_size=row.window_size,
         )
 
         _dbg(
