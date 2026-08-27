@@ -385,7 +385,7 @@ def _get_graphic_history_once(
     )
 
     try:
-        r = _post_json(url, payload, timeout_sec=20)
+        r = _post_json(url, payload, timeout_sec=640)
 
         _dbg(
             "GET GRAPHIC HISTORY RAW RESPONSE",
