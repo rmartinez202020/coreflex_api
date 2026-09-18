@@ -336,7 +336,6 @@ def _get_tenant_for_public_dashboard(
     tenant = (
         db.query(TenantUser)
         .filter(TenantUser.owner_user_id == dashboard.user_id)
-        .filter(TenantUser.customer_name.ilike(dashboard.customer_name))
         .filter(TenantUser.email.ilike(clean_email))
         .filter(TenantUser.is_active.is_(True))
         .first()
@@ -380,38 +379,83 @@ def _claim_tenant_dashboard_session(
     dashboard: CustomerDashboard,
     request: Optional[Request] = None,
 ) -> str:
-    access_row = _get_tenant_dashboard_access_row(
+    requested_access_row = _get_tenant_dashboard_access_row(
         db=db,
         tenant_user_id=tenant.id,
         dashboard_id=dashboard.id,
     )
 
-    if not access_row:
+    if not requested_access_row:
         raise HTTPException(
             status_code=403,
             detail="This tenant user does not have access to this dashboard.",
         )
 
-    existing_session_id = _norm(getattr(access_row, "active_session_id", ""))
-    last_seen_at = getattr(access_row, "active_session_last_seen_at", None)
+    # Enforce ONE active dashboard session per tenant account.
+    #
+    # A tenant may be assigned to unlimited dashboards, including dashboards
+    # belonging to different customers, but may actively use only one at a time.
+    #
+    # Session state is stored on TenantUserDashboardAccess rows, so inspect every
+    # assignment for this tenant before claiming the requested dashboard.
+    all_access_rows = (
+        db.query(TenantUserDashboardAccess)
+        .filter(TenantUserDashboardAccess.tenant_user_id == tenant.id)
+        .all()
+    )
 
-    if existing_session_id and _is_active_session_fresh(last_seen_at):
-        raise HTTPException(
-            status_code=409,
-            detail="This tenant user is already logged in to this dashboard. Please logout from the other session first.",
+    stale_rows_changed = False
+
+    for access_row in all_access_rows:
+        existing_session_id = _norm(
+            getattr(access_row, "active_session_id", "")
         )
+        if not existing_session_id:
+            continue
+
+        last_seen_at = getattr(
+            access_row,
+            "active_session_last_seen_at",
+            None,
+        )
+
+        if _is_active_session_fresh(last_seen_at):
+            if int(access_row.dashboard_id) == int(dashboard.id):
+                detail = (
+                    "This tenant user already has an active session on this "
+                    "dashboard. Please logout from the active session first."
+                )
+            else:
+                detail = (
+                    "This tenant user is already active on another dashboard. "
+                    "Please logout from the active dashboard first."
+                )
+
+            raise HTTPException(status_code=409, detail=detail)
+
+        # Expired/stale session: release it so it cannot interfere with a
+        # future login or dashboard switch.
+        access_row.active_session_id = None
+        access_row.active_session_started_at = None
+        access_row.active_session_last_seen_at = None
+        access_row.active_session_user_agent = None
+        db.add(access_row)
+        stale_rows_changed = True
+
+    if stale_rows_changed:
+        db.flush()
 
     session_id = _generate_session_id()
     now = _now_utc()
 
-    access_row.active_session_id = session_id
-    access_row.active_session_started_at = now
-    access_row.active_session_last_seen_at = now
-    access_row.active_session_user_agent = _get_request_user_agent(request)
+    requested_access_row.active_session_id = session_id
+    requested_access_row.active_session_started_at = now
+    requested_access_row.active_session_last_seen_at = now
+    requested_access_row.active_session_user_agent = _get_request_user_agent(request)
 
-    db.add(access_row)
+    db.add(requested_access_row)
     db.commit()
-    db.refresh(access_row)
+    db.refresh(requested_access_row)
 
     return session_id
 
@@ -616,7 +660,7 @@ def get_public_customer_dashboard(
 
 # =========================
 # 🔐 TENANT LOGIN FOR PUBLIC DASHBOARD
-# ✅ Prevent same tenant-user from logging into same dashboard more than once
+# ✅ One tenant may access many assigned dashboards, but only one at a time
 # =========================
 @router.post("/tenant-access/login", response_model=TenantPublicAuthOut)
 def tenant_public_dashboard_login(

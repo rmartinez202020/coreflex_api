@@ -327,3 +327,121 @@ def send_tenant_credentials_email(
     }
 
     return _send_resend_email(data)
+
+def send_tenant_dashboard_access_email(
+    to_email: str,
+    tenant_name: str,
+    dashboard_links=None,
+    portal_login_url: str = "",
+):
+    """Notify an existing tenant that dashboard access was added/updated.
+
+    This function intentionally does not accept, generate, reset, or send a password.
+    The tenant continues using the existing account credentials.
+    """
+    clean_to = str(to_email or "").strip().lower()
+    clean_name = str(tenant_name or "").strip()
+    clean_login_url = str(portal_login_url or "").strip()
+
+    if not clean_to:
+        print("❌ Missing destination email")
+        return False
+
+    now_utc = datetime.now(timezone.utc)
+    formatted_date = format_datetime(now_utc)
+
+    dashboard_links_text = _build_dashboard_links_text(dashboard_links)
+    dashboard_links_html = _build_dashboard_links_html(dashboard_links)
+
+    login_url_text = (
+        f"\nPortal login: {clean_login_url}\n" if clean_login_url else ""
+    )
+
+    login_url_html = (
+        f"""
+        <div style="margin:18px 0 0 0;padding:14px 16px;border:1px solid #dbeafe;background:#f8fbff;border-radius:10px;">
+            <div style="margin:0 0 6px 0;color:#1f2937;font-size:14px;font-weight:600;line-height:1.6;">
+                Portal login
+            </div>
+            <a href="{escape(clean_login_url)}" style="color:#2563eb;font-size:14px;line-height:1.6;word-break:break-all;text-decoration:none;">
+                {escape(clean_login_url)}
+            </a>
+        </div>
+        """
+        if clean_login_url
+        else ""
+    )
+
+    data = {
+        "from": "CoreFlex Access <access@coreflexiiotsplatform.com>",
+        "to": [clean_to],
+        "subject": "CoreFlex IIoTs Platform Dashboard Access Updated",
+        "headers": {
+            "Date": formatted_date,
+        },
+        "text": (
+            f"CoreFlex IIoTs Platform Dashboard Access Updated\n\n"
+            f"Hello {clean_name or clean_to},\n\n"
+            f"Additional dashboard access has been added to your existing CoreFlex IIoTs Platform tenant account.\n\n"
+            f"Login email: {clean_to}\n"
+            f"Continue using your existing password.\n"
+            f"{login_url_text}"
+            f"{dashboard_links_text}\n\n"
+            f"Your password has not been changed.\n\n"
+            f"This is an automated message from CoreFlex IIoTs Platform. Please do not reply."
+        ),
+        "html": f"""
+        <div style="font-family:Arial,Helvetica,sans-serif;padding:20px;background:#f8fafc;">
+            <div style="
+                max-width:620px;
+                margin:0 auto;
+                background:#ffffff;
+                border:1px solid #e5e7eb;
+                border-radius:12px;
+                padding:32px 28px;
+                box-shadow:0 2px 8px rgba(0,0,0,0.04);
+            ">
+                <h2 style="margin:0 0 18px 0;color:#2563eb;">
+                    CoreFlex IIoTs Platform Dashboard Access Updated
+                </h2>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    Hello <b>{escape(clean_name or clean_to)}</b>,
+                </p>
+
+                <p style="margin:0 0 12px 0;color:#111827;font-size:15px;line-height:1.6;">
+                    Additional dashboard access has been added to your existing CoreFlex IIoTs Platform tenant account.
+                </p>
+
+                <div style="
+                    margin:18px 0;
+                    padding:16px;
+                    border:1px solid #dbeafe;
+                    background:#eff6ff;
+                    border-radius:10px;
+                ">
+                    <div style="margin:0 0 10px 0;color:#1f2937;font-size:14px;line-height:1.6;">
+                        <b>Login email:</b> {escape(clean_to)}
+                    </div>
+                    <div style="margin:0;color:#1f2937;font-size:14px;line-height:1.6;">
+                        Continue using your existing password.
+                    </div>
+                </div>
+
+                {login_url_html}
+
+                {dashboard_links_html}
+
+                <p style="margin:18px 0 0 0;color:#111827;font-size:14px;line-height:1.6;">
+                    <b>Your password has not been changed.</b>
+                </p>
+
+                <p style="margin:12px 0 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
+                    This is an automated message from CoreFlex IIoTs Platform. Please do not reply.
+                </p>
+            </div>
+        </div>
+        """,
+    }
+
+    return _send_resend_email(data)

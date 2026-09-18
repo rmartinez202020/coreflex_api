@@ -20,7 +20,10 @@ from models import (
     UserSubscription,
 )
 from auth_utils import get_current_user
-from utils.email_service import send_tenant_credentials_email
+from utils.email_service import (
+    send_tenant_credentials_email,
+    send_tenant_dashboard_access_email,
+)
 from routers.log_engine import (
     send_log,
     LOG_CATEGORY_USER,
@@ -255,6 +258,62 @@ def _sync_dashboard_access(
         )
 
 
+def _add_dashboard_access(
+    db: Session,
+    tenant_user_id: int,
+    dashboard_ids: List[int],
+) -> List[int]:
+    """
+    Add only missing dashboard assignments for an existing tenant.
+    Existing assignments are preserved.
+
+    Returns the dashboard IDs that were newly added.
+    """
+    requested_ids = {int(x) for x in (dashboard_ids or [])}
+
+    existing_ids = {
+        int(row.dashboard_id)
+        for row in (
+            db.query(TenantUserDashboardAccess)
+            .filter(TenantUserDashboardAccess.tenant_user_id == tenant_user_id)
+            .all()
+        )
+    }
+
+    new_ids = sorted(requested_ids - existing_ids)
+
+    for dash_id in new_ids:
+        db.add(
+            TenantUserDashboardAccess(
+                tenant_user_id=tenant_user_id,
+                dashboard_id=dash_id,
+                created_at=_now_utc(),
+            )
+        )
+
+    return new_ids
+
+
+def _get_all_tenant_dashboard_rows(
+    db: Session,
+    tenant_user_id: int,
+) -> List[CustomerDashboard]:
+    """
+    Return every dashboard currently assigned to this tenant.
+    Used for the access-update email so the tenant receives the full list.
+    """
+    return (
+        db.query(CustomerDashboard)
+        .join(
+            TenantUserDashboardAccess,
+            TenantUserDashboardAccess.dashboard_id == CustomerDashboard.id,
+        )
+        .filter(TenantUserDashboardAccess.tenant_user_id == tenant_user_id)
+        .order_by(CustomerDashboard.id.asc())
+        .all()
+    )
+
+
 def _get_tenant_user_owned_by_admin(
     db: Session,
     tenant_user_id: int,
@@ -337,8 +396,7 @@ def create_tenant_user(
     if not customer_name:
         raise HTTPException(status_code=400, detail="Customer is required.")
 
-    _ensure_tenant_user_slot_available(db, current_user.id)
-
+    # Validate the customer and selected dashboards before creating or assigning.
     _require_customer_owned_by_admin(db, current_user.id, customer_name)
     dashboard_rows = _validate_dashboards_owned_by_admin_and_customer(
         db=db,
@@ -347,17 +405,78 @@ def create_tenant_user(
         dashboard_ids=dashboard_ids,
     )
 
+    # One tenant identity per admin + email.
     existing = (
         db.query(TenantUser)
         .filter(TenantUser.owner_user_id == current_user.id)
         .filter(TenantUser.email.ilike(email))
         .first()
     )
+
+    # ============================================================
+    # EXISTING TENANT:
+    # - no additional tenant-user subscription slot
+    # - no new password / no password reset
+    # - preserve every existing dashboard assignment
+    # - add only missing dashboard assignments
+    # ============================================================
     if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="A tenant user with this email already exists under this admin user.",
+        newly_added_ids = _add_dashboard_access(
+            db=db,
+            tenant_user_id=existing.id,
+            dashboard_ids=[row.id for row in dashboard_rows],
         )
+
+        existing.updated_at = _now_utc()
+        db.commit()
+        db.refresh(existing)
+
+        all_dashboard_rows = _get_all_tenant_dashboard_rows(
+            db=db,
+            tenant_user_id=existing.id,
+        )
+        dashboard_links = _build_dashboard_public_links(all_dashboard_rows)
+
+        # Send an access-update email only when something was actually added.
+        if newly_added_ids:
+            email_sent = send_tenant_dashboard_access_email(
+                to_email=existing.email,
+                tenant_name=existing.full_name,
+                dashboard_links=dashboard_links,
+            )
+            if not email_sent:
+                print("❌ Tenant dashboard-access email failed to send")
+
+        send_log(
+            user_id=current_user.id,
+            user_email=current_user.email,
+            category=LOG_CATEGORY_USER,
+            action="TENANT_DASHBOARD_ACCESS_ADD",
+            status=LOG_STATUS_SUCCESS,
+            message=f"Dashboard access updated for tenant: {existing.email}",
+            field="tenant_user",
+            new_value={
+                "tenant_user_id": existing.id,
+                "tenant_name": _norm(existing.full_name),
+                "tenant_email": _norm(existing.email),
+                "requested_customer_name": customer_name,
+                "access_level": _norm(existing.access_level),
+                "new_dashboard_ids": newly_added_ids,
+                "all_dashboard_ids": [row.id for row in all_dashboard_rows],
+                "all_dashboard_names": [
+                    _norm(getattr(row, "dashboard_name", ""))
+                    for row in all_dashboard_rows
+                ],
+            },
+        )
+
+        return _serialize_tenant_user(existing)
+
+    # ============================================================
+    # NEW TENANT:
+    # Only a brand-new tenant identity consumes a subscription slot.
+    # ============================================================
+    _ensure_tenant_user_slot_available(db, current_user.id)
 
     plain_password = _generate_password()
     hashed_password = _hash_password(plain_password)
@@ -398,10 +517,6 @@ def create_tenant_user(
     if not email_sent:
         print("❌ Tenant credentials email failed to send")
 
-    # =========================
-    # 📝 LOGS & ACTIVITY
-    # USER -> TENANT_CREATE
-    # =========================
     send_log(
         user_id=current_user.id,
         user_email=current_user.email,
@@ -426,6 +541,7 @@ def create_tenant_user(
     )
 
     return _serialize_tenant_user(new_user)
+
 
 
 # =========================
