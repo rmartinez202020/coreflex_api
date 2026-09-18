@@ -61,6 +61,7 @@ class TenantUserUpdate(BaseModel):
 class TenantUserDashboardMini(BaseModel):
     id: int
     dashboard_name: str
+    customer_name: str = ""
 
     class Config:
         from_attributes = True
@@ -119,6 +120,7 @@ def _serialize_tenant_user(row: TenantUser) -> TenantUserOut:
                 TenantUserDashboardMini(
                     id=dash.id,
                     dashboard_name=_norm(dash.dashboard_name),
+                    customer_name=_norm(getattr(dash, "customer_name", "")),
                 )
             )
 
@@ -234,6 +236,41 @@ def _validate_dashboards_owned_by_admin_and_customer(
         raise HTTPException(
             status_code=400,
             detail="One or more dashboards are invalid or not owned by this admin for the selected customer.",
+        )
+
+    return rows
+
+
+def _validate_dashboards_owned_by_admin(
+    db: Session,
+    owner_user_id: int,
+    dashboard_ids: List[int],
+) -> List[CustomerDashboard]:
+    """
+    Validate a complete multi-customer dashboard selection for one tenant.
+    Every selected dashboard must belong to the authenticated admin.
+    """
+    requested_ids = {int(x) for x in (dashboard_ids or [])}
+
+    if not requested_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one dashboard must be selected.",
+        )
+
+    rows = (
+        db.query(CustomerDashboard)
+        .filter(CustomerDashboard.user_id == owner_user_id)
+        .filter(CustomerDashboard.id.in_(requested_ids))
+        .all()
+    )
+
+    valid_ids = {int(row.id) for row in rows}
+
+    if valid_ids != requested_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="One or more dashboards are invalid or not owned by this admin.",
         )
 
     return rows
@@ -598,8 +635,6 @@ def update_tenant_user(
         raise HTTPException(status_code=400, detail="Name is required.")
     if not email:
         raise HTTPException(status_code=400, detail="Email is required.")
-    if not customer_name:
-        raise HTTPException(status_code=400, detail="Customer is required.")
 
     if email != _norm(row.email).lower():
         raise HTTPException(
@@ -607,19 +642,28 @@ def update_tenant_user(
             detail="Email cannot be modified after the tenant user is created.",
         )
 
-    _require_customer_owned_by_admin(db, current_user.id, customer_name)
-    dashboard_rows = _validate_dashboards_owned_by_admin_and_customer(
+    # The selected customer is retained only as a legacy/default tenant field.
+    # Authorization is determined exclusively by explicit dashboard access rows.
+    if customer_name:
+        _require_customer_owned_by_admin(db, current_user.id, customer_name)
+
+    # IMPORTANT: update accepts the tenant's complete dashboard set across
+    # every customer owned by this admin.
+    dashboard_rows = _validate_dashboards_owned_by_admin(
         db=db,
         owner_user_id=current_user.id,
-        customer_name=customer_name,
         dashboard_ids=dashboard_ids,
     )
 
-    old_dashboard_rows = [
-        access_row.dashboard
-        for access_row in (row.dashboard_access or [])
-        if access_row.dashboard is not None
-    ]
+    old_dashboard_rows = _get_all_tenant_dashboard_rows(
+        db=db,
+        tenant_user_id=row.id,
+    )
+
+    old_ids = {int(dash.id) for dash in old_dashboard_rows}
+    new_ids = {int(dash.id) for dash in dashboard_rows}
+    added_ids = sorted(new_ids - old_ids)
+    removed_ids = sorted(old_ids - new_ids)
 
     old_value = {
         "tenant_user_id": row.id,
@@ -633,13 +677,20 @@ def update_tenant_user(
             _norm(getattr(dash, "dashboard_name", ""))
             for dash in old_dashboard_rows
         ],
+        "dashboard_customers": [
+            _norm(getattr(dash, "customer_name", ""))
+            for dash in old_dashboard_rows
+        ],
     }
 
     row.full_name = full_name
-    row.customer_name = customer_name
+    if customer_name:
+        row.customer_name = customer_name
     row.access_level = access
     row.updated_at = _now_utc()
 
+    # Replace access with the complete multi-customer selection supplied by
+    # the admin UI. This intentionally allows additions and removals.
     _sync_dashboard_access(
         db=db,
         tenant_user_id=row.id,
@@ -649,10 +700,23 @@ def update_tenant_user(
     db.commit()
     db.refresh(row)
 
-    # =========================
-    # 📝 LOGS & ACTIVITY
-    # USER -> TENANT_UPDATE
-    # =========================
+    updated_dashboard_rows = _get_all_tenant_dashboard_rows(
+        db=db,
+        tenant_user_id=row.id,
+    )
+
+    # If dashboards were added through Edit User, notify the tenant using the
+    # same existing-account email. The password is never changed/reset here.
+    if added_ids:
+        dashboard_links = _build_dashboard_public_links(updated_dashboard_rows)
+        email_sent = send_tenant_dashboard_access_email(
+            to_email=row.email,
+            tenant_name=row.full_name,
+            dashboard_links=dashboard_links,
+        )
+        if not email_sent:
+            print("❌ Tenant dashboard-access email failed to send")
+
     send_log(
         user_id=current_user.id,
         user_email=current_user.email,
@@ -669,11 +733,17 @@ def update_tenant_user(
             "customer_name": _norm(row.customer_name),
             "access_level": _norm(row.access_level),
             "is_active": bool(row.is_active),
-            "dashboard_ids": [dash.id for dash in dashboard_rows],
+            "dashboard_ids": [dash.id for dash in updated_dashboard_rows],
             "dashboard_names": [
                 _norm(getattr(dash, "dashboard_name", ""))
-                for dash in dashboard_rows
+                for dash in updated_dashboard_rows
             ],
+            "dashboard_customers": [
+                _norm(getattr(dash, "customer_name", ""))
+                for dash in updated_dashboard_rows
+            ],
+            "added_dashboard_ids": added_ids,
+            "removed_dashboard_ids": removed_ids,
         },
     )
 
