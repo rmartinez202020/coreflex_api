@@ -2,6 +2,7 @@
 import os
 import uuid
 import requests
+import bcrypt
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -168,6 +169,43 @@ def _check_tenant_control_access(request: Request):
             status_code=403,
             detail="This tenant has read-only access.",
         )
+
+
+PIN_MIN_LENGTH = 4
+PIN_MAX_LENGTH = 12
+
+
+def _normalize_pin(value: Optional[str]) -> str:
+    return str(value or "").strip()
+
+
+def _validate_new_pin(pin: str) -> str:
+    pin = _normalize_pin(pin)
+    if not pin:
+        raise HTTPException(status_code=400, detail="PIN is required when PIN protection is enabled.")
+    if not pin.isdigit():
+        raise HTTPException(status_code=400, detail="PIN must contain numbers only.")
+    if len(pin) < PIN_MIN_LENGTH or len(pin) > PIN_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PIN must be {PIN_MIN_LENGTH} to {PIN_MAX_LENGTH} digits.",
+        )
+    return pin
+
+
+def _hash_pin(pin: str) -> str:
+    return bcrypt.hashpw(pin.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_pin(pin: str, pin_hash: str) -> bool:
+    pin = _normalize_pin(pin)
+    pin_hash = _as_str(pin_hash)
+    if not pin or not pin_hash:
+        return False
+    try:
+        return bcrypt.checkpw(pin.encode("utf-8"), pin_hash.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def _post_to_node_red_wait(
@@ -591,6 +629,11 @@ class ControlBindRequest(BaseModel):
     interlockType: Optional[str] = "NO"
     interlockMode: Optional[str] = "block_when_active"
 
+    # PIN configuration is owner-only and saved as a bcrypt hash.
+    # pin=None means preserve the existing hash while editing.
+    pinRequired: Optional[bool] = False
+    pin: Optional[str] = None
+
 
 class ControlWriteRequest(BaseModel):
     dashboardId: str = Field(..., min_length=1)
@@ -598,6 +641,7 @@ class ControlWriteRequest(BaseModel):
     field: Optional[str] = None
     value01: Optional[int] = Field(None, ge=0, le=1)
     value: Optional[float] = None
+    pin: Optional[str] = None
 
 
 @router.post("/bind")
@@ -631,6 +675,9 @@ def bind_control(
     interlock_field = _as_str(req.interlockField).lower() if supports_interlock else ""
     interlock_type = _as_str(req.interlockType).upper() if supports_interlock else "NO"
     interlock_mode = _as_str(req.interlockMode) if supports_interlock else "block_when_active"
+
+    pin_required = bool(req.pinRequired)
+    supplied_pin = _normalize_pin(req.pin)
 
     if widget_type != "display_output":
         scale_min = None
@@ -729,6 +776,23 @@ def bind_control(
         .first()
     )
 
+    existing_pin_hash = _as_str(getattr(row, "pin_hash", "")) if row else ""
+
+    if pin_required:
+        if supplied_pin:
+            validated_pin = _validate_new_pin(supplied_pin)
+            pin_hash = _hash_pin(validated_pin)
+        elif existing_pin_hash:
+            # Editing another widget setting must not silently replace the PIN.
+            pin_hash = existing_pin_hash
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="PIN is required the first time PIN protection is enabled.",
+            )
+    else:
+        pin_hash = None
+
     if not row:
         row = ControlBinding(
             user_id=user.id,
@@ -753,6 +817,9 @@ def bind_control(
     row.interlock_field = interlock_field if interlock_enabled else None
     row.interlock_type = interlock_type if interlock_enabled else "NO"
     row.interlock_mode = interlock_mode if interlock_enabled else "block_when_active"
+
+    row.pin_required = pin_required
+    row.pin_hash = pin_hash
 
     try:
         db.commit()
@@ -798,6 +865,8 @@ def bind_control(
         "interlockField": getattr(row, "interlock_field", None),
         "interlockType": getattr(row, "interlock_type", None),
         "interlockMode": getattr(row, "interlock_mode", None),
+        "pinRequired": bool(getattr(row, "pin_required", False)),
+        "pinConfigured": bool(_as_str(getattr(row, "pin_hash", ""))),
     }
 
 
@@ -836,6 +905,8 @@ def get_used_dos(
             "interlockField": getattr(r, "interlock_field", None),
             "interlockType": getattr(r, "interlock_type", None),
             "interlockMode": getattr(r, "interlock_mode", None),
+            "pinRequired": bool(getattr(r, "pin_required", False)),
+            "pinConfigured": bool(_as_str(getattr(r, "pin_hash", ""))),
         }
         for r in rows
         if r.bind_field
@@ -915,6 +986,41 @@ def write_control_do(
 
     if not row:
         raise HTTPException(status_code=404, detail="Control binding not found")
+
+    pin_required = bool(getattr(row, "pin_required", False))
+    if pin_required:
+        stored_pin_hash = _as_str(getattr(row, "pin_hash", ""))
+        if not stored_pin_hash:
+            # Fail closed if DB configuration is inconsistent.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "PIN configuration error",
+                    "message": "This control requires a PIN but no PIN is configured.",
+                    "pinRequired": True,
+                },
+            )
+
+        entered_pin = _normalize_pin(req.pin)
+        if not entered_pin:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "PIN required",
+                    "message": "Enter the PIN to operate this control.",
+                    "pinRequired": True,
+                },
+            )
+
+        if not _verify_pin(entered_pin, stored_pin_hash):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Invalid PIN",
+                    "message": "The PIN entered for this control is incorrect.",
+                    "pinRequired": True,
+                },
+            )
 
     widget_type = _normalize_widget_type(getattr(row, "widget_type", ""))
     device_id = _as_str(row.bind_device_id)
@@ -1235,6 +1341,7 @@ def write_control_do(
         "interlockType": interlock_type if interlock_enabled else None,
         
         "interlockMode": interlock_mode if interlock_enabled else None,
+        "pinRequired": pin_required,
         **result,
     }
 

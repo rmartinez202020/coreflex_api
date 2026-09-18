@@ -940,6 +940,15 @@ class ControlBinding(Base):
         server_default="block_when_active",
     )
 
+    # 🔐 Control PIN protection
+    # PIN is never stored in plaintext.
+    pin_required = Column(Boolean, nullable=False, server_default=func.false())
+    pin_hash = Column(String(255), nullable=True)
+
+    created_at = Column(
+    DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
