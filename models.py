@@ -140,6 +140,65 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # ✅ one user -> many Tag Explorer metadata rows
+    tag_explorer_tags = relationship(
+        "TagExplorerTag",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+# ===============================
+# 🏷 TAG EXPLORER TAG METADATA
+# Persistent user-owned metadata for claimed device points.
+# Live Current Value is NOT stored here; it comes from device telemetry.
+# ===============================
+class TagExplorerTag(Base):
+    __tablename__ = "tag_explorer_tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    device_model = Column(String(64), nullable=False)
+    device_id = Column(String(64), nullable=False, index=True)
+    tag = Column(String(64), nullable=False)
+
+    description = Column(String(500), nullable=True)
+    math_formula = Column(String(500), nullable=True)
+    unit = Column(String(100), nullable=True)
+    group_name = Column(String(160), nullable=True, index=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "device_model",
+            "device_id",
+            "tag",
+            name="uq_tag_explorer_user_device_tag",
+        ),
+    )
+
+    user = relationship("User", back_populates="tag_explorer_tags")
+
 
 # ===============================
 # 🔐 PASSWORD RESET CODES
@@ -499,7 +558,6 @@ class ZHC1921Device(Base):
         nullable=False,
     )
 
-    claimed_by_user = relationship("User")
     claimed_by_user = relationship("User", back_populates="zhc1921_devices")
 
 
