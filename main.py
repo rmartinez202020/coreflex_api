@@ -10,19 +10,23 @@ import os
 import threading
 import re
 
+
 # ========================================
 # 🗄 IMPORT MODELS FIRST (CRITICAL)
 # ========================================
 import models  # noqa: F401
 from database import Base, engine, get_db
 
+
 # ========================================
 # ☁️ CLOUDINARY INIT
 # ========================================
 from cloudinary_config import init_cloudinary  # noqa: E402
 
+
 # ✅ REDIS CLIENT TEST
 from utils.redis_client import redis_client  # noqa: E402
+
 
 # ✅ NEW: background counter tick (persistent counters)
 from routers.device_counters_tick import (  # noqa: E402
@@ -30,25 +34,28 @@ from routers.device_counters_tick import (  # noqa: E402
     stop_device_counters_tick,
 )
 
+
 # ✅ NEW: alarm engine background loop
 from routers.alarm_engine import alarm_engine_loop  # noqa: E402
+
 
 # ========================================
 # 🚀 FASTAPI APP
 # ========================================
 app = FastAPI(title="CoreFlex API", version="1.0.0")
 
+
 # ========================================
 # 🌍 CORS
 # ========================================
 ALLOWED_ORIGINS = [
-    "https://www.coreflexiiotsplatform.com",
+    "https://www\.coreflexiiotsplatform.com",
     "https://coreflexiiotsplatform.com",
-    "http://www.coreflexiiotsplatform.com",
+    "http://www\.coreflexiiotsplatform.com",
     "http://coreflexiiotsplatform.com",
-    "https://www.coreflexiotsplatform.com",
+    "https://www\.coreflexiotsplatform.com",
     "https://coreflexiotsplatform.com",
-    "http://www.coreflexiotsplatform.com",
+    "http://www\.coreflexiotsplatform.com",
     "http://coreflexiotsplatform.com",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -56,10 +63,11 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"https?://(www\.)?coreflexi{1,2}otsplatform\.com",
+    allow_origin_regex=r"https?://(www\\.)?coreflexi{1,2}otsplatform\\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,9 +80,11 @@ async def options_preflight_handler(full_path: str, request: Request):
     origin = request.headers.get("origin", "")
     allow_origin = origin if origin in ALLOWED_ORIGINS else ""
 
+
     if not allow_origin:
-        if re.match(r"^https?://(www\.)?coreflexi{1,2}otsplatform\.com$", origin):
+        if re.match(r"^https?://(www\\.)?coreflexi{1,2}otsplatform\\.com$", origin):
             allow_origin = origin
+
 
     headers = {
         "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
@@ -85,8 +95,10 @@ async def options_preflight_handler(full_path: str, request: Request):
         "Vary": "Origin",
     }
 
+
     if allow_origin:
         headers["Access-Control-Allow-Origin"] = allow_origin
+
 
     return Response(status_code=200, headers=headers)
 
@@ -99,11 +111,13 @@ async def on_startup():
     except Exception as e:
         print("❌ Startup create_all failed:", repr(e))
 
+
     try:
         init_cloudinary()
         print("✅ Cloudinary initialized on startup")
     except Exception as e:
         print("❌ Cloudinary init failed:", repr(e))
+
 
     try:
         redis_client.set("startup_test", "coreflex")
@@ -111,10 +125,12 @@ async def on_startup():
     except Exception as e:
         print("❌ Redis startup failed:", repr(e))
 
+
     try:
         start_device_counters_tick()
     except Exception as e:
         print("❌ start_device_counters_tick failed:", repr(e))
+
 
     try:
         alarm_thread = threading.Thread(
@@ -151,116 +167,175 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 from auth_routes import router as auth_router  # noqa: E402
 
+
 app.include_router(auth_router)
+
 
 from routers.main_dashboard import router as main_dashboard_router  # noqa: E402
 
+
 app.include_router(main_dashboard_router)
+
 
 from routers.customers_dashboards import router as customers_dashboards_router  # noqa: E402
 
+
 app.include_router(customers_dashboards_router)
+
 
 from routers.user_profile import router as user_profile_router  # noqa: E402
 
+
 app.include_router(user_profile_router)
+
 
 from routers.customer_locations import router as customer_locations_router  # noqa: E402
 
+
 app.include_router(customer_locations_router)
+
 
 from routers.tenant_users import router as tenant_users_router  # noqa: E402
 
+
 app.include_router(tenant_users_router)
+
 
 from routers.user_subscriptions import router as user_subscriptions_router  # noqa: E402
 
+
 app.include_router(user_subscriptions_router)
+
 
 from routers.admin_subscriptions import router as admin_subscriptions_router  # noqa: E402
 
+
 app.include_router(admin_subscriptions_router)
+
 
 from routers.billing import router as billing_router  # noqa: E402
 
+
 app.include_router(billing_router)
+
 
 from routers.subscription_agreements import (  # noqa: E402
     router as subscription_agreements_router,
 )
 
+
 app.include_router(subscription_agreements_router)
+
 
 from routers.billing_admin import router as billing_admin_router  # noqa: E402
 
+
 app.include_router(billing_admin_router)
+
 
 from routers.logs_admin import router as logs_admin_router  # noqa: E402
 
+
 app.include_router(logs_admin_router)
+
 
 from routers.images import router as images_router  # noqa: E402
 
+
 app.include_router(images_router)
+
 
 from routers.device_registry import router as device_registry_router  # noqa: E402
 
+
 app.include_router(device_registry_router)
+
 
 from routers.gateway_device_seen import (  # noqa: E402
     router as gateway_device_seen_router,
 )
 
+
 app.include_router(gateway_device_seen_router)
+
 
 from routers.zhc1921_devices import router as zhc1921_router  # noqa: E402
 
+
 app.include_router(zhc1921_router)
+
 
 from routers.zhc1661_devices import router as zhc1661_router  # noqa: E402
 
+
 app.include_router(zhc1661_router)
+
 
 from routers.tp4000_devices import router as tp4000_router  # noqa: E402
 
+
 app.include_router(tp4000_router)
+
+
+from routers.weight_scale_systems import router as weight_scale_systems_router  # noqa: E402
+
+
+app.include_router(weight_scale_systems_router)
+
 
 # ✅ Tag Explorer - persistent Description / Math / Unit / Group configuration
 from routers.tag_explorer import router as tag_explorer_router  # noqa: E402
 
+
 app.include_router(tag_explorer_router)
+
 
 from routers.radar_level_sensors import router as radar_level_sensors_router  # noqa: E402
 
+
 app.include_router(radar_level_sensors_router)
+
 
 from routers.device_counters import router as device_counters_router  # noqa: E402
 
+
 app.include_router(device_counters_router)
+
 
 from routers.control_bindings import router as control_bindings_router  # noqa: E402
 
+
 app.include_router(control_bindings_router)
+
 
 from routers.node_red_graphics import router as node_red_graphics_router  # noqa: E402
 
+
 app.include_router(node_red_graphics_router)
+
 
 from routers.graphic_display_bindings import (  # noqa: E402
     router as graphic_display_bindings_router,
 )
 
+
 app.include_router(graphic_display_bindings_router)
+
 
 from routers.alarm_log_windows import router as alarm_log_windows_router  # noqa: E402
 
+
 app.include_router(alarm_log_windows_router)
+
 
 from routers.alarm_definitions import router as alarm_definitions_router  # noqa: E402
 
+
 app.include_router(alarm_definitions_router)
 
+
 from routers.alarm_history import router as alarm_history_router  # noqa: E402
+
 
 app.include_router(alarm_history_router)
 
@@ -306,6 +381,7 @@ from models import (  # noqa: E402
 from utils.zhc1921_live_cache import get_latest as get_latest_zhc1921  # noqa: E402
 from utils.zhc1661_live_cache import get_latest as get_latest_zhc1661  # noqa: E402
 
+
 OFFLINE_AFTER_SECONDS = int(os.getenv("COREFLEX_OFFLINE_AFTER_SECONDS") or "10")
 
 
@@ -324,6 +400,7 @@ def read_current_user_logs(
     """
     Read the authenticated CoreFlex owner's audit logs.
 
+
     Security:
     - The frontend does NOT send user_id.
     - user_id comes only from the verified JWT/current_user.
@@ -334,8 +411,10 @@ def read_current_user_logs(
         date=body.date,
     )
 
+
     if not result.get("ok"):
         status_code = result.get("status_code")
+
 
         # Preserve a client-side date validation error as 400.
         if result.get("error") == "Invalid log date. Expected YYYY-MM-DD":
@@ -344,11 +423,13 @@ def read_current_user_logs(
                 detail=result,
             )
 
+
         # Node-RED/read-side failures are upstream service failures.
         raise HTTPException(
             status_code=502 if not status_code else int(status_code),
             detail=result,
         )
+
 
     return result
 
@@ -357,8 +438,10 @@ def _parse_cached_datetime(value) -> datetime | None:
     if not value:
         return None
 
+
     if isinstance(value, datetime):
         return value
+
 
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -379,6 +462,7 @@ def _compute_online_status(last_seen) -> str:
     if not ls:
         return "offline"
 
+
     now = datetime.now(timezone.utc)
     age = (now - ls).total_seconds()
     return "online" if age <= OFFLINE_AFTER_SECONDS else "offline"
@@ -392,17 +476,22 @@ def _last_seen_iso(last_seen) -> str:
 def _normalize_public_model(raw) -> str:
     v = str(raw or "").strip().lower()
 
+
     if v in {"zhc1921", "cf-2000", "cf2000"}:
         return "zhc1921"
+
 
     if v in {"zhc1661", "cf-1600", "cf1600"}:
         return "zhc1661"
 
+
     if v in {"tp4000", "tp-4000"}:
         return "tp4000"
 
+
     if v in {"cfr100", "cf-r100", "cf_r100", "radar-level", "radar_level"}:
         return "cfr100"
+
 
     return v
 
@@ -415,12 +504,14 @@ def _extract_dashboard_objects(layout):
     if not isinstance(layout, dict):
         return []
 
+
     objects = (
         layout.get("canvas", {}).get("objects")
         or layout.get("objects")
         or layout.get("droppedTanks")
         or []
     )
+
 
     return objects if isinstance(objects, list) else []
 
@@ -433,23 +524,29 @@ def _extract_bound_devices_from_dashboard_layout(layout):
         "cfr100": set(),
     }
 
+
     objects = _extract_dashboard_objects(layout)
+
 
     for obj in objects:
         if not isinstance(obj, dict):
             continue
 
+
         props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
         tag = props.get("tag") or obj.get("tag") or None
 
+
         model = ""
         device_id = ""
+
 
         if isinstance(tag, dict):
             model = _normalize_public_model(tag.get("model"))
             device_id = _normalize_public_device_id(
                 tag.get("deviceId") or tag.get("device_id") or ""
             )
+
 
         if not model or not device_id:
             model = _normalize_public_model(
@@ -463,6 +560,7 @@ def _extract_bound_devices_from_dashboard_layout(layout):
                 or props.get("device_model")
                 or ""
             )
+
 
             device_id = _normalize_public_device_id(
                 obj.get("bindDeviceId")
@@ -478,10 +576,12 @@ def _extract_bound_devices_from_dashboard_layout(layout):
                 or ""
             )
 
+
         if model and device_id:
             if model not in wanted:
                 wanted[model] = set()
             wanted[model].add(device_id)
+
 
     return wanted
 
@@ -490,11 +590,14 @@ def _device_allowed(wanted: dict | None, model_key: str, device_id: str) -> bool
     if wanted is None:
         return True
 
+
     model = _normalize_public_model(model_key)
     did = _normalize_public_device_id(device_id)
 
+
     if not model or not did:
         return False
+
 
     return did in wanted.get(model, set())
 
@@ -506,6 +609,7 @@ def _append_claimed_devices_for_owner(
 ):
     out = []
 
+
     # ---- ZHC1921 (CF-2000) ----
     rows_1921 = (
         db.query(ZHC1921Device)
@@ -514,14 +618,17 @@ def _append_claimed_devices_for_owner(
         .all()
     )
 
+
     for r in rows_1921:
         if not _device_allowed(wanted, "zhc1921", r.device_id):
             continue
+
 
         cached = get_latest_zhc1921(r.device_id) or {}
         last_seen = cached.get("last_seen") or r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
+
 
         out.append(
             {
@@ -560,6 +667,7 @@ def _append_claimed_devices_for_owner(
             }
         )
 
+
     # ---- ZHC1661 (CF-1600) ----
     rows_1661 = (
         db.query(ZHC1661Device)
@@ -568,14 +676,17 @@ def _append_claimed_devices_for_owner(
         .all()
     )
 
+
     for r in rows_1661:
         if not _device_allowed(wanted, "zhc1661", r.device_id):
             continue
+
 
         cached = get_latest_zhc1661(r.device_id) or {}
         last_seen = cached.get("last_seen") or r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
+
 
         out.append(
             {
@@ -600,6 +711,7 @@ def _append_claimed_devices_for_owner(
             }
         )
 
+
     # ---- TP-4000 ----
     rows_tp4000 = (
         db.query(TP4000Device)
@@ -608,13 +720,16 @@ def _append_claimed_devices_for_owner(
         .all()
     )
 
+
     for r in rows_tp4000:
         if not _device_allowed(wanted, "tp4000", r.device_id):
             continue
 
+
         last_seen = r.last_seen
         status = _compute_online_status(last_seen)
         online = status == "online"
+
 
         out.append(
             {
@@ -641,6 +756,7 @@ def _append_claimed_devices_for_owner(
             }
         )
 
+
     # ---- CFR100 / Radar Level Sensor ----
     rows_radar = (
         db.query(RadarLevelSensor)
@@ -649,19 +765,24 @@ def _append_claimed_devices_for_owner(
         .all()
     )
 
+
     for r in rows_radar:
         imei = _normalize_public_device_id(r.raw_imei_bytes)
+
 
         if not _device_allowed(wanted, "cfr100", imei):
             continue
 
+
         status = _compute_online_status(r.received_at)
         online = status == "online"
+
 
         temperature_c = (
             float(r.temperature_c) if r.temperature_c is not None else None
         )
         battery_v = float(r.battery_v) if r.battery_v is not None else None
+
 
         out.append(
             {
@@ -678,10 +799,12 @@ def _append_claimed_devices_for_owner(
                 "is_online": online,
                 "lastSeen": _last_seen_iso(r.received_at),
 
+
                 # Current reading
                 "received_at": r.received_at.isoformat() if r.received_at else None,
                 "height_mm": r.height_mm,
                 "height": r.height_mm,
+
 
                 # Previous reading #1
                 "height_2_mm": r.height_2_mm,
@@ -689,17 +812,20 @@ def _append_claimed_devices_for_owner(
                     r.received_at_2.isoformat() if r.received_at_2 else None
                 ),
 
+
                 # Previous reading #2
                 "height_3_mm": r.height_3_mm,
                 "received_at_3": (
                     r.received_at_3.isoformat() if r.received_at_3 else None
                 ),
 
+
                 # Previous reading #3
                 "height_4_mm": r.height_4_mm,
                 "received_at_4": (
                     r.received_at_4.isoformat() if r.received_at_4 else None
                 ),
+
 
                 "temperature_c": temperature_c,
                 "temperature": temperature_c,
@@ -714,6 +840,7 @@ def _append_claimed_devices_for_owner(
             }
         )
 
+
     return out
 
 
@@ -727,11 +854,13 @@ def _resolve_public_tenant_dashboard(
     clean_public_id = str(public_launch_id or "").strip()
     clean_email = str(tenant_email or "").strip().lower()
 
+
     if not clean_slug or not clean_public_id or not clean_email:
         raise HTTPException(
             status_code=400,
             detail="Missing tenant public access parameters.",
         )
+
 
     dashboard = (
         db.query(CustomerDashboard)
@@ -741,8 +870,10 @@ def _resolve_public_tenant_dashboard(
         .first()
     )
 
+
     if not dashboard:
         raise HTTPException(status_code=404, detail="Public dashboard not found.")
+
 
     tenant = (
         db.query(TenantUser)
@@ -753,11 +884,13 @@ def _resolve_public_tenant_dashboard(
         .first()
     )
 
+
     if not tenant:
         raise HTTPException(
             status_code=403,
             detail="Tenant user not authorized for this dashboard.",
         )
+
 
     has_access = (
         db.query(TenantUserDashboardAccess.id)
@@ -766,11 +899,13 @@ def _resolve_public_tenant_dashboard(
         .first()
     )
 
+
     if not has_access:
         raise HTTPException(
             status_code=403,
             detail="Tenant user not authorized for this dashboard.",
         )
+
 
     return dashboard
 
@@ -812,7 +947,9 @@ def list_tenant_public_devices(
         tenant_email=tenant_email,
     )
 
+
     wanted = _extract_bound_devices_from_dashboard_layout(dashboard.layout)
+
 
     return _append_claimed_devices_for_owner(
         db=db,

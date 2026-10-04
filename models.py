@@ -18,8 +18,10 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import datetime
 
+
 # ✅ Import the SAME Base object from database.py
 from database import Base
+
 
 # ===============================
 # 👤 USER MODEL (Authentication)
@@ -27,13 +29,16 @@ from database import Base
 class User(Base):
     __tablename__ = "users"
 
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(120), nullable=False)
     company = Column(String(120), nullable=True)
     email = Column(String(120), nullable=False, unique=True, index=True)
 
+
     # ✅ bcrypt hashes are ~60 chars, give safe room
     hashed_password = Column(String(128), nullable=False)
+
 
     # 🔐 Control & Automation Terms Acceptance (REGISTER PAGE)
     # NOTE: Use func.false() for a clean Postgres boolean default
@@ -46,6 +51,7 @@ class User(Base):
         nullable=True,
     )
 
+
     # ✅ optional: convenient 1-to-1 relationship to profile
     profile = relationship(
         "UserProfile",
@@ -55,6 +61,7 @@ class User(Base):
         passive_deletes=True,
     )
 
+
     # ✅ NEW: one user -> many password reset codes
     password_reset_codes = relationship(
         "PasswordResetCode",
@@ -62,6 +69,7 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
 
     # ✅ one user -> many customer locations
     customer_locations = relationship(
@@ -71,6 +79,7 @@ class User(Base):
         passive_deletes=True,
     )
 
+
     # ✅ one user -> many image assets (Cloudinary library)
     images = relationship(
         "ImageAsset",
@@ -78,6 +87,7 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
 
     # ✅ one user -> many customer dashboards
     customer_dashboards = relationship(
@@ -87,6 +97,7 @@ class User(Base):
         passive_deletes=True,
     )
 
+
     # ✅ NEW: one user/admin -> many tenant users
     tenant_users = relationship(
         "TenantUser",
@@ -95,12 +106,14 @@ class User(Base):
         passive_deletes=True,
     )
 
+
     # ✅ one user -> many claimed ZHC1921 devices
     zhc1921_devices = relationship(
         "ZHC1921Device",
         back_populates="claimed_by_user",
         passive_deletes=True,
     )
+
 
     # ✅ one user -> many claimed ZHC1661 devices
     zhc1661_devices = relationship(
@@ -109,12 +122,14 @@ class User(Base):
         passive_deletes=True,
     )
 
+
     # ✅ one user -> many claimed TP4000 devices
     tp4000_devices = relationship(
         "TP4000Device",
         back_populates="claimed_by_user",
         passive_deletes=True,
     )
+
 
     # ✅ one user -> many control bindings (Toggle / Push NO / Push NC, etc.)
     control_bindings = relationship(
@@ -124,6 +139,7 @@ class User(Base):
         passive_deletes=True,
     )
 
+
     # ✅ one user -> many graphic display bindings
     graphic_display_bindings = relationship(
         "GraphicDisplayBinding",
@@ -132,6 +148,7 @@ class User(Base):
         passive_deletes=True,
     )
 
+
     # ✅ NEW: one user -> many alarm log windows
     alarm_log_windows = relationship(
         "AlarmLogWindow",
@@ -139,6 +156,7 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
 
     # ✅ one user -> many Tag Explorer metadata rows
     tag_explorer_tags = relationship(
@@ -149,6 +167,8 @@ class User(Base):
     )
 
 
+
+
 # ===============================
 # 🏷 TAG EXPLORER TAG METADATA
 # Persistent user-owned metadata for claimed device points.
@@ -157,7 +177,9 @@ class User(Base):
 class TagExplorerTag(Base):
     __tablename__ = "tag_explorer_tags"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     user_id = Column(
         Integer,
@@ -166,14 +188,17 @@ class TagExplorerTag(Base):
         index=True,
     )
 
+
     device_model = Column(String(64), nullable=False)
     device_id = Column(String(64), nullable=False, index=True)
     tag = Column(String(64), nullable=False)
+
 
     description = Column(String(500), nullable=True)
     math_formula = Column(String(500), nullable=True)
     unit = Column(String(100), nullable=True)
     group_name = Column(String(160), nullable=True, index=True)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -187,6 +212,7 @@ class TagExplorerTag(Base):
         nullable=False,
     )
 
+
     __table_args__ = (
         UniqueConstraint(
             "user_id",
@@ -197,7 +223,10 @@ class TagExplorerTag(Base):
         ),
     )
 
+
     user = relationship("User", back_populates="tag_explorer_tags")
+
+
 
 
 # ===============================
@@ -208,7 +237,9 @@ class TagExplorerTag(Base):
 class PasswordResetCode(Base):
     __tablename__ = "password_reset_codes"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     user_id = Column(
         Integer,
@@ -216,6 +247,7 @@ class PasswordResetCode(Base):
         nullable=False,
         index=True,
     )
+
 
     email = Column(String(255), nullable=False, index=True)
     code_hash = Column(String(255), nullable=False)
@@ -228,7 +260,10 @@ class PasswordResetCode(Base):
         server_default=func.now(),
     )
 
+
     user = relationship("User", back_populates="password_reset_codes")
+
+
 
 
 # ===============================
@@ -238,7 +273,9 @@ class PasswordResetCode(Base):
 class UserProfile(Base):
     __tablename__ = "user_profiles"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # ✅ One profile per user
     user_id = Column(
@@ -249,14 +286,18 @@ class UserProfile(Base):
         index=True,
     )
 
+
     full_name = Column(String(120), nullable=True)
     role_position = Column(String(120), nullable=True)
+
 
     # NOTE: This is profile email (can differ from login email if you want)
     email = Column(String(200), nullable=True)
 
+
     company = Column(String(160), nullable=True)
     company_address = Column(String(240), nullable=True)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -270,7 +311,10 @@ class UserProfile(Base):
         nullable=False,
     )
 
+
     user = relationship("User", back_populates="profile")
+
+
 
 
 # ===============================
@@ -281,7 +325,9 @@ class UserProfile(Base):
 class CustomerLocation(Base):
     __tablename__ = "customer_locations"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # 🔑 owner user (who created this location)
     user_id = Column(
@@ -291,9 +337,11 @@ class CustomerLocation(Base):
         index=True,
     )
 
+
     # Basic customer/site info
     customer_name = Column(String(160), nullable=False)
     site_name = Column(String(160), nullable=False)
+
 
     # Address fields
     street = Column(String(200), nullable=False)
@@ -302,17 +350,21 @@ class CustomerLocation(Base):
     zip = Column(String(30), nullable=False)
     country = Column(String(120), nullable=False, server_default="United States")
 
+
     # Optional notes
     notes = Column(String(500), nullable=True)
+
 
     # ✅ Backend-geocoded coordinates (stored in DB)
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
 
+
     # ✅ Geocode tracking (helps debug + avoids confusion)
     # Examples: "ok", "no_results", "error"
     geocode_status = Column(String(60), nullable=True)
     geocoded_at = Column(DateTime(timezone=True), nullable=True)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -326,7 +378,10 @@ class CustomerLocation(Base):
         nullable=False,
     )
 
+
     user = relationship("User", back_populates="customer_locations")
+
+
 
 
 # ===============================
@@ -337,7 +392,9 @@ class CustomerLocation(Base):
 class ImageAsset(Base):
     __tablename__ = "image_assets"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # 🔑 owner user (who uploaded it)
     user_id = Column(
@@ -347,12 +404,15 @@ class ImageAsset(Base):
         index=True,
     )
 
+
     # ✅ Cloudinary info
     url = Column(String(700), nullable=False)
     public_id = Column(String(400), nullable=False, index=True)
 
+
     # optional grouping/folder label
     folder = Column(String(250), nullable=True)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -360,7 +420,10 @@ class ImageAsset(Base):
         nullable=False,
     )
 
+
     user = relationship("User", back_populates="images")
+
+
 
 
 # ===============================
@@ -369,11 +432,13 @@ class ImageAsset(Base):
 class Device(Base):
     __tablename__ = "devices"
 
+
     imei = Column(String(50), primary_key=True)
     level = Column(Float)
     temperature = Column(Float)
     battery = Column(Float)
     last_update = Column(DateTime, default=datetime.datetime.utcnow)
+
 
 # ===============================
 # 🗂 DEVICE REGISTRY
@@ -385,16 +450,21 @@ class Device(Base):
 class DeviceRegistry(Base):
     __tablename__ = "device_registry"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # serial number / logical device identity
     device_id = Column(String(64), nullable=False, unique=True, index=True)
 
+
     # zhc1921 / zhc1661 / tp4000
     device_model = Column(String(64), nullable=False, index=True)
 
+
     # IMPORTANT: backend should always normalize/store lowercase
     device_mac = Column(String(32), nullable=False, unique=True, index=True)
+
 
     claimed_by_user_id = Column(
         Integer,
@@ -403,6 +473,7 @@ class DeviceRegistry(Base):
         index=True,
     )
     is_claimed = Column(Boolean, nullable=False, server_default=func.false())
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -416,7 +487,10 @@ class DeviceRegistry(Base):
         nullable=False,
     )
 
+
     claimed_by_user = relationship("User")
+
+
 
 
 # ===============================
@@ -428,7 +502,9 @@ class DeviceRegistry(Base):
 class GatewayDeviceSeen(Base):
     __tablename__ = "gateway_device_seen"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     device_registry_id = Column(
         Integer,
@@ -437,10 +513,12 @@ class GatewayDeviceSeen(Base):
         index=True,
     )
 
+
     # copied from device_registry for fast reads / snapshots
     device_id = Column(String(64), nullable=False, index=True)
     device_model = Column(String(64), nullable=False, index=True)
     device_mac = Column(String(32), nullable=False, index=True)
+
 
     # gateway info
     gateway_id = Column(String(120), nullable=False, index=True)
@@ -448,9 +526,11 @@ class GatewayDeviceSeen(Base):
     gateway_tailscale_ip = Column(String(64), nullable=False)
     gateway_interface = Column(String(50), nullable=True)
 
+
     # device on local gateway LAN
     device_local_ip = Column(String(64), nullable=True)
     neighbor_state = Column(String(32), nullable=True)
+
 
     # heartbeat / status
     first_seen = Column(
@@ -466,8 +546,10 @@ class GatewayDeviceSeen(Base):
     )
     status = Column(String(32), nullable=False, server_default="online")
 
+
     # raw JSON sent by gateway
     raw_payload = Column(JSONB, nullable=True)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -480,6 +562,7 @@ class GatewayDeviceSeen(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
 
     __table_args__ = (
         UniqueConstraint(
@@ -492,7 +575,11 @@ class GatewayDeviceSeen(Base):
         Index("ix_gateway_device_seen_last_seen", "last_seen"),
     )
 
+
     device_registry = relationship("DeviceRegistry")
+
+
+
 
 
 
@@ -504,10 +591,13 @@ class GatewayDeviceSeen(Base):
 class ZHC1921Device(Base):
     __tablename__ = "zhc1921_devices"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # ✅ owner adds this (unique)
     device_id = Column(String(64), unique=True, nullable=False, index=True)
+
 
     # ✅ when owner authorized/added
     authorized_at = Column(
@@ -516,8 +606,10 @@ class ZHC1921Device(Base):
         nullable=False,
     )
 
+
     # ✅ when any user claims/uses it
     claimed_at = Column(DateTime(timezone=True), nullable=True)
+
 
     claimed_by_user_id = Column(
         Integer,
@@ -527,9 +619,11 @@ class ZHC1921Device(Base):
     )
     claimed_by_email = Column(String(120), nullable=True, index=True)
 
+
     # ✅ polled from Node-RED
     status = Column(String(32), nullable=False, server_default="offline")
     last_seen = Column(DateTime(timezone=True), nullable=True)
+
 
     # Digital Inputs (DI) ✅ ZHC1921 has 6 DI
     di1 = Column(Integer, nullable=False, server_default="0")
@@ -539,17 +633,20 @@ class ZHC1921Device(Base):
     di5 = Column(Integer, nullable=False, server_default="0")
     di6 = Column(Integer, nullable=False, server_default="0")
 
+
     # Digital Outputs (DO)
     do1 = Column(Integer, nullable=False, server_default="0")
     do2 = Column(Integer, nullable=False, server_default="0")
     do3 = Column(Integer, nullable=False, server_default="0")
     do4 = Column(Integer, nullable=False, server_default="0")
 
+
     # Analog Inputs (AI)
     ai1 = Column(Float, nullable=True)
     ai2 = Column(Float, nullable=True)
     ai3 = Column(Float, nullable=True)
     ai4 = Column(Float, nullable=True)
+
 
     updated_at = Column(
         DateTime(timezone=True),
@@ -558,7 +655,10 @@ class ZHC1921Device(Base):
         nullable=False,
     )
 
+
     claimed_by_user = relationship("User", back_populates="zhc1921_devices")
+
+
 
 
 # ===============================
@@ -569,10 +669,13 @@ class ZHC1921Device(Base):
 class ZHC1661Device(Base):
     __tablename__ = "zhc1661_devices"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # ✅ owner adds this (unique)
     device_id = Column(String(64), unique=True, nullable=False, index=True)
+
 
     # ✅ when owner authorized/added
     authorized_at = Column(
@@ -581,8 +684,10 @@ class ZHC1661Device(Base):
         nullable=False,
     )
 
+
     # ✅ when any user claims/uses it
     claimed_at = Column(DateTime(timezone=True), nullable=True)
+
 
     claimed_by_user_id = Column(
         Integer,
@@ -592,9 +697,11 @@ class ZHC1661Device(Base):
     )
     claimed_by_email = Column(String(120), nullable=True, index=True)
 
+
     # ✅ polled from Node-RED
     status = Column(String(32), nullable=False, server_default="offline")
     last_seen = Column(DateTime(timezone=True), nullable=True)
+
 
     # Analog Inputs (AI) - 4 channels
     ai1 = Column(Float, nullable=True)
@@ -602,9 +709,11 @@ class ZHC1661Device(Base):
     ai3 = Column(Float, nullable=True)
     ai4 = Column(Float, nullable=True)
 
+
     # Analog Outputs (AO) - 2 channels
     ao1 = Column(Float, nullable=True)
     ao2 = Column(Float, nullable=True)
+
 
     updated_at = Column(
         DateTime(timezone=True),
@@ -613,7 +722,10 @@ class ZHC1661Device(Base):
         nullable=False,
     )
 
+
     claimed_by_user = relationship("User", back_populates="zhc1661_devices")
+
+
 
 
 # ===============================
@@ -624,10 +736,13 @@ class ZHC1661Device(Base):
 class TP4000Device(Base):
     __tablename__ = "tp4000_devices"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # ✅ owner adds this (unique)
     device_id = Column(String(64), unique=True, nullable=False, index=True)
+
 
     # ✅ when owner authorized/added
     authorized_at = Column(
@@ -636,8 +751,10 @@ class TP4000Device(Base):
         nullable=False,
     )
 
+
     # ✅ when any user claims/uses it
     claimed_at = Column(DateTime(timezone=True), nullable=True)
+
 
     claimed_by_user_id = Column(
         Integer,
@@ -647,9 +764,11 @@ class TP4000Device(Base):
     )
     claimed_by_email = Column(String(120), nullable=True, index=True)
 
+
     # ✅ polled from Node-RED
     status = Column(String(32), nullable=False, server_default="offline")
     last_seen = Column(DateTime(timezone=True), nullable=True)
+
 
     # Temperature Elements (TE) - 8 channels
     te101 = Column(Float, nullable=True)
@@ -661,6 +780,7 @@ class TP4000Device(Base):
     te107 = Column(Float, nullable=True)
     te108 = Column(Float, nullable=True)
 
+
     updated_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -668,7 +788,42 @@ class TP4000Device(Base):
         nullable=False,
     )
 
+
     claimed_by_user = relationship("User", back_populates="tp4000_devices")
+
+
+
+
+
+
+# ===============================
+# ⚖️ WEIGHT SCALE SYSTEMS
+# One row = one weight reading
+# ===============================
+class WeightScaleSystem(Base):
+    __tablename__ = "weight_scale_systems"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    device_ip = Column(String(64), nullable=False, index=True)
+    device_port = Column(Integer, nullable=False, index=True)
+    weight = Column(Float, nullable=False)
+    unit = Column(String(20), nullable=False)
+    mode = Column(String(20), nullable=True)
+    timestamp = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_weight_scale_systems_device_time",
+            "device_ip",
+            "device_port",
+            "timestamp",
+        ),
+    )
 
 
 # ===============================
@@ -678,10 +833,13 @@ class TP4000Device(Base):
 class RadarLevelSensor(Base):
     __tablename__ = "radar_level_sensors_data"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # sensor IMEI / unique identifier
     raw_imei_bytes = Column(String(20), nullable=False, unique=True, index=True)
+
 
     # optional owner link
     user_id = Column(
@@ -691,26 +849,33 @@ class RadarLevelSensor(Base):
         index=True,
     )
 
+
     # when user claimed sensor
     user_claimed_at = Column(DateTime(timezone=True), nullable=True)
 
+
     # telemetry
     height_mm = Column(Integer, nullable=True)
+
 
     # Previous #1
     height_2_mm = Column(Integer, nullable=True)
     received_at_2 = Column(DateTime(timezone=True), nullable=True)
 
+
     # Previous #2
     height_3_mm = Column(Integer, nullable=True)
     received_at_3 = Column(DateTime(timezone=True), nullable=True)
+
 
     # Previous #3
     height_4_mm = Column(Integer, nullable=True)
     received_at_4 = Column(DateTime(timezone=True), nullable=True)
 
+
     temperature_c = Column(Numeric(5, 2), nullable=True)
     battery_v = Column(Numeric(5, 2), nullable=True)
+
 
     # timestamps
     sensor_added_at = Column(
@@ -719,6 +884,7 @@ class RadarLevelSensor(Base):
         nullable=False,
     )
 
+
     received_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -726,11 +892,13 @@ class RadarLevelSensor(Base):
         index=True,
     )
 
+
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
+
 
     updated_at = Column(
         DateTime(timezone=True),
@@ -739,14 +907,18 @@ class RadarLevelSensor(Base):
         nullable=False,
     )
 
+
     user = relationship("User")
-    
+
+
+
 
 # ===============================
 # 📊 MAIN DASHBOARD MODEL
 # ===============================
 class MainDashboard(Base):
     __tablename__ = "main_dashboard"
+
 
     # 🔑 One dashboard per user (for now)
     user_id = Column(
@@ -756,8 +928,10 @@ class MainDashboard(Base):
         index=True,
     )
 
+
     # 🧱 Full dashboard layout (React canvas state)
     layout = Column(JSONB, nullable=False)
+
 
     # 🕒 Auto-updated timestamp
     updated_at = Column(
@@ -765,6 +939,8 @@ class MainDashboard(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
 
 
 # ===============================
@@ -775,7 +951,9 @@ class MainDashboard(Base):
 class CustomerDashboard(Base):
     __tablename__ = "customers_dashboards"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # 🔑 owner user
     user_id = Column(
@@ -785,17 +963,22 @@ class CustomerDashboard(Base):
         index=True,
     )
 
+
     # customer label (for now store name; later migrate to customer_id)
     customer_name = Column(String(160), nullable=False, index=True)
+
 
     # dashboard display name
     dashboard_name = Column(String(160), nullable=False)
 
+
     # ✅ NEW: slug for pretty public URL
     dashboard_slug = Column(String(220), nullable=True, index=True)
 
+
     # ✅ NEW: unique public launch token
     public_launch_id = Column(String(64), nullable=True, unique=True, index=True)
+
 
     # ✅ NEW: whether public launch is enabled
     is_public_launch_enabled = Column(
@@ -804,8 +987,10 @@ class CustomerDashboard(Base):
         server_default=func.false(),
     )
 
+
     # 🧱 saved layout (same style as main dashboard)
     layout = Column(JSONB, nullable=False, default=dict)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -819,7 +1004,9 @@ class CustomerDashboard(Base):
         nullable=False,
     )
 
+
     user = relationship("User", back_populates="customer_dashboards")
+
 
     # ✅ NEW: dashboard can be assigned to many tenant users
     tenant_access_rows = relationship(
@@ -830,6 +1017,8 @@ class CustomerDashboard(Base):
     )
 
 
+
+
 # ===============================
 # 👥 TENANT USERS
 # Child users created by an admin/owner user
@@ -838,7 +1027,9 @@ class CustomerDashboard(Base):
 class TenantUser(Base):
     __tablename__ = "tenant_users"
 
+
     id = Column(BigInteger, primary_key=True, index=True)
+
 
     owner_user_id = Column(
         Integer,
@@ -847,18 +1038,22 @@ class TenantUser(Base):
         index=True,
     )
 
+
     customer_name = Column(String(160), nullable=False, index=True)
     full_name = Column(String(160), nullable=False)
     email = Column(String(255), nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
 
+
     # read | read_control
     access_level = Column(String(32), nullable=False, server_default="read")
+
 
     is_active = Column(Boolean, nullable=False, server_default=func.true())
     must_change_password = Column(
         Boolean, nullable=False, server_default=func.true()
     )
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -872,6 +1067,7 @@ class TenantUser(Base):
         nullable=False,
     )
 
+
     __table_args__ = (
         UniqueConstraint(
             "owner_user_id",
@@ -880,7 +1076,9 @@ class TenantUser(Base):
         ),
     )
 
+
     owner_user = relationship("User", back_populates="tenant_users")
+
 
     dashboard_access = relationship(
         "TenantUserDashboardAccess",
@@ -890,6 +1088,8 @@ class TenantUser(Base):
     )
 
 
+
+
 # ===============================
 # 🔐 TENANT USER DASHBOARD ACCESS
 # Which dashboards each tenant user can access
@@ -897,7 +1097,9 @@ class TenantUser(Base):
 class TenantUserDashboardAccess(Base):
     __tablename__ = "tenant_user_dashboard_access"
 
+
     id = Column(BigInteger, primary_key=True, index=True)
+
 
     tenant_user_id = Column(
         BigInteger,
@@ -906,6 +1108,7 @@ class TenantUserDashboardAccess(Base):
         index=True,
     )
 
+
     dashboard_id = Column(
         Integer,
         ForeignKey("customers_dashboards.id", ondelete="CASCADE"),
@@ -913,20 +1116,24 @@ class TenantUserDashboardAccess(Base):
         index=True,
     )
 
+
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
 
+
         # ✅ Active public dashboard session lock
     # Prevents the same tenant user from logging into the same dashboard twice
     active_session_id = Column(String(255), nullable=True, index=True)
+
 
     active_session_started_at = Column(
         DateTime(timezone=True),
         nullable=True,
     )
+
 
     active_session_last_seen_at = Column(
         DateTime(timezone=True),
@@ -934,7 +1141,9 @@ class TenantUserDashboardAccess(Base):
         index=True,
     )
 
+
     active_session_user_agent = Column(String(500), nullable=True)
+
 
     __table_args__ = (
         UniqueConstraint(
@@ -944,8 +1153,11 @@ class TenantUserDashboardAccess(Base):
         ),
     )
 
+
     tenant_user = relationship("TenantUser", back_populates="dashboard_access")
     dashboard = relationship("CustomerDashboard", back_populates="tenant_access_rows")
+
+
 
 
 # ===============================
@@ -958,7 +1170,9 @@ class TenantUserDashboardAccess(Base):
 class ControlBinding(Base):
     __tablename__ = "control_bindings"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     user_id = Column(
         Integer,
@@ -967,17 +1181,22 @@ class ControlBinding(Base):
         index=True,
     )
 
+
     dashboard_id = Column(String, nullable=False, index=True)
     # ✅ NEW: store dashboard display name so used-DO dropdowns can show
     # the dashboard NAME instead of only dashboard_id / numeric id
     dashboard_name = Column(String(160), nullable=True)
 
+
     widget_id = Column(String, nullable=False, index=True)
+
 
     # ✅ "toggle" | "push_no" | "push_nc" (future: selector, interlock, etc.)
     widget_type = Column(String, nullable=False, index=True)
 
+
     title = Column(String, nullable=True)
+
 
     bind_device_id = Column(String, nullable=True, index=True)
     bind_field = Column(String, nullable=True, index=True)  # do1..do4
@@ -998,19 +1217,23 @@ class ControlBinding(Base):
         server_default="block_when_active",
     )
 
+
     # 🔐 Control PIN protection
     # PIN is never stored in plaintext.
     pin_required = Column(Boolean, nullable=False, server_default=func.false())
     pin_hash = Column(String(255), nullable=True)
 
+
     created_at = Column(
     DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
 
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
 
     __table_args__ = (
         UniqueConstraint(
@@ -1028,7 +1251,10 @@ class ControlBinding(Base):
         ),
     )
 
+
     user = relationship("User", back_populates="control_bindings")
+
+
 
 
 # ===============================
@@ -1039,21 +1265,28 @@ class ControlBinding(Base):
 class ControlActionLock(Base):
     __tablename__ = "control_action_locks"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # Unique lock key: "dev:<device_id>:<do1..do4>"
     lock_key = Column(String(200), nullable=False, unique=True, index=True)
 
+
     device_id = Column(String(80), nullable=False, index=True)
     field = Column(String(10), nullable=False, index=True)  # do1..do4
 
+
     # who triggered the lock (optional but useful)
     user_id = Column(Integer, nullable=True, index=True)
+
 
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
 
 
 # ===============================
@@ -1063,7 +1296,9 @@ class ControlActionLock(Base):
 class GraphicDisplayBinding(Base):
     __tablename__ = "graphic_display_bindings"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # who / where
     user_id = Column(
@@ -1071,6 +1306,7 @@ class GraphicDisplayBinding(Base):
     )
     dashboard_id = Column(String, nullable=False, index=True, server_default="main")
     widget_id = Column(String, nullable=False, index=True)
+
 
     # binding
     bind_model = Column(
@@ -1080,6 +1316,7 @@ class GraphicDisplayBinding(Base):
     bind_field = Column(
         String, nullable=False, server_default="ai1"
     )  # ai1/ai2/ai3/ai4...
+
 
     # display settings
     title = Column(String, nullable=False, server_default="Graphic Display")
@@ -1091,28 +1328,35 @@ class GraphicDisplayBinding(Base):
     line_color = Column(String, nullable=False, server_default="#0c5ac8")
     graph_style = Column(String, nullable=False, server_default="line")
 
+
     # math
     math_formula = Column(String, nullable=False, server_default="")
+
 
     # totalizer
     totalizer_enabled = Column(Boolean, nullable=False, server_default=func.false())
     totalizer_unit = Column(String, nullable=False, server_default="")
 
+
     # single units
     single_units_enabled = Column(Boolean, nullable=False, server_default=func.false())
     single_unit = Column(String, nullable=False, server_default="")
 
+
     # retention
     retention_days = Column(Integer, nullable=False, server_default="35")
+
 
     # soft control
     is_enabled = Column(Boolean, nullable=False, server_default=func.true())
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at = Column(DateTime(timezone=True), nullable=True)
+
 
     __table_args__ = (
         UniqueConstraint(
@@ -1123,7 +1367,10 @@ class GraphicDisplayBinding(Base):
         ),
     )
 
+
     user = relationship("User", back_populates="graphic_display_bindings")
+
+
 
 
 # ===============================
@@ -1133,7 +1380,9 @@ class GraphicDisplayBinding(Base):
 class AlarmLogWindow(Base):
     __tablename__ = "alarm_log_windows"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     user_id = Column(
         Integer,
@@ -1142,14 +1391,17 @@ class AlarmLogWindow(Base):
         index=True,
     )
 
+
     dashboard_id = Column(
         String(255), nullable=False, server_default="main", index=True
     )
+
 
     # ✅ NEW: store dashboard display name
     dashboard_name = Column(
         String(255), nullable=True, server_default="Main Dashboard"
     )
+
 
     window_key = Column(
         String(100), nullable=False, server_default="alarmLog", index=True
@@ -1158,14 +1410,17 @@ class AlarmLogWindow(Base):
         String(255), nullable=False, server_default="Alarms Log (DI-AI)"
     )
 
+
     pos_x = Column(Integer, nullable=False, server_default="140")
     pos_y = Column(Integer, nullable=False, server_default="90")
     width = Column(Integer, nullable=False, server_default="900")
     height = Column(Integer, nullable=False, server_default="420")
 
+
     is_open = Column(Boolean, nullable=False, server_default=func.true())
     is_minimized = Column(Boolean, nullable=False, server_default=func.false())
     is_launched = Column(Boolean, nullable=False, server_default=func.false())
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -1179,6 +1434,7 @@ class AlarmLogWindow(Base):
         nullable=False,
     )
 
+
     __table_args__ = (
         UniqueConstraint(
             "user_id",
@@ -1188,7 +1444,10 @@ class AlarmLogWindow(Base):
         ),
     )
 
+
     user = relationship("User", back_populates="alarm_log_windows")
+
+
 
 
 # ===============================
@@ -1199,7 +1458,9 @@ class AlarmLogWindow(Base):
 class AlarmDefinition(Base):
     __tablename__ = "alarm_definitions"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     # owner of the alarm
     user_id = Column(
@@ -1209,25 +1470,32 @@ class AlarmDefinition(Base):
         index=True,
     )
 
+
     # device information
     device_id = Column(String(255), nullable=False, index=True)
     model = Column(String(120), nullable=True)
 
+
     # tag that triggers alarm
     tag = Column(String(120), nullable=False, index=True)
+
 
     # DI or AI
     alarm_type = Column(String(20), nullable=False)
 
+
     # ✅ for DI alarms
     contact_type = Column(String(5), nullable=True)
+
 
     # for AI alarms
     operator = Column(String(10), nullable=True)
     threshold = Column(Float, nullable=True)
 
+
     # optional math formula
     math_formula = Column(String, nullable=True)
+
 
     # ==========================================
     # 🔥 CRITICAL FIX: Alarm Log Isolation
@@ -1241,21 +1509,26 @@ class AlarmDefinition(Base):
         server_default="alarmLog",
     )
 
+
     # grouping / severity
     group_name = Column(String(120), nullable=True)
     severity = Column(String(50), nullable=True)
 
+
     # alarm message
     message = Column(String, nullable=False)
 
+
     # enable / disable
     enabled = Column(Boolean, nullable=False, server_default=func.true())
+
 
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
+
 
     updated_at = Column(
         DateTime(timezone=True),
@@ -1264,10 +1537,12 @@ class AlarmDefinition(Base):
         nullable=False,
     )
 
+
     # ==========================================
     # 🔥 OPTIONAL (GOOD PRACTICE)
     # ==========================================
     user = relationship("User")
+
 
     # ==========================================
     # 🔥 PERFORMANCE + DATA INTEGRITY
@@ -1282,13 +1557,16 @@ class AlarmDefinition(Base):
         ),
     )
 
+
 # ===============================
 # 💳 USER SUBSCRIPTIONS
 # ===============================
 class UserSubscription(Base):
     __tablename__ = "user_subscriptions"
 
+
     id = Column(BigInteger, primary_key=True, index=True)
+
 
     user_id = Column(
         Integer,
@@ -1298,14 +1576,18 @@ class UserSubscription(Base):
         unique=True,
     )
 
+
     plan_key = Column(String(50), nullable=False, server_default="free")
     device_limit = Column(Integer, nullable=False, server_default="1")
     tenants_users_limit = Column(Integer, nullable=False, server_default="1")
 
+
     active_date = Column(DateTime(timezone=True), nullable=True)
     renewal_date = Column(DateTime(timezone=True), nullable=True)
 
+
     is_active = Column(Boolean, nullable=False, server_default=func.true())
+
 
     # ✅ STRIPE MONTHLY SUBSCRIPTION FIELDS
     stripe_customer_id = Column(String(255), nullable=True, index=True)
@@ -1317,6 +1599,7 @@ class UserSubscription(Base):
     current_period_end = Column(DateTime(timezone=True), nullable=True)
     last_invoice_id = Column(String(255), nullable=True)
     last_payment_at = Column(DateTime(timezone=True), nullable=True)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -1330,7 +1613,9 @@ class UserSubscription(Base):
         nullable=False,
     )
 
+
     user = relationship("User")
+
 
 # ===============================
 # 🔐 USER ACTIVE SESSIONS
@@ -1341,7 +1626,9 @@ class UserSubscription(Base):
 class UserActiveSession(Base):
     __tablename__ = "user_active_sessions"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     user_id = Column(
         Integer,
@@ -1350,10 +1637,13 @@ class UserActiveSession(Base):
         index=True,
     )
 
+
     browser_device_key = Column(String(255), nullable=False, index=True)
     session_token = Column(String(255), nullable=False, unique=True, index=True)
 
+
     is_active = Column(Boolean, nullable=False, server_default=func.true())
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -1371,15 +1661,20 @@ class UserActiveSession(Base):
         nullable=True,
     )
 
+
     ip_address = Column(String(100), nullable=True)
     user_agent = Column(String, nullable=True)
 
+
     user = relationship("User")
+
 
     __table_args__ = (
         Index("ix_user_active_sessions_user_active", "user_id", "is_active"),
         Index("ix_user_active_sessions_user_last_seen", "user_id", "last_seen_at"),
     )
+
+
 
 
 # ===============================
@@ -1388,26 +1683,35 @@ class UserActiveSession(Base):
 class BillingPlan(Base):
     __tablename__ = "billing_plans"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     plan_key = Column(String(50), nullable=False, index=True)
     plan_name = Column(String(100), nullable=False)
 
+
     billing_type = Column(String(20), nullable=False, index=True)
+
 
     price_usd = Column(Float, nullable=False)
     currency = Column(String(10), nullable=False, server_default="usd")
 
+
     stripe_product_id = Column(String(100), nullable=True)
     stripe_price_id = Column(String(100), nullable=True)
+
 
     device_limit = Column(Integer, nullable=True)
     tenant_user_limit = Column(Integer, nullable=True)
     data_history_days = Column(Integer, nullable=True)
 
+
     sort_order = Column(Integer, nullable=False, server_default="0")
 
+
     is_active = Column(Boolean, nullable=False, server_default=func.true())
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -1421,10 +1725,13 @@ class BillingPlan(Base):
         nullable=False,
     )
 
+
     __table_args__ = (
         UniqueConstraint("plan_key", "billing_type", name="unique_plan_billing"),
         Index("idx_billing_plans_lookup", "plan_key", "billing_type", "is_active"),
     )
+
+
 
 
 # ===============================
@@ -1433,18 +1740,24 @@ class BillingPlan(Base):
 class BillingAddon(Base):
     __tablename__ = "billing_addons"
 
+
     id = Column(Integer, primary_key=True, index=True)
+
 
     addon_key = Column(String(50), nullable=False, index=True)
     billing_type = Column(String(20), nullable=False, index=True)
 
+
     price_usd = Column(Float, nullable=False)
     currency = Column(String(10), nullable=False, server_default="usd")
+
 
     stripe_product_id = Column(String(100), nullable=True)
     stripe_price_id = Column(String(100), nullable=True)
 
+
     is_active = Column(Boolean, nullable=False, server_default=func.true())
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -1458,9 +1771,12 @@ class BillingAddon(Base):
         nullable=False,
     )
 
+
     __table_args__ = (
         UniqueConstraint("addon_key", "billing_type", name="unique_addon_billing"),
     )
+
+
 
 
 # ===============================
@@ -1473,7 +1789,9 @@ class BillingAddon(Base):
 class SubscriptionAgreementAcceptance(Base):
     __tablename__ = "subscription_agreement_acceptances"
 
+
     id = Column(BigInteger, primary_key=True, index=True)
+
 
     user_id = Column(
         Integer,
@@ -1482,9 +1800,11 @@ class SubscriptionAgreementAcceptance(Base):
         index=True,
     )
 
+
     plan_key = Column(String(50), nullable=False, index=True)
     billing_type = Column(String(20), nullable=False, index=True)
     agreement_version = Column(String(20), nullable=False, server_default="v1")
+
 
     confirmed = Column(Boolean, nullable=False, server_default=func.true())
     confirmed_at = Column(
@@ -1493,11 +1813,14 @@ class SubscriptionAgreementAcceptance(Base):
         nullable=False,
     )
 
+
     checkout_session_id = Column(String(255), nullable=True, index=True)
     payment_intent_id = Column(String(255), nullable=True, index=True)
 
+
     ip_address = Column(String(100), nullable=True)
     user_agent = Column(String, nullable=True)
+
 
     created_at = Column(
         DateTime(timezone=True),
@@ -1505,11 +1828,15 @@ class SubscriptionAgreementAcceptance(Base):
         nullable=False,
     )
 
+
     user = relationship("User")
+
+
 
 
 class OneTimePaymentHistory(Base):
     __tablename__ = "one_time_payment_history"
+
 
     id = Column(BigInteger, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False)
