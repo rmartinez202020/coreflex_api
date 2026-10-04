@@ -14,7 +14,7 @@ router = APIRouter(
 )
 # Only these users are allowed to read weight-scale data.
 AUTHORIZED_EMAILS = {
-    "roquemartinez@gmail.com",
+    "roquemartinezpolanco@gmail.com",
     "roquemartinez_8@hotmail.com",
 }
 # Historical snapshot interval.
