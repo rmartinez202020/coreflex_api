@@ -86,30 +86,20 @@ app = FastAPI(title="CoreFlex API", version="1.0.0")
 
 ALLOWED_ORIGINS = [
 
-    "https://www\.coreflexiiotsplatform.com",
-
+    "https://www.coreflexiiotsplatform.com",
     "https://coreflexiiotsplatform.com",
-
-    "http://www\.coreflexiiotsplatform.com",
-
+    "http://www.coreflexiiotsplatform.com",
     "http://coreflexiiotsplatform.com",
 
-    "https://www\.coreflexiotsplatform.com",
-
+    "https://www.coreflexiotsplatform.com",
     "https://coreflexiotsplatform.com",
-
-    "http://www\.coreflexiotsplatform.com",
-
+    "http://www.coreflexiotsplatform.com",
     "http://coreflexiotsplatform.com",
 
     "http://localhost:5173",
-
     "http://127.0.0.1:5173",
-
     "http://localhost:3000",
-
     "http://127.0.0.1:3000",
-
 ]
 
 
