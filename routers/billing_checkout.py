@@ -555,7 +555,6 @@ def create_checkout_session(
             "success_url": STRIPE_CHECKOUT_SUCCESS_URL,
             "cancel_url": STRIPE_CHECKOUT_CANCEL_URL,
             "client_reference_id": client_reference_id,
-            "payment_method_types": ["card"],
             "line_items": line_items,
             "metadata": ctx["metadata"],
         }
